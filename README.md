@@ -89,3 +89,20 @@ src/
   pages/             首页 / 播放 / 历史 / 片单 / 下载 / 会话
 scripts/deploy.sh    构建并推送 gh-pages
 ```
+
+## 集数一致性核验（重要）
+
+「第 N 集」必须对上原站的第 N 集，做法有三道保险：
+
+1. **同一份分集列表**：分集来自原站 `GET /v1/catalog/<id>/episodes?limit=48&offset=N`，按返回顺序写入 `episodes.idx`，
+   点击第 N 个按钮 → `/api/play?ep=idx` → 只解析这一行的 `token`；
+2. **令牌级比对**：`node tmp_token_audit.js <showId> 2,19`（本仓库外的工作脚本）会打开原站播放页点同名按钮，
+   把原站实际用的 token 和本地库里 `number=N` 的 token 做 SHA-256 前缀比对，实测《谷雨》第 2 / 19 集 MATCH；
+3. **运行时校验**：`server/proxy.mjs` 的 `playUrl()` 在解析后比对
+   `current_episode.episode_number` 与库内 `number`，不一致直接报「集数不一致：请求第N集，原站返回第M集」，绝不串播。
+
+另外：多季综艺/剧集的原站编号会从 1 重新开始，导出时若发现编号不连续 `seqOk=false`，
+就改按列表顺序编号（`第1集…`），保证"点的第几集就是列表第几项"。
+
+会员限制：原站大量剧集的最新若干集返回 `401 playback_user_session_required`，
+匿名拿不到地址，页面会显示「这一集在原站是会员片源」，标着「可播放」的片子可以直接看。
