@@ -1,0 +1,51 @@
+// Small stroke icon set drawn by hand (24x24 viewBox, currentColor).
+const P = {
+  menu: '<path d="M4 7h16M4 12h16M4 17h16"/>',
+  menuSquare: '<path d="M5 8h14M5 12h14M5 16h9"/>',
+  sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M19.1 4.9l-1.4 1.4M6.3 17.7l-1.4 1.4"/>',
+  moon: '<path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z"/>',
+  history: '<path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 4v4h4"/><path d="M12 8v4l3 2"/>',
+  bookmark: '<path d="M6 4h12v17l-6-4.5L6 21z"/>',
+  download: '<path d="M12 3v12"/><path d="M7 11l5 5 5-5"/><path d="M4 21h16"/>',
+  qr: '<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M14 14h3v3h-3zM20 14v7h-7"/>',
+  bell: '<path d="M18 9a6 6 0 1 0-12 0c0 5-2 6-2 6h16s-2-1-2-6"/><path d="M10.5 20a2 2 0 0 0 3 0"/>',
+  share: '<path d="M4 12v7a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-7"/><path d="M12 16V4"/><path d="M8 8l4-4 4 4"/>',
+  settings: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-2.9 1.2V21a2 2 0 1 1-4 0v-.1A1.7 1.7 0 0 0 7 19.4l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1A1.7 1.7 0 0 0 3 13.7H3a2 2 0 1 1 0-4h.1A1.7 1.7 0 0 0 4.6 7l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3H9.4A1.7 1.7 0 0 0 10.3 3V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 2.9 1.2l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9v.1a1.7 1.7 0 0 0 1.6 1h.1a2 2 0 1 1 0 4H21a1.7 1.7 0 0 0-1.6 1z"/>',
+  plus: '<path d="M12 5v14M5 12h14"/>',
+  mic: '<rect x="9" y="3" width="6" height="10" rx="3"/><path d="M5 11a7 7 0 0 0 14 0"/><path d="M12 18v3"/>',
+  send: '<path d="M3.5 11.5 20 4l-6.4 16.4-2.8-6.5z"/><path d="M10.8 13.9 20 4"/>',
+  bolt: '<path d="M13 2 5 14h6l-1 8 8-12h-6z"/>',
+  sparkle: '<path d="M12 3l1.6 5.4L19 10l-5.4 1.6L12 17l-1.6-5.4L5 10l5.4-1.6z"/><path d="M18.5 15.5l.7 2.3 2.3.7-2.3.7-.7 2.3-.7-2.3-2.3-.7 2.3-.7z"/>',
+  calendar: '<rect x="3" y="5" width="18" height="16" rx="3"/><path d="M8 3v4M16 3v4M3 10h18"/><path d="M8 14h2M14 14h2M8 17.5h2"/>',
+  chevronLeft: '<path d="M15 5l-6 7 6 7"/>',
+  chevronRight: '<path d="M9 5l6 7-6 7"/>',
+  chevronDown: '<path d="M6 9l6 6 6-6"/>',
+  arrowLeft: '<path d="M20 12H4"/><path d="M10 6l-6 6 6 6"/>',
+  search: '<circle cx="11" cy="11" r="7"/><path d="M16.5 16.5 21 21"/>',
+  play: '<path d="M7 4.5v15l12-7.5z"/>',
+  user: '<circle cx="12" cy="8" r="4"/><path d="M4.5 21a7.5 7.5 0 0 1 15 0"/>',
+  login: '<path d="M14 3h5a1 1 0 0 1 1 1v16a1 1 0 0 1-1 1h-5"/><path d="M10 8l-4 4 4 4"/><path d="M6 12h10"/>',
+  tv: '<rect x="2.5" y="6" width="19" height="13" rx="3"/><path d="M8 2.8 12 6l4-3.2"/>',
+  apple: '<path d="M16 3c-1.6.2-2.8 1.3-3.3 2.6-.5 1.2-.4 2.4.4 3.1.8.6 2 .7 3 .2.7-.3 1.3-.9 1.6-1.7-1.4-.6-2.3-2-1.7-4.2z"/><path d="M12.6 8.9c-1.9-.1-3.6 1-4.6 2.8-1.2 2.3-.7 6.2 1.3 8.4.9 1 1.9 1.4 2.9 1 1-.4 1.5-.9 2.4-.9s1.4.5 2.4.9c1 .4 2 0 2.9-1 2-2.2 2.5-6.1 1.3-8.4-1-1.8-2.7-2.9-4.6-2.8a5 5 0 0 0-2 .5c-.7.3-1.2.4-1.6.1z"/>',
+  monitor: '<rect x="2.5" y="4" width="19" height="12" rx="2.5"/><path d="M8 20h8M12 16v4"/>',
+  phone: '<rect x="6.5" y="2.5" width="11" height="19" rx="2.5"/><path d="M10.5 5.5h3"/>',
+  check: '<path d="M5 12.5l4.5 4.5L19 7"/>',
+  close: '<path d="M6 6l12 12M18 6 6 18"/>',
+  heart: '<path d="M12 20s-7.5-4.6-7.5-9.6A4.4 4.4 0 0 1 12 7a4.4 4.4 0 0 1 7.5 3.4C19.5 15.4 12 20 12 20z"/>',
+  film: '<rect x="3" y="4" width="18" height="16" rx="2.5"/><path d="M8 4v16M16 4v16M3 12h18M3 8h5M3 16h5M16 8h5M16 16h5"/>',
+  clock: '<circle cx="12" cy="12" r="8.5"/><path d="M12 7v5l3.5 2"/>',
+  list: '<path d="M8 6h12M8 12h12M8 18h12"/><circle cx="3.5" cy="6" r="1"/><circle cx="3.5" cy="12" r="1"/><circle cx="3.5" cy="18" r="1"/>',
+  chat: '<path d="M4 5.5h16v11H9l-5 4z"/>',
+  external: '<path d="M14 4h6v6"/><path d="M20 4 11 13"/><path d="M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/>',
+  info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7.5v.5"/>',
+  swap: '<path d="M4 8h13l-3-3M20 16H7l3 3"/>',
+  grid: '<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/>',
+  loginArrow: '<path d="M13 4h5a1 1 0 0 1 1 1v14a1 1 0 0 1-1 1h-5"/><path d="M9 8l-4 4 4 4"/><path d="M5 12h9"/>',
+}
+
+export function icon(name, size = 16, cls = '') {
+  const body = P[name] || P.info
+  return `<svg class="i ${cls}" viewBox="0 0 24 24" width="${size}" height="${size}" fill="${
+    name === 'play' || name === 'bolt' ? 'currentColor' : 'none'
+  }" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${body}</svg>`
+}
