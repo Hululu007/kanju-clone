@@ -216,8 +216,8 @@ export function shell({ body, active = 'home', sidebarActive = 'history', head =
 
 /* ---------- shared bits ---------- */
 
-// A drawn poster placeholder: a lit scene, figures and a soft bottom shade, in film tones.
-export function posterSrc(show, w = 300, h = 450, thumb = false) {
+// Drawn fallback artwork (used only when a show has no real poster).
+export function posterSVG(show, w = 300, h = 450, thumb = false) {
   const hue = show.hue
   const h2 = (hue + 34) % 360
   const s = show.seed
@@ -285,12 +285,18 @@ ${small ? `<text x="${w * 0.5}" y="${h * 0.58}" font-size="${w * 0.12}" font-wei
   return 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg)
 }
 
+// Real cover from the catalogue when available; otherwise the drawn placeholder.
+export function posterSrc(show, w = 300, h = 450, thumb = false) {
+  return show?.poster || posterSVG(show, w, h, thumb)
+}
+
 export function posterArt(show, cls = '') {
   const thumb = cls === 'thumb'
-  // the cards already print the title, so the artwork itself stays textless
-  return `<img class="poster ${cls}" src="${posterSrc(show, thumb ? 120 : 300, thumb ? 184 : 450, true)}" alt="" width="${
-    thumb ? 42 : 185
-  }" height="${thumb ? 64 : 279}" loading="lazy" decoding="async" />`
+  const fb = posterSVG(show, thumb ? 120 : 300, thumb ? 184 : 450, true)
+  const src = posterSrc(show, thumb ? 120 : 300, thumb ? 184 : 450, true)
+  return `<img class="poster ${cls}" src="${src}" data-fb="${encodeURIComponent(fb)}"
+    onerror="this.onerror=null;this.src=decodeURIComponent(this.dataset.fb)" alt=""
+    width="${thumb ? 42 : 185}" height="${thumb ? 64 : 279}" loading="lazy" decoding="async" />`
 }
 
 const shortBadge = (b) => b.replace(/更新至第(\d+)集/, '更新至$1集')
@@ -302,9 +308,10 @@ export function posterCard(show, { badge, heat } = {}) {
       ${posterArt(show)}
       <span class="p-badge${/(抢鲜|特别)/.test(badge || show.badge) ? ' gold' : ''}">${text}</span>
       <span class="p-heat">${heat || show.heat}</span>
+      ${show.vip ? '<span class="p-vip">会员</span>' : ''}
       <span class="p-shade"></span>
       <h3 class="p-title">${show.title}</h3>
-      <p class="p-meta">${show.year} · ${show.genres.join(' / ')}</p>
+      <p class="p-meta">${show.year || '—'} · ${show.area || '美国'} · ${show.genres.slice(0, 2).join(' / ')}</p>
     </a>
   </article>`
 }

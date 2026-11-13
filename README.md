@@ -1,73 +1,91 @@
-# 看剧AI 风格影视目录站（复刻版）
+# 看剧 AI · 站点复刻（kanju32 前端 + 自建片库）
 
-这是一个用 [Craft Anything](https://github.com/storytold/craft-anything) 对照参考站点
-（kanju32.com）复刻出来的**纯前端影视目录界面**，用于个人浏览与学习前端实现。
+复刻 [kanju32.com](https://kanju32.com/) 的界面与信息架构，并把「后端影视数据库」这一层自己补齐：
+片库元数据来自原站公开接口（通过逆向还原的签名算法访问），播放线路在播放时现场解析。
 
-## 说明
+- 站点（GitHub Pages）：https://kenzhao11.github.io/kanju-clone/
+- 源码（本仓库）：静态前端 + 采集/解析工具链
 
-- **纯静态前端**：只用 Vite 打包，没有后端、没有数据库、没有播放能力。
-- **示例数据**：`src/data.js` 里是手写的示例片单（标题、分类、题材、年份、更新角标），
-  **不包含任何真实片源、播放地址或抓取内容**。
-- **海报是自绘 SVG**：没有复制原站图片资源，卡片封面用渐变+光斑占位，
-  需要真图时可以把 `src/shell.js` 的 `posterSrc()` 换成自己的图片地址。
-- 播放页只有播放器占位框与剧集列表，点击"播放"不会有视频。
+> 说明：本站只保存片名、简介、海报地址等元数据，不存放、不转存任何视频文件；
+> 播放时由本地片源服务向线上线路换取一次性直链。
+> 片库里有一部分是原站的会员片源（匿名取不到地址），这些条目卡片上会标「需会员」，
+> 首页另有「打开就能播」一栏只放免登录可取的片子。仅供个人学习与测试使用。
 
-## 功能
+## 两个部分
 
-| 页面 | 路径 | 内容 |
+| 部分 | 作用 | 部署 |
 | --- | --- | --- |
-| 首页 | `/` | 居中 LOGO、AI 搜索框（快速/智能）、本周追剧周历、四栏分类、海报横轨 |
-| 片单 | `/playlists/` | 片单卡片列表 |
-| 播放历史 | `/library/history/` | 历史空状态 / 列表 |
-| 会话记录 | `/library/sessions/` | 会话空状态 |
-| 应用下载 | `/download/` | 下载页 |
-| 播放页 | `/player/?id=xxx` | 简介、剧集列表、播放器占位 |
+| 前端站点 `src/` + `dist/` | 首页、分类、搜索、详情、播放器、历史、片单 | GitHub Pages（纯静态） |
+| 片源服务 `server/proxy.mjs` | 现场解析某一集的播放直链、读写播放进度 | 本机 `node server/proxy.mjs` |
 
-交互：关键词搜索过滤、分类切换、周历按日期筛片、海报轨横向滚动、
-侧栏历史/收藏切换、主题切换（深色/浅色）、分享、Toast 提示；
-响应式：1440 / 768 / 390 三档，窄屏切换为顶部栏 + 底部标签栏。
+静态站点里的直链会过期，所以播放时前端会先问本地片源服务要一条新直链；
+片源服务没启动时退回打包进站点的缓存直链。
 
-## 本地开发
+## 快速开始
 
 ```bash
 npm install
-npm run dev      # 开发预览
-npm run build    # 产出 dist/
-npm run preview  # 预览构建结果
+
+# 1) 采集片库（写入 server/data/kanju.db）
+npm run crawl              # 可加 LIMIT=500 CONCURRENCY=6 控制规模
+
+# 2) 摸一遍哪些片子是公开可播的（有些是原站会员片）
+npm run resolve
+
+# 3) 导出成前端数据
+npm run export             # 生成 src/catalog.gen.js
+
+# 4) 起片源服务（另开一个终端常驻）
+npm run proxy              # http://127.0.0.1:8899
+
+# 5) 本地看效果
+npm run dev                # http://localhost:5173
 ```
 
-部署到子路径（如 GitHub Pages 的项目页）时指定 base：
+想换片源服务地址：在浏览器控制台执行
+`localStorage.setItem('kj-proxy', 'http://你的地址:8899')`，或在构建时设 `VITE_PROXY_BASE`。
+
+## 部署到 GitHub Pages
 
 ```bash
-BASE_PATH=/kanju-clone/ npm run build
+bash scripts/deploy.sh     # 构建 dist 并推到 gh-pages 分支
 ```
 
-## 部署（GitHub Pages）
+Pages 已指向 `gh-pages` 分支根目录，推送后一两分钟生效。
 
-站点通过 `gh-pages` 分支发布：
+## 接口一览
 
-```bash
-BASE_PATH=/kanju-clone/ npm run build
-# 把 dist/ 推送到 gh-pages 分支即可
-```
+片源服务（本机 8899，CORS 全开）：
+
+| 路径 | 说明 |
+| --- | --- |
+| `GET /api/health` | 服务状态与库内数量 |
+| `GET /api/list?cat=tv&q=&page=1&limit=24` | 分类/搜索列表 |
+| `GET /api/show?id=av_xxx` | 详情 + 分集（不含直链） |
+| `GET /api/play?show=av_xxx&ep=0` | 现场解析该集直链（90 秒缓存） |
+| `GET/POST /api/progress` | 播放进度读写 |
+
+原站契约（`server/kanju-client.mjs` 已封装）：
+
+- 签名：`HMAC-SHA256(secret, METHOD\npath?query\ntimestamp\nnonce)`，写在 `x-ai-movie-*` 头里
+- `GET /v1/runtime/bootstrap`、`/v1/announcements/manifest`、`/v1/feed/home`
+- `GET /v1/browse/catalog?scope=public&sort=heat_desc&limit=20&kind=series&page=N`
+- `GET /v1/catalog/:id`、`GET /v1/catalog/:id/episodes?limit=48&offset=0`
+- `GET /v1/playback/resolve/:episode_token?view=compact` → `line_options[].url = resolve://<ticket>`
+- `POST /v1/playback/resolve-line {ticket}` → `line.url`（一次性 CDN 直链）
 
 ## 目录结构
 
 ```
-index.html                 # 首页入口
-playlists/ download/ player/  # 其余页面入口
-library/history/ library/sessions/
+server/
+  kanju-client.mjs   签名 + 请求封装（限速、重试）
+  kanju-crawl.mjs    采集：目录分页 → 详情 → 分集 → 可选解析直链
+  kanju-resolve.mjs  逐片试播，标出「公开可播 / 需会员」
+  kanju-export.mjs   SQLite → src/catalog.gen.js
+  proxy.mjs          片源服务（现场解析直链）
 src/
-  base.js                  # BASE_PATH 前缀工具（子路径部署用）
-  data.js                  # 示例片单数据
-  icons.js                 # 内联 SVG 图标
-  shell.js                 # 布局外壳：侧栏 / 导航 / 海报卡 / Toast
-  styles.css               # 全部样式（深色 + 浅色主题、响应式）
-  pages/                   # 每个页面的渲染逻辑
-vite.config.js             # 多页入口 + base 配置
+  data.js            片库数据层（分类、周历、榜单、搜索）
+  runtime.js         片源服务探测与现场解析
+  pages/             首页 / 播放 / 历史 / 片单 / 下载 / 会话
+scripts/deploy.sh    构建并推送 gh-pages
 ```
-
-## 声明
-
-界面布局参考自公开可访问的参考站点，仅作前端实现练习；
-站名、片名等文字仅用于界面占位，与任何片方、平台无关联。

@@ -4,8 +4,14 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
+    "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "crawl": "node server/kanju-crawl.mjs",
+    "export": "node server/kanju-export.mjs",
+    "proxy": "node server/proxy.mjs",
+    "deploy": "bash scripts/deploy.sh",
+    "resolve": "node server/kanju-resolve.mjs"
   },
   "devDependencies": {
     "vite": "^5.4.10"

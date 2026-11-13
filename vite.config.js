@@ -9,6 +9,11 @@ export default defineConfig({
   build: {
     outDir: 'dist',
     emptyOutDir: true,
+    // 这台机器的沙箱不允许删除系统 Temp 目录里的文件，esbuild 的
+    // transpile/minify 会因此报 "Access is denied"，改为走 rollup 原生输出。
+    target: 'esnext',
+    minify: false,
+    cssMinify: false,
     rollupOptions: {
       input: {
         home: resolve(__dirname, 'index.html'),

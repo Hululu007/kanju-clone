@@ -1,0 +1,15 @@
+name = "kanju-api"
+main = "src/index.js"
+compatibility_date = "2025-01-01"
+
+# D1 数据库绑定。首次部署前需要：
+#   npx wrangler d1 create kanju-catalog      → 把返回的 database_id 填到下面
+#   npx wrangler d1 execute kanju-catalog --remote --file=seed.sql
+[[d1_databases]]
+binding = "DB"
+database_name = "kanju-catalog"
+database_id = "00000000-0000-0000-0000-000000000000"
+
+[vars]
+# 允许访问 API 的前端来源（逗号分隔），* 表示全部放开
+ALLOW_ORIGIN = "*"
