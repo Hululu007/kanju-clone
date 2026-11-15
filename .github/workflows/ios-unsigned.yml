@@ -1,0 +1,68 @@
+name: Build unsigned iOS IPA
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'ios/**'
+      - '.github/workflows/ios-unsigned.yml'
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        working-directory: ios
+        run: xcodegen generate
+
+      - name: Build Release for device
+        working-directory: ios
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project ZhuijuAI.xcodeproj \
+            -scheme ZhuijuAI \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build | tee xcodebuild.log
+
+      - name: Package unsigned IPA
+        working-directory: ios
+        run: |
+          set -euo pipefail
+          APP="build/Build/Products/Release-iphoneos/ZhuijuAI.app"
+          test -d "$APP"
+          rm -rf Payload ZhuijuAI-unsigned.ipa ZhuijuAI-unsigned.ipa.sha256
+          mkdir Payload
+          cp -R "$APP" Payload/
+          /usr/bin/zip -qry ZhuijuAI-unsigned.ipa Payload
+          shasum -a 256 ZhuijuAI-unsigned.ipa | tee ZhuijuAI-unsigned.ipa.sha256
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: ZhuijuAI-unsigned-ipa
+          path: |
+            ios/ZhuijuAI-unsigned.ipa
+            ios/ZhuijuAI-unsigned.ipa.sha256
+          retention-days: 14
+
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ZhuijuAI-xcodebuild-log
+          path: ios/xcodebuild.log
+          retention-days: 7

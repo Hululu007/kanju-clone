@@ -1,0 +1,5 @@
+build/
+ZhuijuAI.xcodeproj/
+*.ipa
+*.ipa.sha256
+xcodebuild.log
