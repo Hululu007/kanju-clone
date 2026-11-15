@@ -134,7 +134,8 @@ final class WebViewController: UIViewController {
 
     private func showError(_ error: Error) {
         let code = (error as NSError).code
-        if code == NSURLErrorCancelled || code == NSURLErrorFrameLoadInterruptedByPolicyChange {
+        if code == URLError.Code.cancelled.rawValue
+            || code == URLError.Code.frameLoadInterruptedByPolicyChange.rawValue {
             return
         }
         errorLabel.text = "页面加载失败，请检查网络后重试"
