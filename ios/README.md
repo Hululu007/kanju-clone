@@ -1,16 +1,28 @@
 # 追剧 AI iOS 客户端
 
-独立的 Swift 工程，用 WKWebView 加载 `https://zhuiju.dpdns.org/`，复用现有账号、片源和观看进度后端。最低支持 iOS 14。
+独立的 Swift 工程，用 WKWebView 加载 `https://zhuiju.dpdns.org/`，复用现有账号、片源和观看进度后端。审查修复版 0.1.1 最低支持 iOS 15，因为站点的模块使用顶层 await。
 
 ## 已实现
 
 - 登录 Cookie、`localStorage` 与观看进度持久化。
 - 同域 API 重写：把 `kanju-api.kenzhao123.workers.dev` 的接口请求转到站点域名，并补齐 `AbortSignal.timeout`。
-- 随包内置 hls.js 1.5.17，播放页不再依赖 jsdelivr；iPhone 走原生 HLS，支持 MSE 的设备使用内置播放器。
+- 随包内置 hls.js 1.5.17，支持系统 HLS 时通过 NativeHls 兼容层优先使用系统解码，不依赖 jsdelivr。
 - 1／1.5／2／2.5／3 倍速记忆，播放开始和元数据加载时自动应用。
 - 横屏、原生全屏播放、画中画（iOS 14.2+）、返回手势。
 - `target="_blank"` 站内链接在应用内打开，站外 HTTPS 链接交给 Safari。
 - 页面加载失败时显示重试界面；网页弹窗改用原生对话框。
+- 片源返回必须与选中的影片、索引、集数一致且 verified=true，只接受无账号密码的 HTTPS 片源地址。
+- 新的选集或切线操作取消旧的解析请求；加载完成后再次触发播放，避免首次 play 早于媒体就绪。
+- 网站访问门 401 单独跳回网站访问密码页，不交给账号模块清空账号缓存。
+- 横屏播放时展开播放器并保留线路和显示设置；网页画中画按钮接入 WebKit presentation mode。
+
+## 回归验证
+
+本地运行 `node ios/Tests/bootstrap.test.mjs`，覆盖请求头与请求体保留、访问门与账号过期区分、错误片源拒绝、异步响应竞争、后台状态和存储异常。
+
+云端生成八秒的测试视频与 HLS 清单，再运行 XCTest/WKWebView 测试。测试必须通过后才生成 IPA。测试媒体仅进入测试 bundle，正式 App 不包含这些样本。
+
+模拟器中的 MP4/HLS 解码不等于实体 iPhone 和家庭网络验收；测试请求夹具也不能证明真实账号服务与所有 CDN 在设备上可用。
 
 ## 本地生成工程
 

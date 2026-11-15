@@ -59,7 +59,7 @@ final class PlaybackTests: XCTestCase, WKNavigationDelegate {
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { loaded?.fulfill() }
 
     private func execute(_ source: String) async throws {
-        _ = try await webView.evaluateJavaScript("(function(){\n" + source + "\n})();")
+        _ = try await webView.evaluateJavaScript("(function(){\n" + source + "\nreturn true;})();")
     }
 
     private func awaitValue(_ source: String) async throws -> Bool {
