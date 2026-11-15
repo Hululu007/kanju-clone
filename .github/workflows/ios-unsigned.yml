@@ -20,7 +20,20 @@ jobs:
 
       - name: Generate Xcode project
         working-directory: ios
-        run: xcodegen generate
+        run: |
+          brew install ffmpeg
+          mkdir -p Tests
+          ffmpeg -hide_banner -loglevel error -f lavfi -i testsrc2=size=320x180:rate=24 -f lavfi -i sine=frequency=440:sample_rate=44100 -t 8 -c:v libx264 -pix_fmt yuv420p -c:a aac -movflags +faststart Tests/sample.mp4
+          ffmpeg -hide_banner -loglevel error -i Tests/sample.mp4 -c copy -hls_time 2 -hls_list_size 0 Tests/sample.m3u8
+          xcodegen generate
+
+      - name: Run WKWebView playback regression on simulator
+        working-directory: ios
+        run: |
+          set -euo pipefail
+          DEVICE=$(xcrun simctl list devices available -j | python3 -c 'import json,sys; d=json.load(sys.stdin); print(next(x["udid"] for group in d["devices"].values() for x in group if x["name"].startswith("iPhone")))')
+          python3 -m http.server 8765 --bind 127.0.0.1 --directory Tests > fixture-server.log 2>&1 &
+          xcodebuild -project ZhuijuAI.xcodeproj -scheme ZhuijuAI -destination "platform=iOS Simulator,id=$DEVICE" -resultBundlePath playback-tests.xcresult CODE_SIGNING_ALLOWED=NO test | tee simulator-tests.log
 
       - name: Build Release for device
         working-directory: ios
@@ -44,7 +57,6 @@ jobs:
           set -euo pipefail
           APP="build/Build/Products/Release-iphoneos/ZhuijuAI.app"
           test -d "$APP"
-          rm -rf Payload ZhuijuAI-unsigned.ipa ZhuijuAI-unsigned.ipa.sha256
           mkdir Payload
           cp -R "$APP" Payload/
           /usr/bin/zip -qry ZhuijuAI-unsigned.ipa Payload
@@ -58,6 +70,17 @@ jobs:
             ios/ZhuijuAI-unsigned.ipa
             ios/ZhuijuAI-unsigned.ipa.sha256
           retention-days: 14
+
+      - name: Upload playback test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ZhuijuAI-playback-tests
+          path: |
+            ios/playback-tests.xcresult
+            ios/simulator-tests.log
+            ios/fixture-server.log
+          retention-days: 7
 
       - name: Upload build log on failure
         if: failure()

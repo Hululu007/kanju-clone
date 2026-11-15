@@ -3,3 +3,7 @@ ZhuijuAI.xcodeproj/
 *.ipa
 *.ipa.sha256
 xcodebuild.log
+Tests/sample*
+*.xcresult/
+simulator-tests.log
+fixture-server.log

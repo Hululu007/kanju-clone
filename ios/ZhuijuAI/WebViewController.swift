@@ -2,8 +2,6 @@ import UIKit
 import WebKit
 
 final class WebViewController: UIViewController {
-    private static let frameLoadInterruptedCode = -102
-
     private enum Site {
         static let home = URL(string: "https://zhuiju.dpdns.org/")!
         static let host = "zhuiju.dpdns.org"
@@ -21,9 +19,9 @@ final class WebViewController: UIViewController {
         configuration.websiteDataStore = .default()
         configuration.allowsInlineMediaPlayback = true
         configuration.mediaTypesRequiringUserActionForPlayback = []
-        configuration.preferences.javaScriptCanOpenWindowsAutomatically = true
+        configuration.preferences.javaScriptCanOpenWindowsAutomatically = false
         configuration.defaultWebpagePreferences.preferredContentMode = .mobile
-        configuration.applicationNameForUserAgent = "ZhuijuAI/0.1.0 iOS"
+        configuration.applicationNameForUserAgent = "ZhuijuAI/0.1.1 iOS"
         if #available(iOS 14.2, *) {
             configuration.allowsPictureInPictureMediaPlayback = true
         }
@@ -36,6 +34,10 @@ final class WebViewController: UIViewController {
            let hlsSource = try? String(contentsOf: hlsURL, encoding: .utf8) {
             let script = WKUserScript(source: hlsSource, injectionTime: .atDocumentStart, forMainFrameOnly: true)
             configuration.userContentController.addUserScript(script)
+        }
+        if let scriptURL = Bundle.main.url(forResource: "NativeHls", withExtension: "js"),
+           let source = try? String(contentsOf: scriptURL, encoding: .utf8) {
+            configuration.userContentController.addUserScript(WKUserScript(source: source, injectionTime: .atDocumentStart, forMainFrameOnly: true))
         }
         let webView = WKWebView(frame: .zero, configuration: configuration)
         webView.allowsBackForwardNavigationGestures = true
@@ -136,7 +138,8 @@ final class WebViewController: UIViewController {
 
     private func showError(_ error: Error) {
         let code = (error as NSError).code
-        if code == NSURLErrorCancelled || code == Self.frameLoadInterruptedCode {
+        if ((error as NSError).domain == NSURLErrorDomain && code == NSURLErrorCancelled)
+            || ((error as NSError).domain == "WebKitErrorDomain" && code == 102) {
             return
         }
         errorLabel.text = "页面加载失败，请检查网络后重试"
@@ -190,18 +193,19 @@ extension WebViewController: WKNavigationDelegate {
         if navigationAction.targetFrame == nil {
             if isSite(url) {
                 webView.load(navigationAction.request)
-            } else {
+            } else if navigationAction.navigationType == .linkActivated {
                 openExternally(url)
             }
             decisionHandler(.cancel)
             return
         }
-        if isSite(url) || url.scheme == "about" || url.scheme == "data" || url.scheme == "blob" {
+        if isSite(url) {
             decisionHandler(.allow)
             return
         }
         let scheme = url.scheme?.lowercased() ?? ""
-        if scheme == "https" || scheme == "mailto" || scheme == "tel" {
+        if navigationAction.navigationType == .linkActivated
+            && (scheme == "https" || scheme == "mailto" || scheme == "tel") {
             openExternally(url)
         }
         decisionHandler(.cancel)
@@ -249,7 +253,7 @@ extension WebViewController: WKUIDelegate {
     ) -> WKWebView? {
         if let url = navigationAction.request.url, isSite(url) {
             webView.load(navigationAction.request)
-        } else if let url = navigationAction.request.url {
+        } else if navigationAction.navigationType == .linkActivated, let url = navigationAction.request.url {
             openExternally(url)
         }
         return nil
