@@ -2,6 +2,8 @@ import UIKit
 import WebKit
 
 final class WebViewController: UIViewController {
+    private static let frameLoadInterruptedCode = -102
+
     private enum Site {
         static let home = URL(string: "https://zhuiju.dpdns.org/")!
         static let host = "zhuiju.dpdns.org"
@@ -134,8 +136,7 @@ final class WebViewController: UIViewController {
 
     private func showError(_ error: Error) {
         let code = (error as NSError).code
-        if code == URLError.Code.cancelled.rawValue
-            || code == URLError.Code.frameLoadInterruptedByPolicyChange.rawValue {
+        if code == NSURLErrorCancelled || code == Self.frameLoadInterruptedCode {
             return
         }
         errorLabel.text = "页面加载失败，请检查网络后重试"
