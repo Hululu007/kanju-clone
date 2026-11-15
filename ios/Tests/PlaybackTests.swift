@@ -3,6 +3,7 @@ import WebKit
 @testable import ZhuijuAI
 
 @MainActor
+@available(iOS 15.0, *)
 final class PlaybackTests: XCTestCase, WKNavigationDelegate {
     private var webView: WKWebView!
     private var window: UIWindow!
