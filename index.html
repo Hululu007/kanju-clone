@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>追剧AI</title>
+    <meta name="description" content="追剧AI：用一句话就能找到想看的剧，本周追剧日历、片单与播放记录一应俱全。" />
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23111214'/%3E%3Crect x='6' y='11' width='20' height='14' rx='4' fill='none' stroke='%2316e09d' stroke-width='2'/%3E%3Cpath d='M14 16.5 19 19l-5 2.5z' fill='%2316e09d'/%3E%3C/svg%3E" />
+      <meta name="theme-color" content="#0b1f2b" />
+    <script>
+      // 首屏就定好主题，避免白色主题先闪一下深色
+      try {
+        var q = new URLSearchParams(location.search).get('theme')
+        var m = ['dark', 'light', 'auto'].indexOf(q) >= 0 ? q : (localStorage.getItem('kj-theme-mode') || localStorage.getItem('kj-theme') || 'dark')
+        document.documentElement.dataset.theme = m === 'auto' ? (matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark') : m
+        document.documentElement.dataset.themeMode = m
+      } catch (e) {}
+    </script>
+  <script type="module" crossorigin src="/kanju-clone/assets/home-C9mo3tSQ.js"></script>
+  <link rel="modulepreload" crossorigin href="/kanju-clone/assets/shell-ChO2yRT0.js">
+  <link rel="modulepreload" crossorigin href="/kanju-clone/assets/data-_Nu6DFBL.js">
+  <link rel="stylesheet" crossorigin href="/kanju-clone/assets/shell-DXEbGzcl.css">
+</head>
+  <body>
+    <div id="app"></div>
+  </body>
+</html>

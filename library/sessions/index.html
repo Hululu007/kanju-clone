@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>会话记录 - 追剧AI</title>
+      <meta name="theme-color" content="#0b1f2b" />
+    <script>
+      // 首屏就定好主题，避免白色主题先闪一下深色
+      try {
+        var q = new URLSearchParams(location.search).get('theme')
+        var m = ['dark', 'light', 'auto'].indexOf(q) >= 0 ? q : (localStorage.getItem('kj-theme-mode') || localStorage.getItem('kj-theme') || 'dark')
+        document.documentElement.dataset.theme = m === 'auto' ? (matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark') : m
+        document.documentElement.dataset.themeMode = m
+      } catch (e) {}
+    </script>
+  <script type="module" crossorigin src="/kanju-clone/assets/sessions-Ctz1WEw2.js"></script>
+  <link rel="modulepreload" crossorigin href="/kanju-clone/assets/shell-ChO2yRT0.js">
+  <link rel="stylesheet" crossorigin href="/kanju-clone/assets/shell-DXEbGzcl.css">
+</head>
+  <body>
+    <div id="app"></div>
+  </body>
+</html>
