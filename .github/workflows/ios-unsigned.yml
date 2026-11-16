@@ -36,8 +36,17 @@ jobs:
           set -euo pipefail
           DEVICE=$(xcrun simctl list devices available -j | python3 -c 'import json,sys; d=json.load(sys.stdin); print(next(x["udid"] for group in d["devices"].values() for x in group if x["name"].startswith("iPhone")))')
           python3 -m http.server 8765 --bind 127.0.0.1 --directory Tests > fixture-server.log 2>&1 &
-          xcodebuild -project ZhuijuAI.xcodeproj -scheme ZhuijuAI -destination "platform=iOS Simulator,id=$DEVICE" -resultBundlePath playback-tests.xcresult CODE_SIGNING_ALLOWED=NO test -verbose | tee simulator-tests.log
-          find build -name libswiftWebKit.dylib -print
+          xcodebuild -project ZhuijuAI.xcodeproj -scheme ZhuijuAI -destination "platform=iOS Simulator,id=$DEVICE" -derivedDataPath build CODE_SIGNING_ALLOWED=NO build-for-testing | tee simulator-build.log
+          TOOLCHAIN_USR="$(dirname "$(dirname "$(xcrun --find swift)")")"
+          WEBKIT_SWIFT="$TOOLCHAIN_USR/lib/swift/iphonesimulator/libswiftWebKit.dylib"
+          TEST_PRODUCTS="build/Build/Products/Debug-iphonesimulator"
+          APP="$TEST_PRODUCTS/ZhuijuAI.app"
+          TEST_BUNDLE="$APP/PlugIns/ZhuijuAITests.xctest"
+          test -f "$WEBKIT_SWIFT"
+          mkdir -p "$APP/Frameworks" "$TEST_BUNDLE/Frameworks"
+          cp "$WEBKIT_SWIFT" "$APP/Frameworks/"
+          cp "$WEBKIT_SWIFT" "$TEST_BUNDLE/Frameworks/"
+          xcodebuild -project ZhuijuAI.xcodeproj -scheme ZhuijuAI -destination "platform=iOS Simulator,id=$DEVICE" -derivedDataPath build -resultBundlePath playback-tests.xcresult CODE_SIGNING_ALLOWED=NO test-without-building -verbose | tee simulator-tests.log
           xcrun xcresulttool get test-results summary --path playback-tests.xcresult
           xcrun xcresulttool get test-results tests --path playback-tests.xcresult
 
