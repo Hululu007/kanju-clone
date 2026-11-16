@@ -28,27 +28,23 @@ jobs:
           mkdir -p Tests
           ffmpeg -hide_banner -loglevel error -f lavfi -i testsrc2=size=320x180:rate=24 -f lavfi -i sine=frequency=440:sample_rate=44100 -t 8 -c:v libx264 -pix_fmt yuv420p -c:a aac -movflags +faststart Tests/sample.mp4
           ffmpeg -hide_banner -loglevel error -i Tests/sample.mp4 -c copy -hls_time 2 -hls_list_size 0 Tests/sample.m3u8
+          cp ZhuijuAI/Info.plist FixtureInfo.plist
+          /usr/libexec/PlistBuddy -c 'Add :NSAppTransportSecurity dict' FixtureInfo.plist
+          /usr/libexec/PlistBuddy -c 'Add :NSAppTransportSecurity:NSAllowsLocalNetworking bool true' FixtureInfo.plist
           xcodegen generate
 
+      # The playback tests only use the Objective-C WKWebView APIs (see PlaybackTests.javaScript),
+      # so no WebKit Swift overlay (libswiftWebKit.dylib) is needed at runtime. Do not reintroduce
+      # a manual copy of that dylib: it does not exist in the Xcode 16.x simulator toolchain.
       - name: Run WKWebView playback regression on simulator
         working-directory: ios
         run: |
           set -euo pipefail
           DEVICE=$(xcrun simctl list devices available -j | python3 -c 'import json,sys; d=json.load(sys.stdin); print(next(x["udid"] for group in d["devices"].values() for x in group if x["name"].startswith("iPhone")))')
           python3 -m http.server 8765 --bind 127.0.0.1 --directory Tests > fixture-server.log 2>&1 &
-          xcodebuild -project ZhuijuAI.xcodeproj -scheme ZhuijuAI -destination "platform=iOS Simulator,id=$DEVICE" -derivedDataPath build CODE_SIGNING_ALLOWED=NO build-for-testing | tee simulator-build.log
-          TOOLCHAIN_USR="$(dirname "$(dirname "$(xcrun --find swift)")")"
-          WEBKIT_SWIFT="$TOOLCHAIN_USR/lib/swift/iphonesimulator/libswiftWebKit.dylib"
-          TEST_PRODUCTS="build/Build/Products/Debug-iphonesimulator"
-          APP="$TEST_PRODUCTS/ZhuijuAI.app"
-          TEST_BUNDLE="$APP/PlugIns/ZhuijuAITests.xctest"
-          test -f "$WEBKIT_SWIFT"
-          mkdir -p "$APP/Frameworks" "$TEST_BUNDLE/Frameworks"
-          cp "$WEBKIT_SWIFT" "$APP/Frameworks/"
-          cp "$WEBKIT_SWIFT" "$TEST_BUNDLE/Frameworks/"
-          xcodebuild -project ZhuijuAI.xcodeproj -scheme ZhuijuAI -destination "platform=iOS Simulator,id=$DEVICE" -derivedDataPath build -resultBundlePath playback-tests.xcresult CODE_SIGNING_ALLOWED=NO test-without-building -verbose | tee simulator-tests.log
-          xcrun xcresulttool get test-results summary --path playback-tests.xcresult
-          xcrun xcresulttool get test-results tests --path playback-tests.xcresult
+          xcodebuild -project ZhuijuAI.xcodeproj -scheme ZhuijuAI -destination "platform=iOS Simulator,id=$DEVICE" -derivedDataPath build CODE_SIGNING_ALLOWED=NO INFOPLIST_FILE=FixtureInfo.plist build-for-testing | tee simulator-build.log
+          xcodebuild -project ZhuijuAI.xcodeproj -scheme ZhuijuAI -destination "platform=iOS Simulator,id=$DEVICE" -derivedDataPath build -resultBundlePath playback-tests.xcresult CODE_SIGNING_ALLOWED=NO test-without-building | tee simulator-tests.log
+          xcrun xcresulttool get test-results summary --path playback-tests.xcresult | tee simulator-tests-summary.log
 
       - name: Build Release for device
         working-directory: ios
@@ -94,15 +90,22 @@ jobs:
           path: |
             ios/playback-tests.xcresult
             ios/simulator-tests.log
+            ios/simulator-tests-summary.log
             ios/fixture-server.log
           retention-days: 7
 
+      # Runs in its own step: a failing xcodebuild stops the script above (set -e),
+      # so diagnostics must live where they still execute.
       - name: Export test diagnostics
         if: failure()
         working-directory: ios
         run: |
+          set +e
           xcrun xcresulttool get test-results summary --path playback-tests.xcresult || true
           xcrun xcresulttool get test-results tests --path playback-tests.xcresult || true
+          tail -n 200 simulator-tests.log || true
+          grep -n -i 'libswiftWebKit\|Test Case .* failed\|error:' simulator-tests.log | tail -n 80 || true
+          cat fixture-server.log || true
           find "$HOME/Library/Logs/DiagnosticReports" -name '*Zhuiju*' -type f -exec cat {} \; || true
 
       - name: Upload build log on failure
@@ -110,5 +113,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ZhuijuAI-xcodebuild-log
-          path: ios/xcodebuild.log
+          path: |
+            ios/xcodebuild.log
+            ios/simulator-build.log
+            ios/simulator-tests.log
           retention-days: 7

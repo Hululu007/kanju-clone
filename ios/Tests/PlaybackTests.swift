@@ -8,6 +8,7 @@ final class PlaybackTests: XCTestCase, WKNavigationDelegate {
     private var webView: WKWebView!
     private var window: UIWindow!
     private var loaded: XCTestExpectation?
+    private var slotCounter = 0
 
     override func setUp() async throws {
         let configuration = WKWebViewConfiguration()
@@ -58,13 +59,64 @@ final class PlaybackTests: XCTestCase, WKNavigationDelegate {
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { loaded?.fulfill() }
 
-    private func execute(_ source: String) async throws {
-        _ = try await webView.evaluateJavaScript("(function(){\n" + source + "\nreturn true;})();")
+    /// Objective-C completion-handler bridge for WKWebView.
+    ///
+    /// The Swift `evaluateJavaScript(_:)` / `callAsyncJavaScript(...)` async overloads come from the
+    /// WebKit Swift overlay (libswiftWebKit.dylib). That library is not shipped in the iOS 18.5
+    /// simulator runtime nor in the Xcode 16.4 simulator toolchain, so a test bundle that references
+    /// those overloads fails to dlopen ("Library not loaded: /usr/lib/swift/libswiftWebKit.dylib")
+    /// before a single test runs. Only the Objective-C `evaluateJavaScript(_:completionHandler:)`
+    /// entry point is used here, bridged back to async with a checked continuation.
+    private func javaScript(_ source: String) async throws -> Any? {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Any?, Error>) in
+            webView.evaluateJavaScript(source) { (value: Any?, error: Error?) in
+                if let error = error {
+                    continuation.resume(throwing: error)
+                } else {
+                    continuation.resume(returning: value)
+                }
+            }
+        }
     }
 
+    private func execute(_ source: String) async throws {
+        _ = try await javaScript("(function(){\n" + source + "\nreturn true;})();")
+    }
+
+    /// Runs an async JavaScript expression in the page and polls for its resolved boolean result.
+    /// Avoids `callAsyncJavaScript` (Swift overlay) by storing the promise outcome in a page slot.
     private func awaitValue(_ source: String) async throws -> Bool {
-        let result = try await webView.callAsyncJavaScript("return await Promise.race([(" + source + "), new Promise(resolve => setTimeout(() => resolve(false), 15000))]);", arguments: [:], in: nil, contentWorld: .page)
-        return (result as? Bool) == true
+        slotCounter += 1
+        let slot = "slot\(slotCounter)"
+        let kick = """
+        (function(){
+          window.__zhuijuTestSlots = window.__zhuijuTestSlots || {};
+          var state = window.__zhuijuTestSlots['\(slot)'] = {done:false,value:false};
+          var settle = function(value){ state.done = true; state.value = value === true; };
+          var timeout = new Promise(function(resolve){ setTimeout(function(){ resolve(false); }, 15000); });
+          var target;
+          try { target = Promise.resolve((\(source))); } catch (error) { target = Promise.reject(error); }
+          Promise.race([target, timeout]).then(settle, function(){ settle(false); });
+          return true;
+        })();
+        """
+        _ = try await javaScript(kick)
+        let deadline = Date().addingTimeInterval(20)
+        while Date() < deadline {
+            let probe = try await javaScript("""
+            (function(){
+              var state = (window.__zhuijuTestSlots || {})['\(slot)'];
+              if (!state || !state.done) return 'pending';
+              return state.value ? 'done' : 'nope';
+            })();
+            """)
+            if let text = probe as? String {
+                if text == "done" { return true }
+                if text == "nope" { return false }
+            }
+            try await Task.sleep(nanoseconds: 200_000_000)
+        }
+        return false
     }
 
     func testLoginAndProgressKeepBodyAndAuthorization() async throws {
