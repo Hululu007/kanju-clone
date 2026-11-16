@@ -63,7 +63,7 @@ final class PlaybackTests: XCTestCase, WKNavigationDelegate {
     }
 
     private func awaitValue(_ source: String) async throws -> Bool {
-        let result = try await webView.callAsyncJavaScript("return await (" + source + ");", arguments: [:], in: nil, contentWorld: .page)
+        let result = try await webView.callAsyncJavaScript("return await Promise.race([(" + source + "), new Promise(resolve => setTimeout(() => resolve(false), 15000))]);", arguments: [:], in: nil, contentWorld: .page)
         return (result as? Bool) == true
     }
 

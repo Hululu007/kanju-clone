@@ -37,6 +37,7 @@ targets:
       base:
         GENERATE_INFOPLIST_FILE: "YES"
         PRODUCT_BUNDLE_IDENTIFIER: org.dpdns.zhuiju.ios.tests
+        ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES: "YES"
 schemes:
   ZhuijuAI:
     build:
