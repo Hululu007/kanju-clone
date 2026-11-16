@@ -33,6 +33,7 @@ targets:
       - path: Tests
     dependencies:
       - target: ZhuijuAI
+      - sdk: WebKit.framework
     settings:
       base:
         GENERATE_INFOPLIST_FILE: "YES"
