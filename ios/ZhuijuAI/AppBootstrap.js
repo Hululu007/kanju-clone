@@ -194,13 +194,17 @@
       'html[data-ios-immersive] #player{position:fixed!important;inset:0!important;width:100%!important;height:100%!important;z-index:10000!important;border-radius:0!important;margin:0!important;background:#000!important;display:flex!important;align-items:center!important;justify-content:center!important}',
       'html[data-ios-immersive] #player video{width:100%!important;height:100%!important;aspect-ratio:auto!important;object-fit:contain!important;background:#000}',
       'html[data-ios-immersive],html[data-ios-immersive] body{overflow:hidden!important}',
-      'html[data-ios-immersive] #playTools{position:fixed!important;top:calc(8px + env(safe-area-inset-top,0px))!important;right:12px!important;left:auto!important;z-index:10001!important;margin:0!important;background:rgba(16,24,28,.93);padding:6px;border-radius:10px}',
-      'html[data-theme=\'light\'][data-ios-immersive] #playTools{background:rgba(255,255,255,.96)!important}',
-      'html[data-ios-immersive] #playTools .dm-input{display:none!important}',
+      /* 全屏：上方那一排「显示设置 / 线路 / 弹幕 / 画中画 / 下一集」整条收起。
+         它原本被固定到右上角，正好压在画面上，是真机上最挡视线的一排；
+         全屏只保留底部控制栏（播放 · 进度 · 外放 · 倍速 · 退出全屏）。 */
+      'html[data-ios-immersive] #playTools{display:none!important}',
+      'html[data-ios-immersive] #settingsPanel,html[data-ios-immersive] #lineBar{display:none!important}',
       'html[data-ios-immersive] .p-label{display:none!important}',
-      'html[data-ios-immersive] #lineBar,html[data-ios-immersive] #settingsPanel{position:fixed!important;top:64px!important;right:12px!important;z-index:10002!important;max-height:65vh!important;overflow:auto;background:#10181c;padding:12px;border-radius:12px}',
-      'html[data-theme=\'light\'][data-ios-immersive] #lineBar,html[data-theme=\'light\'][data-ios-immersive] #settingsPanel{background:#ffffff!important;border:1px solid rgba(15,20,24,.1)}',
-      'html[data-ios-immersive] #lineBar[hidden],html[data-ios-immersive] #settingsPanel[hidden]{display:none!important}',
+      /* 跳过片头/片尾和挂件上移，避免和底部控制栏叠在一起 */
+      'html[data-ios-immersive] .skip-btn{bottom:calc(58px + env(safe-area-inset-bottom,0px))!important}',
+      'html[data-ios-immersive] #ppCtrl{z-index:10003!important;padding:8px 12px calc(10px + env(safe-area-inset-bottom,0px))!important;gap:8px!important}',
+      'html[data-ios-immersive] #ppCtrl .pc-btn{font-size:13px;padding:12px 13px;min-height:42px}',
+      'html[data-ios-immersive] #ppCtrl .pc-seek{height:30px}',
       /* 浅色主题：底栏是白底，文字必须转深色 */
       'html[data-theme=\'light\'] .tabbar .tab{color:rgba(15,20,24,.6)!important}',
       'html[data-theme=\'light\'] .tabbar .tab.on{color:#0b8a5f!important;background:rgba(18,153,111,.13)!important}',
@@ -229,6 +233,16 @@
       '#ppRateMenu.on{display:flex}',
       '#ppRateMenu .pc-rate-opt{border:0;background:transparent;color:#fff;font-size:13px;line-height:1;padding:9px 18px;border-radius:8px;white-space:nowrap;cursor:pointer}',
       '#ppRateMenu .pc-rate-opt.on{background:rgba(22,224,157,.2);color:#16e09d;font-weight:700}',
+      /* 外放/下载菜单：从底部控制栏往上弹，行高 ≥44px 便于单手点 */
+      '#ppCastMenu{position:absolute;right:6px;bottom:calc(100% + 6px);display:none;flex-direction:column;gap:2px;padding:6px;border-radius:12px;background:rgba(12,18,22,.97);border:1px solid rgba(255,255,255,.14);min-width:210px}',
+      '#ppCastMenu.on{display:flex}',
+      '#ppCastMenu .pc-menu-row{display:flex;align-items:center;justify-content:space-between;gap:12px;border:0;background:transparent;color:#fff;font-size:13px;font-weight:600;line-height:1.2;padding:12px 14px;border-radius:9px;text-align:left;white-space:nowrap;cursor:pointer;min-height:44px}',
+      '#ppCastMenu .pc-menu-row:active{background:rgba(255,255,255,.16)}',
+      '#ppCastMenu .pc-menu-row small{color:rgba(255,255,255,.62);font-weight:400;font-size:11px}',
+      '#ppCastMenu .pc-menu-row[hidden]{display:none!important}',
+      '#ppCastMenu .pc-menu-row.busy small{color:#16e09d}',
+      '#iosToast{position:fixed;left:50%;bottom:calc(96px + env(safe-area-inset-bottom,0px));transform:translateX(-50%);max-width:82vw;padding:10px 14px;border-radius:12px;background:rgba(8,12,15,.94);color:#fff;font-size:13px;line-height:1.35;z-index:11000;opacity:0;pointer-events:none;transition:opacity .18s ease;text-align:center}',
+      '#iosToast[data-show]{opacity:1}',
       '.brand .brand-mark{width:30px;height:30px;background-image:var(--brand-logo);background-size:cover;background-position:center;border-radius:9px;overflow:hidden;filter:none}',
       '.brand .brand-mark>svg{display:none}',
       '.tabbar .tab.center .tab-circle{background-image:var(--brand-logo);background-size:cover;background-position:center;overflow:hidden}',
@@ -333,6 +347,19 @@
     var immersive = userFullscreen || (activePlayback && landscape());
     if (immersive) root.setAttribute('data-ios-immersive', '');
     else root.removeAttribute('data-ios-immersive');
+    if (immersive) {
+      /* 进全屏就把上方工具条的面板都收起来：CSS 已经隐藏它们，
+         这里把状态也置回关闭，退出全屏时不会突然弹出一个旧面板。 */
+      closeRateMenu();
+      closeCastMenu();
+      var panels = ['settingsPanel', 'lineBar'];
+      for (var i = 0; i < panels.length; i++) {
+        var panel = document.getElementById(panels[i]);
+        if (!panel) continue;
+        /* hidden 是反射属性，赋值等于把 hidden 属性也写上 */
+        panel.hidden = true;
+      }
+    }
     syncFullButton();
   }
 
@@ -450,6 +477,19 @@
     barButton('ppRate', '1×', '倍速');
     barButton('ppFull', '全屏', '全屏播放');
 
+    /* 外放菜单：分享直链 / 复制直链 / 下载（登录后）/ 用其他播放器打开（下载后） */
+    var castMenu = document.createElement('div');
+    castMenu.id = 'ppCastMenu';
+    castMenu.className = 'pc-cast-menu';
+    castMenu.appendChild(castRow('ppShareLink', '分享播放地址', '系统面板'));
+    castMenu.appendChild(castRow('ppCopyLink', '复制播放地址', '手动粘贴'));
+    castMenu.appendChild(castRow('ppDownload', '下载本集', '需登录'));
+    var localRow = castRow('ppOpenLocal', '用其他播放器打开', '已下载');
+    if (typeof localRow.setAttribute === 'function') localRow.setAttribute('hidden', '1');
+    localRow.hidden = true;
+    castMenu.appendChild(localRow);
+    bar.appendChild(castMenu);
+
     var menu = document.createElement('div');
     menu.id = 'ppRateMenu';
     menu.className = 'pc-rate-menu';
@@ -473,6 +513,7 @@
     } catch (error) { /* 老内核 */ }
     routeNativeFullscreen(video);
     syncCtrl();
+    syncDownloadRow();
     return true;
   }
 
@@ -520,6 +561,7 @@
   function toggleRateMenu() {
     var menu = document.getElementById('ppRateMenu');
     if (!menu) return;
+    closeCastMenu();
     var open = String(menu.className).indexOf('pc-rate-menu on') >= 0;
     menu.className = open ? 'pc-rate-menu' : 'pc-rate-menu on';
   }
@@ -562,30 +604,136 @@
     try { video.currentTime = next; } catch (error) { /* 还没到可跳转的状态 */ }
   }
 
-  function mediaUrl() {
+  /* 真正能交给外部 App 的地址；同时把「还没有地址」和「地址不可交」分开，
+     否则空 src 会被浏览器解析成当前页面地址，看起来像一条可以直接丢给播放器的片源。 */
+  function mediaState() {
     var video = document.getElementById('video');
-    if (!video) return '';
+    if (!video) return { url: '', reason: 'none' };
     var url = video.currentSrc || video.src || '';
     if (!url && typeof video.querySelector === 'function') {
       var source = video.querySelector('source');
-      if (source) url = source.src || source.getAttribute('src') || '';
+      /* 用原始属性，不用解析后的 source.src：空的 src 会被解析成页面地址 */
+      var raw = source ? (source.getAttribute ? source.getAttribute('src') : '') || '' : '';
+      if (raw) url = raw;
     }
-    if (!url || !/^https?:/i.test(url)) return '';
-    return url;
+    if (!url) return { url: '', reason: 'none' };
+    if (!/^https?:/i.test(url)) return { url: '', reason: 'opaque' };
+    var page = String(window.location && window.location.href || '').split('#')[0].split('?')[0];
+    if (page && url.split('#')[0].split('?')[0] === page) return { url: '', reason: 'none' };
+    return { url: url, reason: '' };
   }
 
-  /* 交给别的 App 播放：应用内原生分享 -> 系统分享 -> AirPlay -> 复制地址 */
-  function startExternal() {
-    var url = mediaUrl();
-    if (!url) {
-      announce('这条线路是加密或临时流，没法交给其他 App；换一条线路再试。');
-      return;
+  function mediaUrl() {
+    return mediaState().url;
+  }
+
+  function mediaReason() {
+    return mediaState().reason === 'opaque'
+      ? LINK_UNSUPPORTED
+      : '这一集还没解析出直链，先点播放再试。';
+  }
+
+  /* ---------- 外放 / 下载菜单 ---------- */
+  var downloadState = { id: '', name: '', path: '', busy: false, percent: 0 };
+  var LINK_UNSUPPORTED = '这条线路是加密或临时流，没法交给其他 App；换一条线路再试。';
+
+  /* 登录门控的唯一依据：站点自己的账号 token（注入层与站点同源，读的是同一份）。 */
+  function signedIn() {
+    try { return !!localStorage.getItem('kj-auth-token'); } catch (error) { return false; }
+  }
+
+  function askLogin() {
+    announce('登录后才能下载本集');
+    /* 不另做一套账号 UI：打开站点自己的登录弹窗，用户登完再点一次下载。 */
+    var trigger = document.querySelector ? document.querySelector('[data-action="login"]') : null;
+    if (trigger && typeof trigger.click === 'function') {
+      try { trigger.click(); } catch (error) { /* 打不开弹窗时只留提示 */ }
     }
+  }
+
+  function episodeLabel() {
+    var active = document.querySelector ? document.querySelector('.ep.on') : null;
+    var text = active && active.textContent ? String(active.textContent).trim() : '';
+    return text.replace(/\s+/g, '').slice(0, 16);
+  }
+
+  /* 文件名：优先用真实扩展名，集号来自当前选集；原生层还会再清洗一次 */
+  function downloadName() {
+    var url = mediaUrl();
+    var match = /\.(mp4|m4v|mov|mkv|ts)(?:[?#]|$)/i.exec(url || '');
+    var ext = match ? '.' + match[1].toLowerCase() : '.mp4';
+    var label = episodeLabel();
+    return '追剧AI' + (label ? '_' + label : '') + ext;
+  }
+
+  function castRow(id, label, note) {
+    var row = document.createElement('button');
+    row.id = id;
+    row.type = 'button';
+    row.className = 'pc-menu-row';
+    var text = document.createElement('span');
+    text.className = 'pc-menu-label';
+    text.textContent = label;
+    row.appendChild(text);
+    var hint = document.createElement('small');
+    hint.className = 'pc-menu-note';
+    hint.textContent = note || '';
+    row.appendChild(hint);
+    return row;
+  }
+
+  function noteOf(id, text) {
+    var row = document.getElementById(id);
+    if (!row) return;
+    var note = row.querySelector ? row.querySelector('.pc-menu-note') : null;
+    if (note) note.textContent = text;
+    else row.textContent = text;
+  }
+
+  function syncDownloadRow() {
+    var row = document.getElementById('ppDownload');
+    if (row) row.className = 'pc-menu-row' + (downloadState.busy ? ' busy' : '');
+    var open = document.getElementById('ppOpenLocal');
+    if (open) {
+      var has = !!downloadState.path;
+      if (typeof open.setAttribute === 'function') open.setAttribute('hidden', has ? '' : '1');
+      open.hidden = !has;
+    }
+    var cast = document.getElementById('ppCast');
+    if (cast) {
+      cast.textContent = downloadState.busy
+        ? '下载 ' + (downloadState.percent ? downloadState.percent + '%' : '0%')
+        : '外放';
+    }
+    noteOf('ppDownload', downloadState.busy ? (downloadState.percent ? downloadState.percent + '%' : '准备中')
+      : (downloadState.path ? '已下载' : '需登录'));
+  }
+
+  function closeCastMenu() {
+    var menu = document.getElementById('ppCastMenu');
+    if (menu) menu.className = 'pc-cast-menu';
+  }
+
+  function toggleCastMenu() {
+    var menu = document.getElementById('ppCastMenu');
+    if (!menu) return false;
+    closeRateMenu();
+    var open = String(menu.className).indexOf('pc-cast-menu on') >= 0;
+    menu.className = open ? 'pc-cast-menu' : 'pc-cast-menu on';
+    if (!open) syncDownloadRow();
+    return true;
+  }
+
+  /* 分享直链：应用内原生分享面板 -> navigator.share -> AirPlay 选择器 */
+  function shareLink() {
+    var url = mediaUrl();
+    closeCastMenu();
+    if (!url) { announce(mediaReason()); return; }
     var title = document.title || '追剧AI';
     var bridge = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.iosPlayer;
     if (bridge) {
       postNative({ action: 'share', url: url, title: title });
-      announce('已打开系统分享，选一个播放器即可');
+      announce('已打开系统分享面板');
       return;
     }
     var nav = typeof navigator === 'undefined' ? null : navigator;
@@ -603,16 +751,106 @@
         return;
       } catch (error) { /* 落到复制 */ }
     }
+    copyLink();
+  }
+
+  function copyLink() {
+    var url = mediaUrl();
+    closeCastMenu();
+    if (!url) { announce(mediaReason()); return; }
+    var nav = typeof navigator === 'undefined' ? null : navigator;
     if (nav && nav.clipboard && typeof nav.clipboard.writeText === 'function') {
       nav.clipboard.writeText(url).then(function () {
         announce('播放地址已复制，粘到播放器 App 里即可');
       }, function () {
-        announce('复制失败，地址：' + url.slice(0, 60));
+        announce('复制失败，地址：' + url.slice(0, 56));
       });
       return;
     }
-    announce('这台设备没有可用的分享通道，地址：' + url.slice(0, 60));
+    announce('这台设备没有剪贴板通道，地址：' + url.slice(0, 56));
   }
+
+  /* 下载：登录门控 + 一次只下一个；真正的传输在原生层做，避免 Blob 把内存拖爆 */
+  function startDownload() {
+    if (!signedIn()) {
+      closeCastMenu();
+      askLogin();
+      return;
+    }
+    if (downloadState.busy) {
+      cancelDownload();
+      return;
+    }
+    var url = mediaUrl();
+    if (!url) {
+      closeCastMenu();
+      announce(mediaReason());
+      return;
+    }
+    if (/\.m3u8(?:[?#]|$)/i.test(url)) {
+      closeCastMenu();
+      announce('HLS 分片线路没法整集下载；换一条 MP4 线路再试。');
+      return;
+    }
+    var bridge = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.iosPlayer;
+    closeCastMenu();
+    if (!bridge) {
+      announce('当前环境没有下载通道');
+      return;
+    }
+    var name = downloadName();
+    downloadState = { id: 'dl' + Date.now(), name: name, path: '', busy: true, percent: 0 };
+    syncDownloadRow();
+    postNative({ action: 'download', id: downloadState.id, url: url, name: name, signedIn: true });
+    announce('开始下载 ' + name);
+  }
+
+  function cancelDownload() {
+    if (!downloadState.busy || !downloadState.id) return;
+    postNative({ action: 'cancelDownload', id: downloadState.id });
+    announce('已取消下载');
+  }
+
+  function openLocal() {
+    if (!downloadState.path) {
+      announce('这一集还没下载完');
+      return;
+    }
+    postNative({ action: 'openLocal', path: downloadState.path, name: downloadState.name });
+    announce('正在打开系统应用列表');
+  }
+
+  function megabyte(bytes) {
+    var size = Number(bytes) || 0;
+    return (size / 1048576).toFixed(1) + ' MB';
+  }
+
+  /* 原生层回传：同一个 id 才认，避免换集之后旧任务改乱新状态 */
+  window.__zhuijuDownload = function (payload) {
+    if (!payload || !downloadState.id || payload.id !== downloadState.id) return;
+    var event = payload.event;
+    if (event === 'progress') {
+      var total = Number(payload.total) || 0;
+      var received = Number(payload.received) || 0;
+      downloadState.busy = true;
+      downloadState.percent = total > 0 ? Math.min(100, Math.round(received / total * 100)) : 0;
+      syncDownloadRow();
+      return;
+    }
+    if (event === 'done') {
+      downloadState.busy = false;
+      downloadState.percent = 100;
+      downloadState.path = payload.path || '';
+      syncDownloadRow();
+      announce('已下载 ' + (payload.name || downloadState.name) + '（' + megabyte(payload.size) + '），点「外放」可用其他播放器打开');
+      return;
+    }
+    downloadState.busy = false;
+    downloadState.percent = 0;
+    syncDownloadRow();
+    if (event === 'cancelled') announce('已取消下载');
+    else announce('下载失败：' + (payload.reason || '网络不给力，稍后再试'));
+  };
 
   function handleCtrlClick(event) {
     var target = event.target;
@@ -632,7 +870,31 @@
     if (hit(target, 'ppCast')) {
       event.preventDefault();
       event.stopImmediatePropagation();
-      startExternal();
+      if (!toggleCastMenu()) shareLink();
+      return true;
+    }
+    if (hit(target, 'ppShareLink')) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      shareLink();
+      return true;
+    }
+    if (hit(target, 'ppCopyLink')) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      copyLink();
+      return true;
+    }
+    if (hit(target, 'ppDownload')) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      startDownload();
+      return true;
+    }
+    if (hit(target, 'ppOpenLocal')) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      openLocal();
       return true;
     }
     if (hit(target, 'ppRate')) {

@@ -1,3 +1,4 @@
+import LinkPresentation
 import UIKit
 import WebKit
 
@@ -13,6 +14,38 @@ final class WebViewController: UIViewController {
         case inline
         /// 网页请求把可播放地址交给系统分享面板（外部播放器 / AirPlay 的入口）。
         case share
+        /// 下载一集到沙盒（网页已做过登录门控，这里再核一次）。
+        case download
+        case cancelDownload
+        /// 下载完成后用系统应用列表打开本地文件。
+        case openLocal
+    }
+
+    /// 系统分享面板里的链接项：声明成标准 URL（`public.url`）并带上链接元数据，
+    /// 这样面板认得出它是一条网页/媒体地址，而不是一块纯文本。
+    private final class LinkShareItem: NSObject, UIActivityItemSource {
+        private let url: URL
+        private let title: String
+
+        init(url: URL, title: String) {
+            self.url = url
+            self.title = title
+        }
+
+        func activityViewControllerPlaceholderItem(_ controller: UIActivityViewController) -> Any { url }
+
+        func activityViewController(
+            _ controller: UIActivityViewController,
+            itemForActivityType type: UIActivity.ActivityType?
+        ) -> Any? { url }
+
+        func activityViewControllerLinkMetadata(_ controller: UIActivityViewController) -> LPLinkMetadata? {
+            let metadata = LPLinkMetadata()
+            metadata.originalURL = url
+            metadata.url = url
+            if !title.isEmpty { metadata.title = title }
+            return metadata
+        }
     }
 
     private final class PlayerBridge: NSObject, WKScriptMessageHandler {
@@ -24,11 +57,18 @@ final class WebViewController: UIViewController {
         ) {
             guard let body = message.body as? [String: Any],
                   let action = body["action"] as? String else { return }
-            if action == PlayerAction.share.rawValue {
+            switch action {
+            case PlayerAction.share.rawValue:
                 target?.presentExternalShare(url: body["url"] as? String, title: body["title"] as? String)
-                return
+            case PlayerAction.download.rawValue:
+                target?.beginDownload(body)
+            case PlayerAction.cancelDownload.rawValue:
+                target?.cancelDownload()
+            case PlayerAction.openLocal.rawValue:
+                target?.presentLocalFile(path: body["path"] as? String, name: body["name"] as? String)
+            default:
+                target?.apply(playerAction: action)
             }
-            target?.apply(playerAction: action)
         }
     }
 
@@ -37,6 +77,7 @@ final class WebViewController: UIViewController {
     private let errorLabel = UILabel()
     private let retryButton = UIButton(type: .system)
     private var progressObservation: NSKeyValueObservation?
+    private let downloader = MediaDownloader()
     private var lastFailedURL: URL?
     private var safeAreaConstraints: [NSLayoutConstraint] = []
     private var fullscreenConstraints: [NSLayoutConstraint] = []
@@ -49,7 +90,7 @@ final class WebViewController: UIViewController {
         configuration.mediaTypesRequiringUserActionForPlayback = []
         configuration.preferences.javaScriptCanOpenWindowsAutomatically = false
         configuration.defaultWebpagePreferences.preferredContentMode = .mobile
-        configuration.applicationNameForUserAgent = "ZhuijuAI/0.1.4 iOS"
+        configuration.applicationNameForUserAgent = "ZhuijuAI/0.1.5 iOS"
         if #available(iOS 14.2, *) {
             configuration.allowsPictureInPictureMediaPlayback = true
         }
@@ -160,17 +201,87 @@ final class WebViewController: UIViewController {
     /// 外部播放：把直链交给系统分享面板，由用户选已安装的播放器或 AirPlay。
     /// 加密流、blob: 和 DRM 内容在网页侧就已挡掉，这里再挡一次；
     /// 不引入任何第三方 SDK，也不需要用户登录。
+    ///
+    /// 一个真实边界：面板里出现哪些 App 由系统按「能不能处理 public.url」筛选，
+    /// 只声明了视频文件类型（public.movie）的播放器不会出现在这里——
+    /// 那类 App 要走「下载后用其他播放器打开」。
     fileprivate func presentExternalShare(url: String?, title: String?) {
         guard let link = Self.shareableURL(url) else { return }
         let presenter = presentedViewController ?? self
-        var items: [Any] = [link]
-        if let title = title, !title.isEmpty { items.append(title) }
-        let controller = UIActivityViewController(activityItems: items, applicationActivities: nil)
+        let controller = UIActivityViewController(
+            activityItems: [LinkShareItem(url: link, title: title ?? "")],
+            applicationActivities: nil
+        )
         if let popover = controller.popoverPresentationController {
             popover.sourceView = view
             popover.sourceRect = CGRect(x: view.bounds.midX, y: view.bounds.midY, width: 1, height: 1)
         }
         presenter.present(controller, animated: true)
+    }
+
+    // MARK: - 下载
+
+    /// 网页侧已经做过登录门控；这里再核一次 `signedIn`，不接匿名下载请求。
+    fileprivate func beginDownload(_ body: [String: Any]) {
+        guard body["signedIn"] as? Bool == true,
+              let id = body["id"] as? String, !id.isEmpty else { return }
+        guard let link = Self.shareableURL(body["url"] as? String) else {
+            sendDownloadEvent(["event": "failed", "id": id, "reason": "这条线路的地址不能下载"])
+            return
+        }
+        let name = MediaDownloader.fileName(from: link.absoluteString, fallback: body["name"] as? String ?? "video.mp4")
+        downloader.start(
+            id: id,
+            url: link,
+            name: name,
+            onProgress: { [weak self] received, total in
+                self?.sendDownloadEvent([
+                    "event": "progress", "id": id,
+                    "received": received, "total": total,
+                ])
+            },
+            onFinish: { [weak self] result in
+                switch result {
+                case .success(let payload):
+                    var event = payload
+                    event["event"] = "done"
+                    event["id"] = id
+                    self?.sendDownloadEvent(event)
+                case .failure(let error):
+                    self?.sendDownloadEvent(["event": "failed", "id": id, "reason": error.message])
+                }
+            }
+        )
+    }
+
+    fileprivate func cancelDownload() {
+        downloader.cancel()
+    }
+
+    /// 把下载好的本地文件交给系统：文件类型（public.movie / public.mpeg-4）是
+    /// 播放器 App 能出现在列表里的方式，也是这类 App 唯一合法的入口。
+    fileprivate func presentLocalFile(path: String?, name: String?) {
+        guard let path = path, !path.isEmpty else { return }
+        let fileURL = URL(fileURLWithPath: path)
+        guard FileManager.default.fileExists(atPath: fileURL.path) else { return }
+        let presenter = presentedViewController ?? self
+        let controller = UIActivityViewController(activityItems: [fileURL], applicationActivities: nil)
+        if let popover = controller.popoverPresentationController {
+            popover.sourceView = view
+            popover.sourceRect = CGRect(x: view.bounds.midX, y: view.bounds.midY, width: 1, height: 1)
+        }
+        presenter.present(controller, animated: true)
+    }
+
+    /// 回传给网页的下载事件（网页里的 `window.__zhuijuDownload`）。
+    private func sendDownloadEvent(_ payload: [String: Any]) {
+        guard JSONSerialization.isValidJSONObject(payload),
+              let data = try? JSONSerialization.data(withJSONObject: payload),
+              let text = String(data: data, encoding: .utf8) else { return }
+        let script = "window.__zhuijuDownload && window.__zhuijuDownload(\(text));"
+        DispatchQueue.main.async { [weak self] in
+            self?.webView.evaluateJavaScript(script, completionHandler: nil)
+        }
     }
 
     fileprivate func apply(playerAction: String) {

@@ -29,6 +29,18 @@ function node(tag = 'div') {
       return index >= 0 ? siblings[index + 1] : undefined;
     },
     closest(selector) { return selector === '#' + element.id ? element : null; },
+    querySelector(selector) {
+      const want = String(selector).replace(/^\./, '');
+      const walk = (current) => {
+        for (const child of current.children || []) {
+          if (String(child.className || '').split(' ').includes(want)) return child;
+          const found = walk(child);
+          if (found) return found;
+        }
+        return null;
+      };
+      return walk(element);
+    },
     querySelectorAll(selector) {
       const name = String(selector).replace(/^\./, '');
       return element.children.filter((child) => String(child.className || '').split(' ').includes(name));
@@ -37,7 +49,7 @@ function node(tag = 'div') {
   return element;
 }
 
-function fixture({ origin = 'https://zhuiju.dpdns.org', storageThrows = false, landscape = false, keyword = '', search = '?id=fixture', episodes = [], playRejects = false, maxRate = 0, bridge = true } = {}) {
+function fixture({ origin = 'https://zhuiju.dpdns.org', storageThrows = false, landscape = false, keyword = '', search = '?id=fixture', episodes = [], playRejects = false, maxRate = 0, bridge = true, signedIn = false } = {}) {
   const shared = [];
   const listeners = {};
   const replies = [];
@@ -99,6 +111,12 @@ function fixture({ origin = 'https://zhuiju.dpdns.org', storageThrows = false, l
   hint.textContent = '';
   const epMore = node('button');
   epMore.id = 'epMore';
+  const settingsPanel = node('div');
+  settingsPanel.id = 'settingsPanel';
+  settingsPanel.hidden = false;
+  const lineBar = node('div');
+  lineBar.id = 'lineBar';
+  lineBar.hidden = false;
   const epButtons = episodes.map((idx) => {
     const button = node('button');
     button.className = idx === 0 ? 'ep on' : 'ep';
@@ -122,6 +140,10 @@ function fixture({ origin = 'https://zhuiju.dpdns.org', storageThrows = false, l
       return playRejects ? Promise.reject(Object.assign(new Error('denied'), { name: 'NotAllowedError' })) : Promise.resolve();
     },
   };
+  /* 站点的登录入口：注入层不自己做账号 UI，只负责把站点弹窗点开 */
+  const loginTrigger = node('button');
+  loginTrigger.opens = 0;
+  loginTrigger.click = () => { loginTrigger.opens += 1; };
   const document = { readyState: 'loading', visibilityState: 'visible', head,
     addEventListener(name, listener) { (listeners[name] ||= []).push(listener); },
     removeEventListener(name, listener) {
@@ -135,6 +157,8 @@ function fixture({ origin = 'https://zhuiju.dpdns.org', storageThrows = false, l
       if (id === 'q') return searchInput;
       if (id === 'playHint') return hint;
       if (id === 'epMore') return epMore;
+      if (id === 'settingsPanel') return settingsPanel;
+      if (id === 'lineBar') return lineBar;
       if (id === 'epGrid') return epGrid;
       if (id === 'days') return days;
       if (id === 'player') return player;
@@ -152,7 +176,11 @@ function fixture({ origin = 'https://zhuiju.dpdns.org', storageThrows = false, l
       return walk(toolbar) || walk(player);
     },
     createElement(tag) { return node(tag); },
-    querySelector(selector) { return selector === '.ep.on' ? selected : null; },
+    querySelector(selector) {
+      if (selector === '.ep.on') return selected;
+      if (selector === '[data-action="login"]') return loginTrigger;
+      return null;
+    },
     querySelectorAll(selector) { return selector === '.ep' ? epButtons : []; },
     documentElement: {
       setAttribute(name) { attributes[name] = true; },
@@ -182,12 +210,19 @@ function fixture({ origin = 'https://zhuiju.dpdns.org', storageThrows = false, l
     share(payload) { shared.push(payload); return Promise.resolve(); },
     clipboard: { writeText(value) { shared.push({ copied: value }); return Promise.resolve(); } },
   };
+  const storage = { 'kj-speed': '2' };
+  if (signedIn) storage['kj-auth-token'] = 'test-token';
   const context = vm.createContext({ window, document, navigator, URL, URLSearchParams, Request, Response, AbortSignal, AbortController, DOMException,
     MutationObserver: MockMutationObserver,
-    setTimeout, clearTimeout, localStorage: { getItem() { if (storageThrows) throw Error('denied'); return '2'; } } });
+    setTimeout, clearTimeout, localStorage: {
+      getItem(key) { if (storageThrows) throw Error('denied'); return Object.prototype.hasOwnProperty.call(storage, key) ? storage[key] : null; },
+      setItem(key, value) { if (storageThrows) throw Error('denied'); storage[key] = String(value); },
+      removeItem(key) { if (storageThrows) throw Error('denied'); delete storage[key]; },
+    } });
   vm.runInContext(source, context);
   return { window, document, replies, calls, redirects, selected, video, messages, attributes, head, toolbar, searchInput, shared, player,
-    hint, epButtons, epGrid, epMore, mediaProto, days, dayButtons, observers,
+    hint, epButtons, epGrid, epMore, mediaProto, days, dayButtons, observers, loginTrigger, storage,
+    settingsPanel, lineBar,
     ready() { for (const listener of listeners['DOMContentLoaded'] || []) listener({}); },
     click(target) {
       const event = { target, preventDefault() {}, stopImmediatePropagation() {} };
@@ -266,7 +301,12 @@ test('layout fallback carries fullscreen, light tabbar and category-card rules',
   assert.match(style.textContent, /html\[data-ios-immersive\] #player\{position:fixed/);
   assert.match(style.textContent, /html\[data-theme='light'\] \.tabbar \.tab\{color:rgba\(15,20,24/);
   assert.match(style.textContent, /grid-auto-columns:168px/);
-  assert.match(style.textContent, /html\[data-theme='light'\]\[data-ios-immersive\] #playTools/);
+  assert.match(style.textContent, /html\[data-ios-immersive\] #playTools\{display:none!important\}/,
+    '全屏时那排上方工具条必须整条收起来');
+  assert.match(style.textContent, /html\[data-ios-immersive\] #settingsPanel,html\[data-ios-immersive\] #lineBar\{display:none!important\}/);
+  assert.match(style.textContent, /html\[data-ios-immersive\] #ppCtrl\{z-index:10003/,
+    '全屏控制栏要压在播放器之上并在安全区内');
+  assert.match(style.textContent, /safe-area-inset-bottom/);
 });
 
 test('fullscreen sits at the right end of the control bar and drives native rotation', () => {
@@ -274,7 +314,7 @@ test('fullscreen sits at the right end of the control bar and drives native rota
   const bar = state.document.getElementById('ppCtrl');
   assert.ok(bar, '自带控制栏没有挂上');
   assert.deepEqual(bar.children.map((child) => child.id),
-    ['ppPlay', 'ppTime', 'ppSeek', 'ppCast', 'ppRate', 'ppFull', 'ppRateMenu'],
+    ['ppPlay', 'ppTime', 'ppSeek', 'ppCast', 'ppRate', 'ppFull', 'ppCastMenu', 'ppRateMenu'],
     '全屏必须是进度条后面的最后一个按钮，倍速紧挨着它');
   assert.equal(state.video.controls, false, '自带控制栏挂上后必须收起原生控件');
   assert.ok(state.video.removed.includes('controls'));
@@ -347,6 +387,7 @@ test('control bar follows playback position and seeking', () => {
 test('external playback hands the direct url to the native share sheet', () => {
   const state = fixture(); state.ready();
   state.click(state.document.getElementById('ppCast'));
+  state.click(state.document.getElementById('ppShareLink'));
   const message = state.messages.at(-1);
   assert.equal(message.action, 'share');
   assert.equal(message.url, 'https://media.example/19.mp4');
@@ -357,6 +398,7 @@ test('external playback refuses blob streams and says why', () => {
   const state = fixture(); state.ready();
   state.video.currentSrc = 'blob:https://zhuiju.dpdns.org/9f1c';
   state.click(state.document.getElementById('ppCast'));
+  state.click(state.document.getElementById('ppShareLink'));
   assert.equal(state.messages.length, 0, '加密流不能当成直链交出去');
   assert.match(state.hint.textContent, /加密或临时流/);
 });
@@ -364,6 +406,7 @@ test('external playback refuses blob streams and says why', () => {
 test('external playback without the app bridge falls back to the system share sheet', () => {
   const state = fixture({ bridge: false }); state.ready();
   state.click(state.document.getElementById('ppCast'));
+  state.click(state.document.getElementById('ppShareLink'));
   assert.equal(state.shared.at(-1).url, 'https://media.example/19.mp4');
 });
 
@@ -518,4 +561,137 @@ test('search keyword falls back to the query string when the box is empty', asyn
   const state = fixture({ search: '?q=%E4%BB%8A%E5%A4%A9%E6%98%AF%E5%A4%AA%E9%98%B3%E9%9B%A8' });
   await state.window.fetch('https://kanju-api.kenzhao123.workers.dev/api/list?sort=heat&limit=24&page=1');
   assert.equal(new URL(state.calls[0].input).searchParams.get('q'), '今天是太阳雨');
+});
+
+test('entering fullscreen closes the top toolbar panels', () => {
+  const state = fixture(); state.ready();
+  assert.equal(state.settingsPanel.hidden, false);
+  state.click(state.document.getElementById('ppFull'));
+  assert.equal(state.settingsPanel.hidden, true, '全屏里不该留着显示设置面板');
+  assert.equal(state.lineBar.hidden, true, '全屏里不该留着线路面板');
+  state.click(state.document.getElementById('ppFull'));
+  assert.equal(state.settingsPanel.hidden, true, '退出全屏不该自己把面板弹回来');
+});
+
+test('cast menu lists share, copy and download, and hides the player row until a file exists', () => {
+  const state = fixture(); state.ready();
+  const menu = state.document.getElementById('ppCastMenu');
+  assert.deepEqual(menu.children.map((row) => row.id),
+    ['ppShareLink', 'ppCopyLink', 'ppDownload', 'ppOpenLocal']);
+  assert.equal(state.document.getElementById('ppOpenLocal').hidden, true, '还没下载就没有「用其他播放器打开」');
+  assert.equal(state.document.getElementById('ppCast').textContent, '外放');
+
+  state.click(state.document.getElementById('ppCast'));
+  assert.match(state.document.getElementById('ppCastMenu').className, /on/);
+  state.click(state.document.getElementById('ppCast'));
+  assert.doesNotMatch(state.document.getElementById('ppCastMenu').className, /on/, '再点一次要收起');
+});
+
+test('copy link puts the direct url on the clipboard', async () => {
+  const state = fixture(); state.ready();
+  state.click(state.document.getElementById('ppCast'));
+  state.click(state.document.getElementById('ppCopyLink'));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.deepEqual(state.shared.at(-1), { copied: 'https://media.example/19.mp4' });
+  assert.match(state.hint.textContent, /播放地址已复制/);
+  assert.equal(state.messages.length, 0, '复制不该弹原生面板');
+});
+
+test('download without an account asks for login and never starts a transfer', () => {
+  const state = fixture(); state.ready();
+  state.click(state.document.getElementById('ppCast'));
+  state.click(state.document.getElementById('ppDownload'));
+  assert.equal(state.messages.length, 0, '未登录不允许发出任何下载请求');
+  assert.equal(state.calls.length, 0, '未登录也不许自己发 fetch');
+  assert.equal(state.loginTrigger.opens, 1, '要顺手打开站点自己的登录弹窗');
+  assert.equal(state.hint.textContent, '登录后才能下载本集');
+  assert.equal(state.document.getElementById('ppCast').textContent, '外放');
+});
+
+test('download with an account hands the direct url to the native transfer', () => {
+  const state = fixture({ signedIn: true }); state.ready();
+  state.click(state.document.getElementById('ppCast'));
+  state.click(state.document.getElementById('ppDownload'));
+  const message = state.messages.at(-1);
+  assert.equal(message.action, 'download');
+  assert.equal(message.url, 'https://media.example/19.mp4');
+  assert.equal(message.name, '追剧AI_第19集.mp4');
+  assert.equal(message.signedIn, true);
+  assert.ok(message.id, '每个下载任务要有自己的 id');
+  assert.equal(state.document.getElementById('ppCast').textContent, '下载 0%');
+  assert.equal(state.loginTrigger.opens, 0, '已登录就不要再弹登录');
+});
+
+test('download progress and completion are reported on the control bar', () => {
+  const state = fixture({ signedIn: true }); state.ready();
+  state.click(state.document.getElementById('ppDownload'));
+  const { id } = state.messages.at(-1);
+  state.window.__zhuijuDownload({ id, event: 'progress', received: 43, total: 100 });
+  assert.equal(state.document.getElementById('ppCast').textContent, '下载 43%');
+
+  state.window.__zhuijuDownload({ id, event: 'done', path: '/tmp/追剧AI_第19集.mp4', name: '追剧AI_第19集.mp4', size: 104857600 });
+  assert.equal(state.document.getElementById('ppCast').textContent, '外放');
+  assert.equal(state.document.getElementById('ppOpenLocal').hidden, false, '下载完才能交给播放器 App');
+  assert.match(state.hint.textContent, /已下载/);
+  assert.match(state.hint.textContent, /100\.0 MB/);
+});
+
+test('download failure and cancellation both land back on a usable button', () => {
+  const state = fixture({ signedIn: true }); state.ready();
+  state.click(state.document.getElementById('ppDownload'));
+  const { id } = state.messages.at(-1);
+
+  state.click(state.document.getElementById('ppDownload'));
+  assert.equal(state.messages.at(-1).action, 'cancelDownload');
+  assert.equal(state.messages.at(-1).id, id);
+
+  state.window.__zhuijuDownload({ id, event: 'failed', reason: '网络中断' });
+  assert.equal(state.document.getElementById('ppCast').textContent, '外放');
+  assert.match(state.hint.textContent, /下载失败：网络中断/);
+});
+
+test('download refuses HLS playlists and encrypted streams', () => {
+  const hls = fixture({ signedIn: true }); hls.ready();
+  hls.video.currentSrc = 'https://media.example/19.m3u8';
+  hls.click(hls.document.getElementById('ppDownload'));
+  assert.equal(hls.messages.length, 0);
+  assert.match(hls.hint.textContent, /HLS/);
+
+  const blob = fixture({ signedIn: true }); blob.ready();
+  blob.video.currentSrc = 'blob:https://zhuiju.dpdns.org/9f1c';
+  blob.click(blob.document.getElementById('ppDownload'));
+  assert.equal(blob.messages.length, 0);
+  assert.match(blob.hint.textContent, /加密或临时流/);
+});
+
+test('a stale download id cannot rewrite the current state', () => {
+  const state = fixture({ signedIn: true }); state.ready();
+  state.click(state.document.getElementById('ppDownload'));
+  const { id } = state.messages.at(-1);
+  state.window.__zhuijuDownload({ id: id + 'old', event: 'done', path: '/tmp/old.mp4', size: 1 });
+  assert.equal(state.document.getElementById('ppCast').textContent, '下载 0%');
+  assert.equal(state.document.getElementById('ppOpenLocal').hidden, true);
+});
+
+test('an unresolved episode is not mistaken for a media url', () => {
+  const state = fixture(); state.ready();
+  // 站点还没解析出直链时，空的 <source src=""> 会被浏览器解析成当前页面地址
+  state.video.currentSrc = '';
+  state.video.src = '';
+  state.video.querySelector = (selector) => (selector === 'source' ? { getAttribute: () => '' } : null);
+  state.click(state.document.getElementById('ppCopyLink'));
+  assert.deepEqual(state.shared, [], '不能把页面地址当成片源复制出去');
+  assert.match(state.hint.textContent, /还没解析出直链/);
+});
+
+test('the player page url is refused even when it fills the source tag', () => {
+  const state = fixture(); state.ready();
+  state.video.currentSrc = '';
+  state.video.src = '';
+  state.video.querySelector = (selector) =>
+    (selector === 'source' ? { getAttribute: () => 'https://zhuiju.dpdns.org/player/?id=fixture' } : null);
+  state.click(state.document.getElementById('ppCast'));
+  state.click(state.document.getElementById('ppShareLink'));
+  assert.equal(state.messages.length, 0, '页面地址不能当片源交给别的 App');
+  assert.match(state.hint.textContent, /还没解析出直链/);
 });
