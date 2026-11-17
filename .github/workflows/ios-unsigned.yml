@@ -19,7 +19,7 @@ jobs:
         run: brew install xcodegen
 
       - name: Run bootstrap regression
-        run: node ios/Tests/bootstrap.test.mjs
+        run: node --test ios/Tests/*.test.mjs Tests/*.test.mjs
 
       - name: Generate Xcode project
         working-directory: ios

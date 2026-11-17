@@ -10,6 +10,7 @@ import {
 } from '../shell.js'
 import { u } from '../base.js'
 import { WEEK, TODAY, CATS, categoryItems, catCount, ROWS, allByPool, shows } from '../data.js'
+import { readWatchHistory } from '../watch-history.js'
 
 const state = {
   day: TODAY,
@@ -72,6 +73,24 @@ function rowsHTML() {
   return [...ROWS, ...state.extra].map(rowHTML).join('')
 }
 
+function continueWatchingHTML() {
+  const watched = readWatchHistory()
+    .map((id) => shows.find((show) => show.id === id))
+    .filter(Boolean)
+    .slice(0, 8)
+  if (!watched.length) return ''
+
+  return `<section class="row continue-row" aria-label="继续播放">
+    <div class="row-head">
+      <div><h2>继续播放</h2><p class="sub">接着看最近播放的电影和电视剧</p></div>
+      <a class="more-btn" href="${u('/library/history/')}">播放历史</a>
+    </div>
+    <div class="strip continue-strip">
+      ${watched.map((show) => posterCard(show, { badge: '继续播放' })).join('')}
+    </div>
+  </section>`
+}
+
 function bodyHTML() {
   return `<section class="page-body">
     <div class="wrap home">
@@ -95,6 +114,7 @@ function bodyHTML() {
     </section>
 
     <div id="homeSections">
+      ${continueWatchingHTML()}
       <section class="week">
         <div class="sec-head">
           <span class="sec-ico">${icon('calendar', 18)}</span>

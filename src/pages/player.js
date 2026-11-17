@@ -4,6 +4,7 @@ import { shell, bindShell, initTheme, pageHead, posterArt, posterCard, showToast
 import { findShow, shows } from '../data.js'
 import { u } from '../base.js'
 import { proxyReady, resolvePlay, PROXY } from '../runtime.js'
+import { recordWatchedShow } from '../watch-history.js'
 
 const id = new URLSearchParams(location.search).get('id')
 const show = findShow(id)
@@ -129,10 +130,7 @@ const label = document.getElementById('playerLabel')
 const hint = document.getElementById('playHint')
 
 function remember(idx) {
-  try {
-    const hist = JSON.parse(localStorage.getItem('kj-history') || '[]')
-    localStorage.setItem('kj-history', JSON.stringify([show.id, ...hist.filter((x) => x !== show.id)].slice(0, 12)))
-  } catch {}
+  recordWatchedShow(show.id)
   // 片源服务在线时把进度存到服务端（离线只存本地 localStorage）
   if (PROXY) {
     fetch(PROXY + '/api/progress', {

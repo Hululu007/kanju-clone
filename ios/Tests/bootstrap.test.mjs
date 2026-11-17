@@ -489,6 +489,16 @@ test('external playback refuses blob streams and says why', () => {
   assert.match(state.toastText(), /加密或临时流/);
 });
 
+test('verified playback resolution keeps its direct url available after iOS swaps the source to blob', async () => {
+  const state = fixture(); state.ready(); state.replies.push(json(valid));
+  await state.window.fetch(play);
+  state.video.currentSrc = 'blob:https://zhuiju.dpdns.org/9f1c';
+  state.click(state.document.getElementById('ppCast'));
+  state.click(state.document.getElementById('ppShareLink'));
+  assert.equal(state.messages.at(-1).url, valid.url,
+    '外放应复用当前选集已校验的解析地址，而不是把 blob 误判成未解析');
+});
+
 test('external playback without the app bridge falls back to the system share sheet', () => {
   const state = fixture({ bridge: false }); state.ready();
   state.click(state.document.getElementById('ppCast'));
@@ -506,7 +516,9 @@ test('both brand logos use the supplied artwork and hide the old svg', () => {
   assert.match(css, /\.brand \.brand-mark>svg\{display:none\}/);
   assert.match(css, /\.tabbar \.tab\.center \.tab-circle\{[^}]*background-image:var\(--brand-logo\)/);
   assert.match(css, /\.tabbar \.tab\.center \.tab-circle>svg\{display:none\}/);
-  assert.match(css, /#iosFullBtn\{display:none\}/, '旧的全屏入口要彻底隐藏');
+  assert.match(css, /#iosFullBtn\{display:none!important\}/, '站点样式不能把竖屏右上角旧全屏入口重新显示出来');
+  assert.match(css, /video::-webkit-media-controls-fullscreen-button\{display:none!important\}/,
+    '原生控制栏挂载前也不能闪出右上角全屏键');
 });
 
 test('landscape playback becomes immersive without forcing rotation', () => {
@@ -564,6 +576,8 @@ test('injected styles keep episode cards from squeezing or overflowing', () => {
   const css = state.head.children[0].textContent;
   assert.match(css, /\.ep\{min-height:38px!important;height:auto!important/);
   assert.match(css, /\.ep-grid\{grid-auto-rows:minmax\(38px,auto\)!important\}/);
+  assert.match(css, /\.pp-tabs\{touch-action:pan-y;overscroll-behavior-x:contain\}/,
+    '标签行处理横向切页，纵向滚动仍由页面原生接管');
 });
 
 test('touch devices get the sticky episode hover reset', () => {
@@ -698,6 +712,8 @@ test('scrolling surfaces drop expensive blur and smooth positioning', async () =
   const css = state.head.children.map((child) => child.textContent || '').join('\n');
   assert.match(css, /\.topbar,\.page-head\{-webkit-backdrop-filter:none!important/, '顶栏不再逐帧重算模糊');
   assert.match(css, /\.tabbar\{-webkit-backdrop-filter:none!important/, '底栏同样处理');
+  assert.match(css, /\.p-badge,\.p-heat\{-webkit-backdrop-filter:none!important/,
+    '首页海报上的多组模糊角标不能在惯性滚动中反复合成');
   assert.match(css, /\.days,\.strip,\.cat-list,\.line-group\{scroll-behavior:auto!important\}/,
     '横滑条不接受平滑滚动，否则重建后一设 scrollLeft 就整条滑过去');
   assert.match(css, /#playHint,\.pp-hint\{min-height:2\.6em/, '提示行预留高度，文案变化不推动下方内容');
@@ -716,6 +732,14 @@ test('swiping the tab row switches to the next tab', async () => {
   state.touch('touchstart', state.tabButtons[1], 300, 500);
   state.touch('touchend', state.tabButtons[1], 262, 380);
   assert.deepEqual(state.clicked, ['cast'], '纵向滚动不能被当成切页手势');
+});
+
+test('cancelling a tab-row touch clears the pending swipe', () => {
+  const state = fixture(); state.ready();
+  state.touch('touchstart', state.tabButtons[0], 300, 500);
+  state.emit('touchcancel', { target: state.tabButtons[0] });
+  state.touch('touchend', state.tabButtons[0], 150, 500);
+  assert.deepEqual(state.clicked, [], '系统取消手势后，后续无关触摸不能触发标签切页');
 });
 
 test('home date strip re-centres after the site re-renders the days', async () => {

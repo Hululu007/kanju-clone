@@ -39,6 +39,7 @@
   function invalidate() {
     generation += 1;
     pendingPlayback = null;
+    mediaMemo = { url: '', ep: '' };
     if (playbackController) playbackController.abort();
     var video = document.getElementById('video');
     if (video) {
@@ -117,6 +118,9 @@
         throw new Error('片源身份或集数校验失败');
       }
       pendingPlayback = { index: index, generation: requestGeneration, url: data.url };
+      /* iOS 原生 HLS 会把 video.currentSrc 改成 blob:；保留已校验的原始直链，
+         让外放/下载状态和实际成功解析的这一集保持一致。 */
+      mediaMemo = { url: data.url, ep: String(index) };
       return response;
     } finally {
       if (isPlayback && signal) signal.removeEventListener('abort', abort);
@@ -222,6 +226,8 @@
       '.ep-grid{grid-auto-rows:minmax(38px,auto)!important}',
       '.ep{min-height:38px!important;height:auto!important;padding:4px 6px!important;line-height:1.2!important;text-align:center;overflow-wrap:anywhere}',
       '@media (max-width:639px){.ep-grid{grid-auto-rows:minmax(42px,auto)!important}.ep{min-height:42px!important}}',
+      /* 手势标签由注入层处理横向切页，纵向仍交给页面滚动，避免 WebKit 抢走横滑。 */
+      '.pp-tabs{touch-action:pan-y;overscroll-behavior-x:contain}',
       /* 触屏没有 hover：iOS 会把最后一次点的按钮的 :hover 粘住，
          某集文字发黑看着像“被加了粗”，其实只是 hover 没褪。按粗指针重置回常态。 */
       '@media (hover:none){#epGrid .ep:hover{color:var(--ink-66)!important;background:rgba(255,255,255,.05)!important}html[data-theme=\'light\'] #epGrid .ep:hover{color:var(--ink-66)!important;background:rgba(15,20,24,.04)!important}#epGrid .ep.on:hover{color:var(--mint-text)!important;background:rgba(22,224,157,.16)!important}html[data-theme=\'light\'] #epGrid .ep.on:hover{color:#0b8a5f!important;background:rgba(18,153,111,.14)!important}}',
@@ -253,7 +259,9 @@
       '.brand .brand-mark>svg{display:none}',
       '.tabbar .tab.center .tab-circle{background-image:var(--brand-logo);background-size:cover;background-position:center;overflow:hidden}',
       '.tabbar .tab.center .tab-circle>svg{display:none}',
-      '#iosFullBtn{display:none}',
+      '#iosFullBtn{display:none!important}',
+      /* 控制栏接管后，首屏脚本挂载前也不让 WebKit 原生右上角全屏入口闪现。 */
+      'video::-webkit-media-controls-fullscreen-button{display:none!important}',
       /* 弹幕改用 transform 动画（走合成层），不再每帧动 left：
          left 每帧触发布局+重绘，播放页滚动被它拖住，自动化也一直等不到「稳定」。 */
       '.dm-layer{contain:layout paint;transform:translateZ(0)}',
@@ -264,6 +272,8 @@
       '.topbar,.page-head{-webkit-backdrop-filter:none!important;backdrop-filter:none!important;background:linear-gradient(180deg,rgba(10,20,28,.97),rgba(10,20,28,.9))!important}',
       'html[data-theme=\'light\'] .topbar,html[data-theme=\'light\'] .page-head{background:linear-gradient(180deg,rgba(255,255,255,.97),rgba(255,255,255,.92))!important}',
       '.tabbar{-webkit-backdrop-filter:none!important;backdrop-filter:none!important}',
+      /* 首页一屏有大量海报角标；逐卡 backdrop-filter 会让 WebKit 在惯性滚动中反复重算模糊。 */
+      '.p-badge,.p-heat{-webkit-backdrop-filter:none!important;backdrop-filter:none!important}',
       /* 横滑条改回即时定位：站点给日期条/分类条开了 scroll-behavior:smooth，
          后台刷新重建卡片后我们一设 scrollLeft 就会整条滑过去，视觉上就是「日期条自己漂走」。 */
       '.days,.strip,.cat-list,.line-group{scroll-behavior:auto!important}',
@@ -1206,6 +1216,9 @@
     /* 站点层也在监听同一个手势：标记住，避免一次滑动跳两页 */
     try { event.__zhuijuSwipeHandled = true; } catch (error) { /* 只读事件对象 */ }
     if (typeof tabs[next].click === 'function') tabs[next].click();
+  }, true);
+  document.addEventListener('touchcancel', function () {
+    tabSwipe = null;
   }, true);
 
   /* ---------- 账号状态：同一屏不能同时出现「已登录 kenzhao11」和「游客账号」 ----------
