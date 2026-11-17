@@ -1,6 +1,6 @@
 # 追剧 AI iOS 客户端
 
-独立的 Swift 工程，用 WKWebView 加载 `https://zhuiju.dpdns.org/`，复用现有账号、片源和观看进度后端。审查修复版 0.1.1 最低支持 iOS 15，因为站点的模块使用顶层 await。
+独立的 Swift 工程，用 WKWebView 加载 `https://zhuiju.dpdns.org/`，复用现有账号、片源和观看进度后端。审查修复版 0.1.3（在 0.1.1/0.1.2 基础上继续修真机回归问题）最低支持 iOS 15，因为站点的模块使用顶层 await。
 
 ## 已实现
 
@@ -8,17 +8,20 @@
 - 同域 API 重写：把 `kanju-api.kenzhao123.workers.dev` 的接口请求转到站点域名，并补齐 `AbortSignal.timeout`。
 - 随包内置 hls.js 1.5.17，支持系统 HLS 时通过 NativeHls 兼容层优先使用系统解码，不依赖 jsdelivr。
 - 1／1.5／2／2.5／3 倍速记忆，播放开始和元数据加载时自动应用。
-- 横屏、原生全屏播放、画中画（iOS 14.2+）、返回手势。
+- 全屏与横屏：播放页工具栏带「全屏」按钮，进入后播放器铺满整屏（竖屏也铺满，横屏去掉安全区黑边），并由原生层锁横屏、隐藏状态栏与底部小白条；退出时恢复竖屏。播放中转到横屏也会自动进入沉浸模式。
+- 浅色主题：底栏图标与文字、全屏工具条都按主题切换深色文字，不再白底白字。
+- 分类卡片横排时按卡片实际宽度排布，「更新至第 N 集」不再被列宽挤压、重叠。
+- 搜索：请求携带输入框关键词（站点 `proxyList` 漏传 `q` 时由客户端补齐，不替换接口）。
 - `target="_blank"` 站内链接在应用内打开，站外 HTTPS 链接交给 Safari。
 - 页面加载失败时显示重试界面；网页弹窗改用原生对话框。
 - 片源返回必须与选中的影片、索引、集数一致且 verified=true，只接受无账号密码的 HTTPS 片源地址。
 - 新的选集或切线操作取消旧的解析请求；加载完成后再次触发播放，避免首次 play 早于媒体就绪。
 - 网站访问门 401 单独跳回网站访问密码页，不交给账号模块清空账号缓存。
-- 横屏播放时展开播放器并保留线路和显示设置；网页画中画按钮接入 WebKit presentation mode。
+- 网页画中画按钮接入 WebKit presentation mode。
 
 ## 回归验证
 
-本地运行 `node ios/Tests/bootstrap.test.mjs`，覆盖请求头与请求体保留、访问门与账号过期区分、错误片源拒绝、异步响应竞争、后台状态和存储异常。
+本地运行 `node --test ios/Tests/bootstrap.test.mjs`，覆盖请求头与请求体保留、访问门与账号过期区分、错误片源拒绝、异步响应竞争、后台状态、存储异常，以及 0.1.2/0.1.3 新增的全屏按钮、浅色主题与分类卡片兜底样式、选集卡片不压字、播放失败不再静默、搜索关键词。
 
 云端生成八秒的测试视频与 HLS 清单，再运行 XCTest/WKWebView 测试。测试必须通过后才生成 IPA。测试媒体仅进入测试 bundle，正式 App 不包含这些样本。
 
@@ -35,6 +38,10 @@ open ZhuijuAI.xcodeproj
 ```
 
 真机调试需要在 Signing & Capabilities 选择自己的 Team，并把 Bundle Identifier 改成未被占用的标识。
+
+## 图标
+
+`scripts/appicon-source.png` 是设计稿，跑 `powershell -File scripts/make-icon.ps1` 会去掉外圈白边并生成 1024×1024、无透明通道的 `AppIcon-1024.png`（iOS 会自己裁圆角，图标本身不能带白边或 alpha）。
 
 ## 云端构建未签名 IPA
 

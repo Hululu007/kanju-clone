@@ -7,12 +7,34 @@ final class WebViewController: UIViewController {
         static let host = "zhuiju.dpdns.org"
     }
 
+    /// 播放器全屏状态由网页内的「全屏」按钮通过 WKScriptMessageHandler 通知。
+    private enum PlayerAction: String {
+        case fullscreen
+        case inline
+    }
+
+    private final class PlayerBridge: NSObject, WKScriptMessageHandler {
+        weak var target: WebViewController?
+
+        func userContentController(
+            _ userContentController: WKUserContentController,
+            didReceive message: WKScriptMessage
+        ) {
+            guard let body = message.body as? [String: Any],
+                  let action = body["action"] as? String else { return }
+            target?.apply(playerAction: action)
+        }
+    }
+
     private let progressView = UIProgressView(progressViewStyle: .bar)
     private let errorContainer = UIView()
     private let errorLabel = UILabel()
     private let retryButton = UIButton(type: .system)
     private var progressObservation: NSKeyValueObservation?
     private var lastFailedURL: URL?
+    private var safeAreaConstraints: [NSLayoutConstraint] = []
+    private var fullscreenConstraints: [NSLayoutConstraint] = []
+    private var isPlayerFullscreen = false
 
     private lazy var webView: WKWebView = {
         let configuration = WKWebViewConfiguration()
@@ -21,27 +43,36 @@ final class WebViewController: UIViewController {
         configuration.mediaTypesRequiringUserActionForPlayback = []
         configuration.preferences.javaScriptCanOpenWindowsAutomatically = false
         configuration.defaultWebpagePreferences.preferredContentMode = .mobile
-        configuration.applicationNameForUserAgent = "ZhuijuAI/0.1.1 iOS"
+        configuration.applicationNameForUserAgent = "ZhuijuAI/0.1.3 iOS"
         if #available(iOS 14.2, *) {
             configuration.allowsPictureInPictureMediaPlayback = true
         }
+        let contentController = configuration.userContentController
+        let bridge = PlayerBridge()
+        bridge.target = self
+        contentController.add(bridge, name: "iosPlayer")
         if let scriptURL = Bundle.main.url(forResource: "AppBootstrap", withExtension: "js"),
            let source = try? String(contentsOf: scriptURL, encoding: .utf8) {
             let script = WKUserScript(source: source, injectionTime: .atDocumentStart, forMainFrameOnly: true)
-            configuration.userContentController.addUserScript(script)
+            contentController.addUserScript(script)
         }
         if let hlsURL = Bundle.main.url(forResource: "hls.min", withExtension: "js"),
            let hlsSource = try? String(contentsOf: hlsURL, encoding: .utf8) {
             let script = WKUserScript(source: hlsSource, injectionTime: .atDocumentStart, forMainFrameOnly: true)
-            configuration.userContentController.addUserScript(script)
+            contentController.addUserScript(script)
         }
         if let scriptURL = Bundle.main.url(forResource: "NativeHls", withExtension: "js"),
            let source = try? String(contentsOf: scriptURL, encoding: .utf8) {
-            configuration.userContentController.addUserScript(WKUserScript(source: source, injectionTime: .atDocumentStart, forMainFrameOnly: true))
+            contentController.addUserScript(WKUserScript(source: source, injectionTime: .atDocumentStart, forMainFrameOnly: true))
         }
         let webView = WKWebView(frame: .zero, configuration: configuration)
         webView.allowsBackForwardNavigationGestures = true
-        webView.scrollView.contentInsetAdjustmentBehavior = .automatic
+        // 页面内部自己用 .main 滚动；外层 WKScrollView 不应该再参与滚动。
+        // .automatic 会在旋转/键盘弹出时反复调整 contentInset，表现为内容自己漂移。
+        webView.scrollView.contentInsetAdjustmentBehavior = .never
+        webView.scrollView.bounces = false
+        webView.scrollView.alwaysBounceVertical = false
+        webView.scrollView.showsHorizontalScrollIndicator = false
         webView.scrollView.backgroundColor = .black
         webView.backgroundColor = .black
         webView.isOpaque = true
@@ -63,6 +94,23 @@ final class WebViewController: UIViewController {
         .lightContent
     }
 
+    override var prefersStatusBarHidden: Bool {
+        isPlayerFullscreen
+    }
+
+    override var prefersHomeIndicatorAutoHidden: Bool {
+        isPlayerFullscreen
+    }
+
+    /// 全屏时锁横屏，其余时候保留系统自动旋转。
+    override var supportedInterfaceOrientations: UIInterfaceOrientationMask {
+        isPlayerFullscreen ? .landscape : .allButUpsideDown
+    }
+
+    override var shouldAutorotate: Bool {
+        true
+    }
+
     private func configureLayout() {
         progressView.progressTintColor = UIColor(red: 0.13, green: 0.72, blue: 0.95, alpha: 1)
         progressView.trackTintColor = .clear
@@ -70,16 +118,59 @@ final class WebViewController: UIViewController {
         webView.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(webView)
         view.addSubview(progressView)
-        NSLayoutConstraint.activate([
+
+        safeAreaConstraints = [
             webView.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor),
             webView.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor),
             webView.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
             webView.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor),
+        ]
+        // 全屏播放时铺满整块屏幕，横屏不因刘海安全区留下黑边
+        fullscreenConstraints = [
+            webView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            webView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            webView.topAnchor.constraint(equalTo: view.topAnchor),
+            webView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+        ]
+        NSLayoutConstraint.activate(safeAreaConstraints + [
             progressView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             progressView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             progressView.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
             progressView.heightAnchor.constraint(equalToConstant: 2),
         ])
+    }
+
+    fileprivate func apply(playerAction: String) {
+        guard let action = PlayerAction(rawValue: playerAction) else { return }
+        setPlayerFullscreen(action == .fullscreen)
+    }
+
+    private func setPlayerFullscreen(_ on: Bool) {
+        guard isPlayerFullscreen != on else { return }
+        isPlayerFullscreen = on
+        NSLayoutConstraint.deactivate(on ? safeAreaConstraints : fullscreenConstraints)
+        NSLayoutConstraint.activate(on ? fullscreenConstraints : safeAreaConstraints)
+        setNeedsStatusBarAppearanceUpdate()
+        setNeedsUpdateOfHomeIndicatorAutoHidden()
+        if #available(iOS 16.0, *) {
+            setNeedsUpdateOfSupportedInterfaceOrientations()
+        }
+        requestRotation(landscape: on)
+    }
+
+    private func requestRotation(landscape: Bool) {
+        if #available(iOS 16.0, *) {
+            guard let scene = view.window?.windowScene else { return }
+            let mask: UIInterfaceOrientationMask = landscape ? .landscape : .portrait
+            scene.requestGeometryUpdate(.iOS(interfaceOrientations: mask)) { _ in
+                // 旋转被系统拒绝时保持当前布局，不阻断播放
+            }
+        } else {
+            // iOS 15 没有公开的强制旋转接口，用 KVC 触发同一套系统旋转流程
+            let target: UIInterfaceOrientation = landscape ? .landscapeRight : .portrait
+            UIDevice.current.setValue(target.rawValue, forKey: "orientation")
+            UIViewController.attemptRotationToDeviceOrientation()
+        }
     }
 
     private func configureErrorView() {
