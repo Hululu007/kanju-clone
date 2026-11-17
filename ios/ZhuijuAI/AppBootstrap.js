@@ -200,11 +200,17 @@
       'html[data-ios-immersive] #playTools{display:none!important}',
       'html[data-ios-immersive] #settingsPanel,html[data-ios-immersive] #lineBar{display:none!important}',
       'html[data-ios-immersive] .p-label{display:none!important}',
+      /* 全屏里可能残留的其他浮层入口（弹幕输入、画中画、下一集、提示行等）一并收起 */
+      'html[data-ios-immersive] .pp-toolbar,html[data-ios-immersive] .dm-input,html[data-ios-immersive] #dmInputWrap,html[data-ios-immersive] .pp-hint,html[data-ios-immersive] #playHint{display:none!important}',
       /* 跳过片头/片尾和挂件上移，避免和底部控制栏叠在一起 */
       'html[data-ios-immersive] .skip-btn{bottom:calc(58px + env(safe-area-inset-bottom,0px))!important}',
-      'html[data-ios-immersive] #ppCtrl{z-index:10003!important;padding:8px 12px calc(10px + env(safe-area-inset-bottom,0px))!important;gap:8px!important}',
-      'html[data-ios-immersive] #ppCtrl .pc-btn{font-size:13px;padding:12px 13px;min-height:42px}',
-      'html[data-ios-immersive] #ppCtrl .pc-seek{height:30px}',
+      'html[data-ios-immersive] #ppCtrl{z-index:10003!important;padding:8px 10px calc(10px + env(safe-area-inset-bottom,0px))!important;gap:6px!important}',
+      /* 沉浸态按钮变大后，「退出全屏」四个字会把整条挤出屏幕（实测 387 > 367）。
+         收紧左右内边距、给按钮固定宽度、让进度条吃掉剩余空间，按钮就不会被裁。 */
+      'html[data-ios-immersive] #ppCtrl .pc-btn{font-size:13px;padding:10px 9px;min-height:42px;flex:0 0 auto}',
+      'html[data-ios-immersive] #ppCtrl .pc-time{flex:0 0 auto;font-size:11px}',
+      'html[data-ios-immersive] #ppCtrl .pc-seek{height:30px;min-width:40px}',
+      'html[data-ios-immersive] #ppCtrl{min-width:0}',
       /* 浅色主题：底栏是白底，文字必须转深色 */
       'html[data-theme=\'light\'] .tabbar .tab{color:rgba(15,20,24,.6)!important}',
       'html[data-theme=\'light\'] .tabbar .tab.on{color:#0b8a5f!important;background:rgba(18,153,111,.13)!important}',
@@ -248,6 +254,21 @@
       '.tabbar .tab.center .tab-circle{background-image:var(--brand-logo);background-size:cover;background-position:center;overflow:hidden}',
       '.tabbar .tab.center .tab-circle>svg{display:none}',
       '#iosFullBtn{display:none}',
+      /* 弹幕改用 transform 动画（走合成层），不再每帧动 left：
+         left 每帧触发布局+重绘，播放页滚动被它拖住，自动化也一直等不到「稳定」。 */
+      '.dm-layer{contain:layout paint;transform:translateZ(0)}',
+      '.dm-item{left:0!important;animation:dm-fly-x var(--dur,9s) linear forwards!important;will-change:transform!important}',
+      '@keyframes dm-fly-x{from{transform:translateX(100vw)}to{transform:translateX(-100%)}}',
+      /* App 内场景：固定/粘性顶栏的 backdrop-filter 在 iOS 的 WebKit 里滚动时每帧重算，
+         长列表明显掉帧。换成等效的半透明底色（观感基本不变）。 */
+      '.topbar,.page-head{-webkit-backdrop-filter:none!important;backdrop-filter:none!important;background:linear-gradient(180deg,rgba(10,20,28,.97),rgba(10,20,28,.9))!important}',
+      'html[data-theme=\'light\'] .topbar,html[data-theme=\'light\'] .page-head{background:linear-gradient(180deg,rgba(255,255,255,.97),rgba(255,255,255,.92))!important}',
+      '.tabbar{-webkit-backdrop-filter:none!important;backdrop-filter:none!important}',
+      /* 横滑条改回即时定位：站点给日期条/分类条开了 scroll-behavior:smooth，
+         后台刷新重建卡片后我们一设 scrollLeft 就会整条滑过去，视觉上就是「日期条自己漂走」。 */
+      '.days,.strip,.cat-list,.line-group{scroll-behavior:auto!important}',
+      /* 播放提示行预留两行高度：提示词变化不再把下方的标题/选集区顶得上下跳。 */
+      '#playHint,.pp-hint{min-height:2.6em;display:flex;align-items:center}',
     ].join('\n');
     document.head.appendChild(style);
     mountCtrlBar();
@@ -338,7 +359,45 @@
 
   function syncFullButton() {
     var button = document.getElementById('ppFull') || document.getElementById('iosFullBtn');
-    if (button) button.textContent = userFullscreen ? '退出全屏' : '全屏';
+    if (!button) return;
+    var immersive = userFullscreen;
+    button.textContent = immersive ? '退出全屏' : '全屏';
+    /* 无障碍名也跟着切换：全屏里读屏/自动化不能再看到一个叫「全屏播放」的入口 */
+    button.setAttribute('aria-label', immersive ? '退出全屏' : '全屏播放');
+  }
+
+  var HIDE_IN_IMMERSIVE = [
+    '#playTools', '.pp-toolbar', '#settingsPanel', '#lineBar',
+    '.dm-input', '#dmInputWrap', '#pipBtn', '#nextEpBtn', '#iosFullBtn',
+    '#player .p-label', '.pp-hint', '#playHint'
+  ];
+
+  function hideImmersiveControls() {
+    for (var h = 0; h < HIDE_IN_IMMERSIVE.length; h++) {
+      var nodes = document.querySelectorAll ? document.querySelectorAll(HIDE_IN_IMMERSIVE[h]) : [];
+      for (var i = 0; i < nodes.length; i++) {
+        var el = nodes[i];
+        if (!el || el.__iosImmersiveState !== undefined) continue;
+        /* hidden 是布尔反射属性：默认 false，不是 undefined，恢复时也要按布尔写回 */
+        el.__iosImmersiveState = { hidden: !!el.hidden, display: el.style ? el.style.display : '' };
+        el.hidden = true;
+        if (el.style) el.style.display = 'none';
+      }
+    }
+  }
+
+  function restoreImmersiveControls() {
+    for (var h = 0; h < HIDE_IN_IMMERSIVE.length; h++) {
+      var nodes = document.querySelectorAll ? document.querySelectorAll(HIDE_IN_IMMERSIVE[h]) : [];
+      for (var i = 0; i < nodes.length; i++) {
+        var el = nodes[i];
+        if (!el || el.__iosImmersiveState === undefined) continue;
+        var state = el.__iosImmersiveState;
+        el.hidden = !!state.hidden;
+        if (el.style) el.style.display = state.display;
+        el.__iosImmersiveState = undefined;
+      }
+    }
   }
 
   function applyImmersive() {
@@ -359,6 +418,9 @@
         /* hidden 是反射属性，赋值等于把 hidden 属性也写上 */
         panel.hidden = true;
       }
+      hideImmersiveControls();
+    } else {
+      restoreImmersiveControls();
     }
     syncFullButton();
   }
@@ -406,7 +468,9 @@
   }
 
   function announce(text) {
-    if (document.getElementById('playHint')) hintText(text);
+    /* 只走悬浮 toast，不动页面里的提示行：
+       #playHint 在正常文档流里，每次改写都会把它下面的标题/选集区整块挤动，
+       真机上看起来就是「上下滑时位置跳动」。提示行另用固定高度兜底。 */
     var box = document.getElementById('iosToast');
     if (!box && document.body && typeof document.createElement === 'function') {
       box = document.createElement('div');
@@ -604,23 +668,57 @@
     try { video.currentTime = next; } catch (error) { /* 还没到可跳转的状态 */ }
   }
 
-  /* 真正能交给外部 App 的地址；同时把「还没有地址」和「地址不可交」分开，
-     否则空 src 会被浏览器解析成当前页面地址，看起来像一条可以直接丢给播放器的片源。 */
+  /* 真正能交给外部 App 的地址；同时把「还没有地址」和「地址不可交」分开。
+     - 空 <source src> 会被浏览器解析成当前页面地址，必须挡掉；
+     - 换集重渲染会把 <video> 整块换掉或清空 src，按钮此时不能说「还没解析出直链」——
+       同一集内记住最后一次真实见过的 http(s) 片源（m3u8 也记住，虽然不能整集下载，
+       但能如实提示「分片线路不可下载」，而不是冤枉页面没解析）。 */
+  var mediaMemo = { url: '', ep: '' };
+
+  function episodeKey() {
+    var active = document.querySelector ? document.querySelector('.ep.on') : null;
+    var ep = active && active.dataset ? active.dataset.ep : '';
+    return ep === undefined || ep === null ? '' : String(ep);
+  }
+
+  function isPageUrl(url) {
+    var page = String(window.location && window.location.href || '').split('#')[0].split('?')[0];
+    return !!page && String(url).split('#')[0].split('?')[0] === page;
+  }
+
+  function mediaCandidates(video) {
+    var list = [];
+    if (!video) return list;
+    if (video.currentSrc) list.push(video.currentSrc);
+    if (video.src) list.push(video.src);
+    if (typeof video.getAttribute === 'function') list.push(video.getAttribute('src'));
+    var source = video.querySelector ? video.querySelector('source') : null;
+    if (source && typeof source.getAttribute === 'function') list.push(source.getAttribute('src'));
+    return list;
+  }
+
+  function rememberMedia() {
+    var list = mediaCandidates(document.getElementById('video'));
+    for (var i = 0; i < list.length; i++) {
+      var url = list[i] || '';
+      if (/^https?:/i.test(url) && !isPageUrl(url)) {
+        mediaMemo = { url: url, ep: episodeKey() };
+        return;
+      }
+    }
+  }
+
   function mediaState() {
     var video = document.getElementById('video');
-    if (!video) return { url: '', reason: 'none' };
-    var url = video.currentSrc || video.src || '';
-    if (!url && typeof video.querySelector === 'function') {
-      var source = video.querySelector('source');
-      /* 用原始属性，不用解析后的 source.src：空的 src 会被解析成页面地址 */
-      var raw = source ? (source.getAttribute ? source.getAttribute('src') : '') || '' : '';
-      if (raw) url = raw;
+    var list = mediaCandidates(video);
+    for (var i = 0; i < list.length; i++) {
+      var url = list[i] || '';
+      if (/^https?:/i.test(url) && !isPageUrl(url)) return { url: url, reason: '' };
     }
-    if (!url) return { url: '', reason: 'none' };
-    if (!/^https?:/i.test(url)) return { url: '', reason: 'opaque' };
-    var page = String(window.location && window.location.href || '').split('#')[0].split('?')[0];
-    if (page && url.split('#')[0].split('?')[0] === page) return { url: '', reason: 'none' };
-    return { url: url, reason: '' };
+    /* 元素被换掉/清空后，同一集内用记忆里的地址兜底 */
+    if (mediaMemo.url && mediaMemo.ep === episodeKey()) return { url: mediaMemo.url, reason: '' };
+    var blob = video && String(video.currentSrc || video.src || '').indexOf('blob:') === 0;
+    return { url: '', reason: blob ? 'opaque' : 'none' };
   }
 
   function mediaUrl() {
@@ -630,7 +728,7 @@
   function mediaReason() {
     return mediaState().reason === 'opaque'
       ? LINK_UNSUPPORTED
-      : '这一集还没解析出直链，先点播放再试。';
+      : '还没拿到直链：先点播放让这一集解析出地址，再试。';
   }
 
   /* ---------- 外放 / 下载菜单 ---------- */
@@ -690,6 +788,16 @@
     else row.textContent = text;
   }
 
+  function downloadNote() {
+    if (downloadState.busy) return downloadState.percent ? downloadState.percent + '%' : '准备中';
+    if (downloadState.path) return '已下载';
+    if (!signedIn()) return '需登录';
+    var state = mediaState();
+    if (!state.url) return state.reason === 'opaque' ? '线路不可下载' : '还没拿到直链';
+    if (/\.m3u8(?:[?#]|$)/i.test(state.url)) return '分片线路不可下载';
+    return '开始下载';
+  }
+
   function syncDownloadRow() {
     var row = document.getElementById('ppDownload');
     if (row) row.className = 'pc-menu-row' + (downloadState.busy ? ' busy' : '');
@@ -705,8 +813,7 @@
         ? '下载 ' + (downloadState.percent ? downloadState.percent + '%' : '0%')
         : '外放';
     }
-    noteOf('ppDownload', downloadState.busy ? (downloadState.percent ? downloadState.percent + '%' : '准备中')
-      : (downloadState.path ? '已下载' : '需登录'));
+    noteOf('ppDownload', downloadNote());
   }
 
   function closeCastMenu() {
@@ -784,7 +891,9 @@
     var url = mediaUrl();
     if (!url) {
       closeCastMenu();
-      announce(mediaReason());
+      var state = mediaState();
+      announce(state.reason === 'opaque' ? LINK_UNSUPPORTED
+        : '还没拿到直链：先点播放让这一集解析出地址，再回来下载。');
       return;
     }
     if (/\.m3u8(?:[?#]|$)/i.test(url)) {
@@ -922,6 +1031,12 @@
     if (!event.target || event.target.id !== 'ppSeek') return;
     seekTo(Number(event.target.value) / 1000);
   }, true);
+  ['loadedmetadata', 'play', 'durationchange'].forEach(function (name) {
+    document.addEventListener(name, function (event) {
+      if (!event.target || event.target.id !== 'video') return;
+      rememberMedia();
+    }, true);
+  });
 
   /* ---------- 搜索关键词兜底 ---------- */
   function currentKeyword() {
@@ -983,23 +1098,34 @@
   /* 返回 false 表示今天那张卡还没渲染出来，可以再试一次。
      用「卡片自己身上的标记」判断是否已处理：站点重新渲染 #days 会换掉整批卡片，
      新卡片没有标记 → 会自动再居中一次；用户手动拖动后卡片不变 → 不再抢滚动条。 */
+  /* 记住日期条该停在哪：用户没动过就停今天，动过就保留用户的位置。
+     站点后台刷新重建 #days 会把 scrollLeft 重置成 0 —— 不补回去就是真机上
+     「日期条自己漂走」；每次都重算又会反复强制布局，所以只在真的偏了才写。 */
+  var stripMemory = { left: 0 };
+
+  function clampScroll(value, max) {
+    return Math.min(max, Math.max(0, value));
+  }
+
+  /* 今天那张卡的偏移量与当前 scrollLeft 无关，所以重复算出来的目标值一致（幂等） */
+  function todayOffset(days, active) {
+    var stripRect = days.getBoundingClientRect();
+    var activeRect = active.getBoundingClientRect();
+    /* 日期条是 scroll-snap 容器（每张卡一个 snap 点），居中会被吸附回卡片边界，
+       所以把今天对齐到可视区起点，结果稳定 */
+    return days.scrollLeft + (activeRect.left - stripRect.left);
+  }
+
   function centerTodayStrip() {
     var days = document.getElementById('days');
     if (!days || typeof days.querySelector !== 'function') return false;
     var active = days.querySelector('.day.on');
     if (!active) return false;
-    if (!active.dataset) return true;
-    if (active.dataset.iosCentred) return true;
-    active.dataset.iosCentred = '1';
-    if (stripTouched) return true;
     var max = Math.max(0, days.scrollWidth - days.clientWidth);
     if (max <= 0) return true;
-    var stripRect = days.getBoundingClientRect();
-    var activeRect = active.getBoundingClientRect();
-    /* 日期条是 scroll-snap 容器（每张卡一个 snap 点），居中会被吸附回卡片边界，
-       所以把今天对齐到可视区起点，结果稳定；夹在 [0, max] 之间。 */
-    var target = days.scrollLeft + (activeRect.left - stripRect.left);
-    days.scrollLeft = Math.min(max, Math.max(0, target));
+    var target = clampScroll(stripTouched ? stripMemory.left : todayOffset(days, active), max);
+    if (Math.abs(days.scrollLeft - target) > 4) days.scrollLeft = target;
+    stripMemory.left = days.scrollLeft;
     return true;
   }
 
@@ -1014,20 +1140,117 @@
   }
 
   function scheduleStripCentering() {
+    /* 观察器一开始就挂上：站点先渲染骨架、再按接口数据填充时，
+       只靠几次定时器会错过真正那次渲染。childList 变化不会因为我们写 scrollLeft 再触发，
+       所以不会自激。 */
+    watchStrip();
     var delays = [0, 250, 700, 1500, 3000];
     for (var i = 0; i < delays.length; i++) {
       (function (delay) {
         setTimeout(function () {
-          if (centerTodayStrip()) watchStrip();
+          centerTodayStrip();
+          watchStrip();
         }, delay);
       }(delays[i]));
     }
   }
 
+  /* 只有用户真的拨过，才把他的位置记下来。
+     记录的时机要延后一拍：站点后台刷新重建 #days 时浏览器会把 scrollLeft 归零，
+     这个 0 也会派发 scroll 事件 —— 立刻记下去就等于把用户的位置抹掉了。
+     延迟一拍后，观察器里的恢复已经把位置写回来了，最终记下的是用户看的那一天。 */
+  document.addEventListener('scroll', function (event) {
+    if (!event.target || event.target.id !== 'days' || !stripTouched) return;
+    stripMemory.left = event.target.scrollLeft;
+  }, true);
   document.addEventListener('touchstart', markStripTouched, true);
   document.addEventListener('pointerdown', markStripTouched, true);
   scheduleStripCentering();
   onWindow('popstate', scheduleStripCentering);
+
+  /* ---------- 选集区横滑切页（投屏/讨论/反馈） ----------
+     这些标签页现在只能点，真机上横滑多次没反应。横滑手势明显压过纵向时切换相邻页。 */
+  var tabSwipe = null;
+
+  function tabRow() {
+    return document.querySelector ? document.querySelector('.pp-tabs') : null;
+  }
+
+  document.addEventListener('touchstart', function (event) {
+    var row = tabRow();
+    if (!row || !event.touches || event.touches.length !== 1) return;
+    var target = event.target;
+    if (target !== row && !(row.contains && row.contains(target))) return;
+    tabSwipe = { x: event.touches[0].clientX, y: event.touches[0].clientY };
+  }, true);
+
+  document.addEventListener('touchend', function (event) {
+    if (!tabSwipe || !event.changedTouches || !event.changedTouches.length) return;
+    var start = tabSwipe;
+    tabSwipe = null;
+    var touch = event.changedTouches[0];
+    var dx = touch.clientX - start.x;
+    var dy = touch.clientY - start.y;
+    if (Math.abs(dx) < 44 || Math.abs(dx) < Math.abs(dy) * 1.6) return;
+    var row = tabRow();
+    if (!row) return;
+    var tabs = row.querySelectorAll ? row.querySelectorAll('.pp-tab') : [];
+    if (!tabs || !tabs.length) return;
+    var current = 0;
+    for (var i = 0; i < tabs.length; i++) {
+      if (String(tabs[i].className).indexOf('pp-tab on') >= 0) current = i;
+    }
+    var next = Math.min(tabs.length - 1, Math.max(0, current + (dx < 0 ? 1 : -1)));
+    if (next === current) return;
+    if (typeof event.preventDefault === 'function') event.preventDefault();
+    /* 站点层也在监听同一个手势：标记住，避免一次滑动跳两页 */
+    try { event.__zhuijuSwipeHandled = true; } catch (error) { /* 只读事件对象 */ }
+    if (typeof tabs[next].click === 'function') tabs[next].click();
+  }, true);
+
+  /* ---------- 账号状态：同一屏不能同时出现「已登录 kenzhao11」和「游客账号」 ----------
+     站点的侧栏里「成长」卡片写死成游客账号，登录后 sb-name 换了用户名，下面还是「游客账号」。
+     这里把两处统一成同一来源；站点层模板同步修（src/shell.js）。 */
+  function cachedUser() {
+    try {
+      var raw = localStorage.getItem('kj-auth-user');
+      var user = raw ? JSON.parse(raw) : null;
+      return user && user.username ? user : null;
+    } catch (error) { return null; }
+  }
+
+  function syncAccountLabels() {
+    var user = cachedUser();
+    var name = user ? user.username : '游客账号';
+    var pairs = [
+      ['.sb-name', name],
+      ['.acct-name', name],
+      ['.sb-sub', user ? '已登录 · 观看记录跨设备同步' : '本设备使用中 · 游客账号']
+    ];
+    for (var p = 0; p < pairs.length; p++) {
+      var nodes = document.querySelectorAll ? document.querySelectorAll(pairs[p][0]) : [];
+      for (var i = 0; i < nodes.length; i++) {
+        if (nodes[i].textContent !== pairs[p][1]) nodes[i].textContent = pairs[p][1];
+      }
+    }
+  }
+
+  function scheduleAccountSync() {
+    syncAccountLabels();
+    setTimeout(syncAccountLabels, 600);
+    setTimeout(syncAccountLabels, 1800);
+  }
+
+  document.addEventListener('kj-auth-changed', scheduleAccountSync);
+  document.addEventListener('click', function (event) {
+    var target = event.target && event.target.closest ? event.target.closest('[data-action="login"],[data-action="logout"]') : null;
+    if (target) scheduleAccountSync();
+  }, true);
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', scheduleAccountSync, { once: true });
+  } else {
+    scheduleAccountSync();
+  }
 
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', prepareLayout, { once: true });

@@ -83,6 +83,13 @@ final class WebViewController: UIViewController {
     private var fullscreenConstraints: [NSLayoutConstraint] = []
     private var isPlayerFullscreen = false
 
+    /// 站点用它区分「App 内」和浏览器。版本号从包信息里取，别再手写 ——
+    /// 0.1.2 到 0.1.5 每版都靠改这一行字符串，一忘就会和包版本对不上。
+    static var userAgent: String {
+        let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.0.0"
+        return "ZhuijuAI/\(version) iOS"
+    }
+
     private lazy var webView: WKWebView = {
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = .default()
@@ -90,7 +97,7 @@ final class WebViewController: UIViewController {
         configuration.mediaTypesRequiringUserActionForPlayback = []
         configuration.preferences.javaScriptCanOpenWindowsAutomatically = false
         configuration.defaultWebpagePreferences.preferredContentMode = .mobile
-        configuration.applicationNameForUserAgent = "ZhuijuAI/0.1.5 iOS"
+        configuration.applicationNameForUserAgent = WebViewController.userAgent
         if #available(iOS 14.2, *) {
             configuration.allowsPictureInPictureMediaPlayback = true
         }

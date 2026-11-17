@@ -13,6 +13,8 @@ function node(tag = 'div') {
     parentNode: null,
     textContent: '',
     value: '',
+    /* 真实 DOM 里 style.display 默认是空串，不是 undefined */
+    style: { display: '' },
     dataset: {},
     appendChild(child) { child.parentNode = element; element.children.push(child); return child; },
     insertBefore(child, reference) {
@@ -23,6 +25,7 @@ function node(tag = 'div') {
     },
     setAttribute(name, value) { element[name] = value; },
     getAttribute(name) { return element[name]; },
+    removeAttribute(name) { delete element[name]; },
     get nextSibling() {
       const siblings = element.parentNode ? element.parentNode.children : [];
       const index = siblings.indexOf(element);
@@ -88,7 +91,23 @@ function fixture({ origin = 'https://zhuiju.dpdns.org', storageThrows = false, l
   const days = node('div');
   days.id = 'days';
   days.dataset = {};
-  days.scrollLeft = 0;
+  /* 浏览器里写 scrollLeft 会异步派发 scroll：夹具照这个来，
+     否则分不清「用户自己拨的」和「重建把它归零」 */
+  let stripLeft = 0;
+  /* 浏览器里 scroll 事件不在赋值当下派发，而是等下一次渲染机会：
+     这个时序决定了「重建把位置归零」和「观察器把位置放回去」谁先谁后，
+     夹具必须照实模拟，否则测不出真实行为。 */
+  Object.defineProperty(days, 'scrollLeft', {
+    get() { return stripLeft; },
+    set(value) {
+      stripLeft = Number(value) || 0;
+      days.writes = (days.writes || 0) + 1;
+      setTimeout(() => {
+        for (const listener of listeners['scroll'] || []) listener({ target: days });
+      }, 0);
+    },
+  });
+  days.writes = 0;
   days.scrollWidth = 536;
   days.clientWidth = 416;
   days.getBoundingClientRect = () => ({ left: 0, width: 416 });
@@ -144,7 +163,42 @@ function fixture({ origin = 'https://zhuiju.dpdns.org', storageThrows = false, l
   const loginTrigger = node('button');
   loginTrigger.opens = 0;
   loginTrigger.click = () => { loginTrigger.opens += 1; };
-  const document = { readyState: 'loading', visibilityState: 'visible', head,
+  /* 站点侧栏的账号卡片：模板把「成长」那张写死成游客账号，登录后用户名在对上那一行 */
+  const sbName = node('p');
+  sbName.className = 'sb-name';
+  sbName.textContent = '游客账号';
+  const sbSub = node('p');
+  sbSub.className = 'sb-sub';
+  sbSub.textContent = '本设备使用中 · 游客账号';
+  const acctName = node('p');
+  acctName.className = 'acct-name';
+  acctName.textContent = '游客账号';
+  /* 选集区上方的标签行：选集 / 投屏 / 讨论 / 反馈 */
+  const tabRow = node('div');
+  tabRow.className = 'pp-tabs';
+  tabRow.contains = (child) => tabRow.children.includes(child);
+  const clicked = [];
+  const tabButtons = ['eps', 'cast', 'talk', 'fb'].map((key, index) => {
+    const button = node('button');
+    button.className = index === 0 ? 'pp-tab on' : 'pp-tab';
+    button.dataset = { tab: key };
+    button.click = () => {
+      clicked.push(key);
+      for (const other of tabButtons) other.className = other.dataset.tab === key ? 'pp-tab on' : 'pp-tab';
+    };
+    tabRow.appendChild(button);
+    return button;
+  });
+  tabRow.querySelectorAll = (selector) => (selector === '.pp-tab' ? tabButtons : []);
+  const body = node('body');
+  const idIndex = new Map();
+  body.appendChild = (child) => {
+    child.parentNode = body;
+    body.children.push(child);
+    if (child.id) idIndex.set(child.id, child);
+    return child;
+  };
+  const document = { readyState: 'loading', visibilityState: 'visible', head, body,
     addEventListener(name, listener) { (listeners[name] ||= []).push(listener); },
     removeEventListener(name, listener) {
       const list = listeners[name] || [];
@@ -152,6 +206,7 @@ function fixture({ origin = 'https://zhuiju.dpdns.org', storageThrows = false, l
       if (index >= 0) list.splice(index, 1);
     },
     getElementById(id) {
+      if (idIndex.has(id)) return idIndex.get(id);
       if (id === 'video') return video;
       if (id === 'playTools') return toolbar;
       if (id === 'q') return searchInput;
@@ -179,9 +234,25 @@ function fixture({ origin = 'https://zhuiju.dpdns.org', storageThrows = false, l
     querySelector(selector) {
       if (selector === '.ep.on') return selected;
       if (selector === '[data-action="login"]') return loginTrigger;
+      if (selector === '.pp-tabs') return tabRow;
       return null;
     },
-    querySelectorAll(selector) { return selector === '.ep' ? epButtons : []; },
+    querySelectorAll(selector) {
+      if (selector === '.ep') return epButtons;
+      if (selector === '.pp-tab') return tabButtons;
+      if (selector === '.sb-name') return [sbName];
+      if (selector === '.sb-sub') return [sbSub];
+      if (selector === '.acct-name') return [acctName];
+      if (selector === '#playTools') return [toolbar];
+      if (selector === '#settingsPanel') return [settingsPanel];
+      if (selector === '#lineBar') return [lineBar];
+      if (selector === '#pipBtn') return [pipButton];
+      if (selector === '#nextEpBtn') return [nextButton];
+      if (selector === '#player .p-label') return [];
+      if (selector === '.pp-toolbar' || selector === '.dm-input' || selector === '#dmInputWrap') return [];
+      if (selector === '.pp-hint' || selector === '#playHint') return [hint];
+      return [];
+    },
     documentElement: {
       setAttribute(name) { attributes[name] = true; },
       removeAttribute(name) { delete attributes[name]; },
@@ -211,7 +282,10 @@ function fixture({ origin = 'https://zhuiju.dpdns.org', storageThrows = false, l
     clipboard: { writeText(value) { shared.push({ copied: value }); return Promise.resolve(); } },
   };
   const storage = { 'kj-speed': '2' };
-  if (signedIn) storage['kj-auth-token'] = 'test-token';
+  if (signedIn) {
+    storage['kj-auth-token'] = 'test-token';
+    storage['kj-auth-user'] = JSON.stringify({ id: 7, username: 'kenzhao11' });
+  }
   const context = vm.createContext({ window, document, navigator, URL, URLSearchParams, Request, Response, AbortSignal, AbortController, DOMException,
     MutationObserver: MockMutationObserver,
     setTimeout, clearTimeout, localStorage: {
@@ -222,7 +296,19 @@ function fixture({ origin = 'https://zhuiju.dpdns.org', storageThrows = false, l
   vm.runInContext(source, context);
   return { window, document, replies, calls, redirects, selected, video, messages, attributes, head, toolbar, searchInput, shared, player,
     hint, epButtons, epGrid, epMore, mediaProto, days, dayButtons, observers, loginTrigger, storage,
-    settingsPanel, lineBar,
+    settingsPanel, lineBar, tabRow, tabButtons, clicked, sbName, sbSub, acctName,
+    /* 悬浮提示：注入层只写 #iosToast，不再改写文档流里的 #playHint */
+    toastText() {
+      const box = document.getElementById('iosToast');
+      return box && box.textContent ? box.textContent : '';
+    },
+    touch(type, target, x, y) {
+      const point = { clientX: x, clientY: y };
+      const event = { target, touches: type === 'touchend' ? [] : [point], changedTouches: [point],
+        preventDefault() { event.defaultPrevented = true; } };
+      for (const listener of listeners[type] || []) listener(event);
+      return event;
+    },
     ready() { for (const listener of listeners['DOMContentLoaded'] || []) listener({}); },
     click(target) {
       const event = { target, preventDefault() {}, stopImmediatePropagation() {} };
@@ -350,7 +436,7 @@ test('rate menu offers 2.5x and 3x and applies the chosen one', () => {
   state.click(menu.children[3]);
   assert.equal(state.video.playbackRate, 2.5);
   assert.equal(state.document.getElementById('ppRate').textContent, '2.5×');
-  assert.equal(state.hint.textContent, '已切到 2.5×');
+  assert.equal(state.toastText(), '已切到 2.5×');
 
   state.click(state.document.getElementById('ppRate'));
   assert.match(state.document.getElementById('ppRateMenu').className, /on/);
@@ -364,7 +450,7 @@ test('a clamped playback rate is reported instead of pretending 3x works', () =>
   state.click(state.document.getElementById('ppRateMenu').children[4]);
   assert.equal(state.video.playbackRate, 2);
   assert.equal(state.document.getElementById('ppRate').textContent, '2×');
-  assert.match(state.hint.textContent, /本机最高只支持 2×/);
+  assert.match(state.toastText(), /本机最高只支持 2×/);
 });
 
 test('control bar follows playback position and seeking', () => {
@@ -391,7 +477,7 @@ test('external playback hands the direct url to the native share sheet', () => {
   const message = state.messages.at(-1);
   assert.equal(message.action, 'share');
   assert.equal(message.url, 'https://media.example/19.mp4');
-  assert.match(state.hint.textContent, /系统分享/);
+  assert.match(state.toastText(), /系统分享/);
 });
 
 test('external playback refuses blob streams and says why', () => {
@@ -400,7 +486,7 @@ test('external playback refuses blob streams and says why', () => {
   state.click(state.document.getElementById('ppCast'));
   state.click(state.document.getElementById('ppShareLink'));
   assert.equal(state.messages.length, 0, '加密流不能当成直链交出去');
-  assert.match(state.hint.textContent, /加密或临时流/);
+  assert.match(state.toastText(), /加密或临时流/);
 });
 
 test('external playback without the app bridge falls back to the system share sheet', () => {
@@ -527,8 +613,16 @@ test('home date strip starts centred on today', async () => {
   await new Promise((resolve) => setTimeout(resolve, 10));
   /* 今天（.day.on）在第 4 列：内容偏移 228，最大可滚 120 → 夹到 120，今天落进可视区 */
   assert.equal(state.days.scrollLeft, 120, '日期条应一进来就把今天拨进可视区');
-  assert.equal(state.dayButtons[3].dataset.iosCentred, '1', '处理过的卡片要留标记，避免反复抢滚动条');
   assert.equal(state.observers.length, 1, '居中成功后应挂上观察器，等站点重新渲染后再居中');
+});
+
+test('a parked date strip is not rewritten by every retry timer', async () => {
+  const state = fixture(); state.ready();
+  await new Promise((resolve) => setTimeout(resolve, 3400));
+  /* 5 个补挂定时器（0/250/700/1500/3000）里只有真的偏了才写 scrollLeft，
+     否则每次都强制一次布局，滚动就发涩。目标值不变时不该重复写。 */
+  assert.equal(state.days.scrollLeft, 120, '今天仍然停在可视区起点');
+  assert.equal(state.days.writes, 1, '目标位置没变就不该再写 scrollLeft');
 });
 
 test('home date strip keeps the position the user swiped to', async () => {
@@ -538,12 +632,90 @@ test('home date strip keeps the position the user swiped to', async () => {
   assert.equal(state.days.scrollLeft, 0, '用户先动手浏览过的日期条不应被自动拨动');
 });
 
-test('home date strip is not yanked back after it was centred', async () => {
+test('home date strip is not yanked back after the user panned it', async () => {
   const state = fixture(); state.ready();
   await new Promise((resolve) => setTimeout(resolve, 10));
+  /* 真机上横滑一定先有 touchstart，之后滚动的就是用户的位置 */
+  state.emit('touchstart', { target: state.dayButtons[1] });
   state.days.scrollLeft = 7;
   await new Promise((resolve) => setTimeout(resolve, 320));
-  assert.equal(state.days.scrollLeft, 7, '居中只做一次，后续滚动不能被覆盖');
+  assert.equal(state.days.scrollLeft, 7, '用户自己拨到的位置不能被自动居中覆盖');
+});
+
+test('a background refresh puts the user date position back instead of jumping to today', async () => {
+  const state = fixture(); state.ready();
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  state.emit('touchstart', { target: state.dayButtons[1] });
+  state.days.scrollLeft = 40;
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  /* 站点后台刷新（本周追剧计数变了）：整批卡片重建，浏览器把 scrollLeft 归零 */
+  state.days.scrollLeft = 0;
+  state.observers[0].callback();
+  assert.equal(state.days.scrollLeft, 40, '刷新后应该回到用户看的那一天，而不是漂回今天');
+});
+
+test('fullscreen hides every floating control and restores them on exit', async () => {
+  const state = fixture(); state.ready();
+  state.video.currentSrc = 'https://media.example/19.mp4';
+  state.emit('play', { target: state.video });
+  state.click(state.document.getElementById('ppFull'));
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  for (const [name, element] of [['工具条', state.toolbar], ['设置面板', state.settingsPanel],
+    ['线路面板', state.lineBar], ['提示行', state.hint]]) {
+    assert.equal(element.hidden, true, '全屏里 ' + name + ' 应该收起');
+    assert.equal(element.style.display, 'none');
+  }
+  /* 全屏里的全屏键必须改叫「退出全屏」：读屏/自动化不能再看到一个「全屏播放」入口 */
+  const full = state.document.getElementById('ppFull');
+  assert.equal(full.textContent, '退出全屏');
+  assert.equal(full['aria-label'], '退出全屏');
+  state.click(full);
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  /* 工具条和提示行要原样回来 */
+  for (const [name, element] of [['工具条', state.toolbar], ['提示行', state.hint]]) {
+    assert.equal(element.hidden, false, '退出全屏后 ' + name + ' 应该恢复');
+    assert.equal(element.style.display, '', '恢复时不能留下 display:none 的尾巴');
+  }
+  /* 设置/线路面板是进全屏时主动关掉的（0.1.4 起就这么做），
+     退出后保持关闭，不该被「恢复」逻辑重新弹出来 */
+  for (const [name, element] of [['设置面板', state.settingsPanel], ['线路面板', state.lineBar]]) {
+    assert.equal(element.hidden, true, name + ' 进全屏被关掉，退出后不应自己弹出来');
+  }
+  assert.equal(full.textContent, '全屏');
+  assert.equal(full['aria-label'], '全屏播放');
+});
+
+test('danmaku is animated on the compositor instead of re-laying-out every frame', async () => {
+  const state = fixture(); state.ready();
+  const css = state.head.children.map((child) => child.textContent || '').join('\n');
+  assert.match(css, /\.dm-item\{[^}]*animation:dm-fly-x/, '弹幕动画应改成 transform 版本');
+  assert.match(css, /@keyframes dm-fly-x\{from\{transform:translateX/, '新动画只动 transform');
+  assert.doesNotMatch(css, /@keyframes dm-fly\{/, '不要再引入按 left 逐帧布局的动画');
+});
+
+test('scrolling surfaces drop expensive blur and smooth positioning', async () => {
+  const state = fixture(); state.ready();
+  const css = state.head.children.map((child) => child.textContent || '').join('\n');
+  assert.match(css, /\.topbar,\.page-head\{-webkit-backdrop-filter:none!important/, '顶栏不再逐帧重算模糊');
+  assert.match(css, /\.tabbar\{-webkit-backdrop-filter:none!important/, '底栏同样处理');
+  assert.match(css, /\.days,\.strip,\.cat-list,\.line-group\{scroll-behavior:auto!important\}/,
+    '横滑条不接受平滑滚动，否则重建后一设 scrollLeft 就整条滑过去');
+  assert.match(css, /#playHint,\.pp-hint\{min-height:2\.6em/, '提示行预留高度，文案变化不推动下方内容');
+});
+
+test('swiping the tab row switches to the next tab', async () => {
+  const state = fixture(); state.ready();
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  /* 向左滑 = 往后一页：选集 → 投屏 */
+  const start = state.touch('touchstart', state.tabButtons[0], 300, 500);
+  const end = state.touch('touchend', state.tabButtons[0], 180, 505);
+  assert.deepEqual(state.clicked, ['cast'], '横滑应切到下一页');
+  assert.equal(end.defaultPrevented, true, '切换后要压掉这次松手造成的点击');
+  assert.ok(start);
+  /* 纵向滑不能误判成切页 */
+  state.touch('touchstart', state.tabButtons[1], 300, 500);
+  state.touch('touchend', state.tabButtons[1], 262, 380);
+  assert.deepEqual(state.clicked, ['cast'], '纵向滚动不能被当成切页手势');
 });
 
 test('home date strip re-centres after the site re-renders the days', async () => {
@@ -593,7 +765,7 @@ test('copy link puts the direct url on the clipboard', async () => {
   state.click(state.document.getElementById('ppCopyLink'));
   await new Promise((resolve) => setTimeout(resolve, 0));
   assert.deepEqual(state.shared.at(-1), { copied: 'https://media.example/19.mp4' });
-  assert.match(state.hint.textContent, /播放地址已复制/);
+  assert.match(state.toastText(), /播放地址已复制/);
   assert.equal(state.messages.length, 0, '复制不该弹原生面板');
 });
 
@@ -604,7 +776,7 @@ test('download without an account asks for login and never starts a transfer', (
   assert.equal(state.messages.length, 0, '未登录不允许发出任何下载请求');
   assert.equal(state.calls.length, 0, '未登录也不许自己发 fetch');
   assert.equal(state.loginTrigger.opens, 1, '要顺手打开站点自己的登录弹窗');
-  assert.equal(state.hint.textContent, '登录后才能下载本集');
+  assert.equal(state.toastText(), '登录后才能下载本集');
   assert.equal(state.document.getElementById('ppCast').textContent, '外放');
 });
 
@@ -632,8 +804,8 @@ test('download progress and completion are reported on the control bar', () => {
   state.window.__zhuijuDownload({ id, event: 'done', path: '/tmp/追剧AI_第19集.mp4', name: '追剧AI_第19集.mp4', size: 104857600 });
   assert.equal(state.document.getElementById('ppCast').textContent, '外放');
   assert.equal(state.document.getElementById('ppOpenLocal').hidden, false, '下载完才能交给播放器 App');
-  assert.match(state.hint.textContent, /已下载/);
-  assert.match(state.hint.textContent, /100\.0 MB/);
+  assert.match(state.toastText(), /已下载/);
+  assert.match(state.toastText(), /100\.0 MB/);
 });
 
 test('download failure and cancellation both land back on a usable button', () => {
@@ -647,7 +819,7 @@ test('download failure and cancellation both land back on a usable button', () =
 
   state.window.__zhuijuDownload({ id, event: 'failed', reason: '网络中断' });
   assert.equal(state.document.getElementById('ppCast').textContent, '外放');
-  assert.match(state.hint.textContent, /下载失败：网络中断/);
+  assert.match(state.toastText(), /下载失败：网络中断/);
 });
 
 test('download refuses HLS playlists and encrypted streams', () => {
@@ -655,13 +827,13 @@ test('download refuses HLS playlists and encrypted streams', () => {
   hls.video.currentSrc = 'https://media.example/19.m3u8';
   hls.click(hls.document.getElementById('ppDownload'));
   assert.equal(hls.messages.length, 0);
-  assert.match(hls.hint.textContent, /HLS/);
+  assert.match(hls.toastText(), /HLS/);
 
   const blob = fixture({ signedIn: true }); blob.ready();
   blob.video.currentSrc = 'blob:https://zhuiju.dpdns.org/9f1c';
   blob.click(blob.document.getElementById('ppDownload'));
   assert.equal(blob.messages.length, 0);
-  assert.match(blob.hint.textContent, /加密或临时流/);
+  assert.match(blob.toastText(), /加密或临时流/);
 });
 
 test('a stale download id cannot rewrite the current state', () => {
@@ -673,6 +845,24 @@ test('a stale download id cannot rewrite the current state', () => {
   assert.equal(state.document.getElementById('ppOpenLocal').hidden, true);
 });
 
+test('a played episode keeps its direct url after the player element is rebuilt', async () => {
+  const state = fixture(); state.ready();
+  state.video.currentSrc = 'https://media.example/19.mp4';
+  state.video.src = 'https://media.example/19.mp4';
+  state.emit('loadedmetadata', { target: state.video });
+  state.emit('play', { target: state.video });
+  /* 站点重新渲染播放器：新的 <video> 还没解析出地址 */
+  state.video.currentSrc = '';
+  state.video.src = '';
+  state.video.removeAttribute('src');
+  const player = state.document.getElementById('ppCtrl');
+  assert.ok(player, '控制栏应该还在');
+  state.click(state.document.getElementById('ppCast'));
+  state.click(state.document.getElementById('ppCopyLink'));
+  assert.deepEqual(state.shared[0], { copied: 'https://media.example/19.mp4' },
+    '同一集内要用记住的直链，不能说「还没解析出直链」');
+});
+
 test('an unresolved episode is not mistaken for a media url', () => {
   const state = fixture(); state.ready();
   // 站点还没解析出直链时，空的 <source src=""> 会被浏览器解析成当前页面地址
@@ -681,7 +871,7 @@ test('an unresolved episode is not mistaken for a media url', () => {
   state.video.querySelector = (selector) => (selector === 'source' ? { getAttribute: () => '' } : null);
   state.click(state.document.getElementById('ppCopyLink'));
   assert.deepEqual(state.shared, [], '不能把页面地址当成片源复制出去');
-  assert.match(state.hint.textContent, /还没解析出直链/);
+  assert.match(state.toastText(), /还没拿到直链/);
 });
 
 test('the player page url is refused even when it fills the source tag', () => {
@@ -693,5 +883,22 @@ test('the player page url is refused even when it fills the source tag', () => {
   state.click(state.document.getElementById('ppCast'));
   state.click(state.document.getElementById('ppShareLink'));
   assert.equal(state.messages.length, 0, '页面地址不能当片源交给别的 App');
-  assert.match(state.hint.textContent, /还没解析出直链/);
+  assert.match(state.toastText(), /还没拿到直链/);
+});
+
+test('a signed-in sidebar never also says it is a guest account', async () => {
+  const guest = fixture();
+  guest.ready();
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.equal(guest.acctName.textContent, '游客账号');
+  assert.equal(guest.sbName.textContent, '游客账号');
+
+  /* 登录后：侧栏两处名字必须是同一个用户名，不能一处「已登录 kenzhao11」一处「游客账号」 */
+  const mine = fixture({ signedIn: true });
+  mine.ready();
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.equal(mine.sbName.textContent, 'kenzhao11');
+  assert.equal(mine.acctName.textContent, 'kenzhao11', '成长卡片不能还写着游客账号');
+  assert.doesNotMatch(mine.acctName.textContent, /游客/);
+  assert.match(mine.sbSub.textContent, /已登录/);
 });
