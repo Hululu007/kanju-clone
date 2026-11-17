@@ -11,6 +11,8 @@ final class WebViewController: UIViewController {
     private enum PlayerAction: String {
         case fullscreen
         case inline
+        /// 网页请求把可播放地址交给系统分享面板（外部播放器 / AirPlay 的入口）。
+        case share
     }
 
     private final class PlayerBridge: NSObject, WKScriptMessageHandler {
@@ -22,6 +24,10 @@ final class WebViewController: UIViewController {
         ) {
             guard let body = message.body as? [String: Any],
                   let action = body["action"] as? String else { return }
+            if action == PlayerAction.share.rawValue {
+                target?.presentExternalShare(url: body["url"] as? String, title: body["title"] as? String)
+                return
+            }
             target?.apply(playerAction: action)
         }
     }
@@ -43,7 +49,7 @@ final class WebViewController: UIViewController {
         configuration.mediaTypesRequiringUserActionForPlayback = []
         configuration.preferences.javaScriptCanOpenWindowsAutomatically = false
         configuration.defaultWebpagePreferences.preferredContentMode = .mobile
-        configuration.applicationNameForUserAgent = "ZhuijuAI/0.1.3 iOS"
+        configuration.applicationNameForUserAgent = "ZhuijuAI/0.1.4 iOS"
         if #available(iOS 14.2, *) {
             configuration.allowsPictureInPictureMediaPlayback = true
         }
@@ -138,6 +144,33 @@ final class WebViewController: UIViewController {
             progressView.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
             progressView.heightAnchor.constraint(equalToConstant: 2),
         ])
+    }
+
+    /// 能交给外部播放器的地址：只有 https 直链。
+    /// 明文 http、blob:/data:（MSE 加密流）、以及非 URL 一律返回 nil —— 交给别的 App 也没法播。
+    static func shareableURL(_ raw: String?) -> URL? {
+        guard let raw = raw,
+              !raw.isEmpty,
+              let link = URL(string: raw),
+              link.scheme?.lowercased() == "https",
+              link.host?.isEmpty == false else { return nil }
+        return link
+    }
+
+    /// 外部播放：把直链交给系统分享面板，由用户选已安装的播放器或 AirPlay。
+    /// 加密流、blob: 和 DRM 内容在网页侧就已挡掉，这里再挡一次；
+    /// 不引入任何第三方 SDK，也不需要用户登录。
+    fileprivate func presentExternalShare(url: String?, title: String?) {
+        guard let link = Self.shareableURL(url) else { return }
+        let presenter = presentedViewController ?? self
+        var items: [Any] = [link]
+        if let title = title, !title.isEmpty { items.append(title) }
+        let controller = UIActivityViewController(activityItems: items, applicationActivities: nil)
+        if let popover = controller.popoverPresentationController {
+            popover.sourceView = view
+            popover.sourceRect = CGRect(x: view.bounds.midX, y: view.bounds.midY, width: 1, height: 1)
+        }
+        presenter.present(controller, animated: true)
     }
 
     fileprivate func apply(playerAction: String) {

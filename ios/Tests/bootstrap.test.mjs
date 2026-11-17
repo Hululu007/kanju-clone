@@ -13,6 +13,7 @@ function node(tag = 'div') {
     parentNode: null,
     textContent: '',
     value: '',
+    dataset: {},
     appendChild(child) { child.parentNode = element; element.children.push(child); return child; },
     insertBefore(child, reference) {
       const index = element.children.indexOf(reference);
@@ -36,7 +37,8 @@ function node(tag = 'div') {
   return element;
 }
 
-function fixture({ origin = 'https://zhuiju.dpdns.org', storageThrows = false, landscape = false, keyword = '', search = '?id=fixture', episodes = [], playRejects = false } = {}) {
+function fixture({ origin = 'https://zhuiju.dpdns.org', storageThrows = false, landscape = false, keyword = '', search = '?id=fixture', episodes = [], playRejects = false, maxRate = 0, bridge = true } = {}) {
+  const shared = [];
   const listeners = {};
   const replies = [];
   const calls = [];
@@ -44,9 +46,22 @@ function fixture({ origin = 'https://zhuiju.dpdns.org', storageThrows = false, l
   const messages = [];
   const attributes = {};
   const selected = { dataset: { ep: '18' }, textContent: '第19集' };
-  const video = { id: 'video', tagName: 'VIDEO', readyState: 2, currentSrc: 'https://media.example/19.mp4', playbackRate: 1,
-    pause() {}, load() {}, removeAttribute() {}, querySelectorAll() { return []; },
-    play() { video.started = (video.started || 0) + 1; return Promise.resolve(); } };
+  let videoRate = 1;
+  const video = { id: 'video', tagName: 'VIDEO', readyState: 2, currentSrc: 'https://media.example/19.mp4',
+    controls: true, paused: true, duration: 120, currentTime: 0, removed: [],
+    load() {}, querySelectorAll() { return []; },
+    removeAttribute(name) { video.removed.push(name); },
+    pause() { video.paused = true; },
+    play() { video.started = (video.started || 0) + 1; video.paused = false; return Promise.resolve(); },
+    webkitEnterFullscreen() { video.nativeFullscreen = (video.nativeFullscreen || 0) + 1; } };
+  /* 系统可能把倍速夹回去：maxRate 模拟 iOS 只允许到 2× */
+  Object.defineProperty(video, 'playbackRate', {
+    get() { return videoRate; },
+    set(value) { videoRate = maxRate ? Math.min(Number(value) || 1, maxRate) : Number(value) || 1; },
+  });
+  const player = node('section');
+  player.id = 'player';
+  player.appendChild(video);
   const head = node('head');
   const toolbar = node('div');
   toolbar.id = 'playTools';
@@ -122,7 +137,19 @@ function fixture({ origin = 'https://zhuiju.dpdns.org', storageThrows = false, l
       if (id === 'epMore') return epMore;
       if (id === 'epGrid') return epGrid;
       if (id === 'days') return days;
-      return toolbar.children.find((child) => child.id === id) || null;
+      if (id === 'player') return player;
+      if (id === 'ppCtrl') return player.children.find((child) => child.id === 'ppCtrl') || null;
+      const walk = (element) => {
+        for (const child of element.children || []) {
+          if (child.id === id) return child;
+          if (child.children && child.children.length) {
+            const found = walk(child);
+            if (found) return found;
+          }
+        }
+        return null;
+      };
+      return walk(toolbar) || walk(player);
     },
     createElement(tag) { return node(tag); },
     querySelector(selector) { return selector === '.ep.on' ? selected : null; },
@@ -138,7 +165,7 @@ function fixture({ origin = 'https://zhuiju.dpdns.org', storageThrows = false, l
     innerHeight: landscape ? 390 : 844,
     matchMedia(query) { return { matches: landscape && /landscape/.test(query) }; },
     addEventListener(name, listener) { (listeners[name] ||= []).push(listener); },
-    webkit: { messageHandlers: { iosPlayer: { postMessage(body) { messages.push(body); } } } },
+    webkit: bridge ? { messageHandlers: { iosPlayer: { postMessage(body) { messages.push(body); } } } } : {},
     HTMLMediaElement: { prototype: mediaProto },
     async fetch(input, options) {
       calls.push({ input, options });
@@ -151,11 +178,15 @@ function fixture({ origin = 'https://zhuiju.dpdns.org', storageThrows = false, l
     observe() { this.observing = true; }
     disconnect() { this.observing = false; }
   }
-  const context = vm.createContext({ window, document, URL, URLSearchParams, Request, Response, AbortSignal, AbortController, DOMException,
+  const navigator = {
+    share(payload) { shared.push(payload); return Promise.resolve(); },
+    clipboard: { writeText(value) { shared.push({ copied: value }); return Promise.resolve(); } },
+  };
+  const context = vm.createContext({ window, document, navigator, URL, URLSearchParams, Request, Response, AbortSignal, AbortController, DOMException,
     MutationObserver: MockMutationObserver,
     setTimeout, clearTimeout, localStorage: { getItem() { if (storageThrows) throw Error('denied'); return '2'; } } });
   vm.runInContext(source, context);
-  return { window, document, replies, calls, redirects, selected, video, messages, attributes, head, toolbar, searchInput,
+  return { window, document, replies, calls, redirects, selected, video, messages, attributes, head, toolbar, searchInput, shared, player,
     hint, epButtons, epGrid, epMore, mediaProto, days, dayButtons, observers,
     ready() { for (const listener of listeners['DOMContentLoaded'] || []) listener({}); },
     click(target) {
@@ -238,13 +269,21 @@ test('layout fallback carries fullscreen, light tabbar and category-card rules',
   assert.match(style.textContent, /html\[data-theme='light'\]\[data-ios-immersive\] #playTools/);
 });
 
-test('fullscreen button toggles immersive mode and drives native rotation', () => {
+test('fullscreen sits at the right end of the control bar and drives native rotation', () => {
   const state = fixture(); state.ready();
-  const button = state.document.getElementById('iosFullBtn');
-  assert.ok(button, '全屏 button was not inserted into the player toolbar');
-  const ids = state.toolbar.children.map((child) => child.id);
-  assert.deepEqual(ids, ['pipBtn', 'nextEpBtn', 'iosFullBtn'], '全屏 must not split the 0.1.1 toolbar row');
+  const bar = state.document.getElementById('ppCtrl');
+  assert.ok(bar, '自带控制栏没有挂上');
+  assert.deepEqual(bar.children.map((child) => child.id),
+    ['ppPlay', 'ppTime', 'ppSeek', 'ppCast', 'ppRate', 'ppFull', 'ppRateMenu'],
+    '全屏必须是进度条后面的最后一个按钮，倍速紧挨着它');
+  assert.equal(state.video.controls, false, '自带控制栏挂上后必须收起原生控件');
+  assert.ok(state.video.removed.includes('controls'));
+  assert.deepEqual(state.toolbar.children.map((child) => child.id), ['pipBtn', 'nextEpBtn'],
+    '工具条里那个够不到的全屏键必须消失');
+
+  const button = state.document.getElementById('ppFull');
   assert.equal(button.textContent, '全屏');
+  assert.equal(state.video.controls, false);
 
   state.click(button);
   assert.equal(state.attributes['data-ios-immersive'], true);
@@ -255,6 +294,90 @@ test('fullscreen button toggles immersive mode and drives native rotation', () =
   assert.equal(state.attributes['data-ios-immersive'], undefined);
   assert.equal(button.textContent, '全屏');
   assert.equal(state.messages.at(-1).action, 'inline');
+});
+
+test('native fullscreen requests are rerouted to the in-page bar', () => {
+  const state = fixture(); state.ready();
+  state.video.webkitEnterFullscreen();
+  assert.equal(state.attributes['data-ios-immersive'], true, '原生全屏入口必须改走页内全屏');
+});
+
+test('rate menu offers 2.5x and 3x and applies the chosen one', () => {
+  const state = fixture(); state.ready();
+  const menu = state.document.getElementById('ppRateMenu');
+  assert.deepEqual(menu.children.map((option) => option.dataset.rate), ['1', '1.5', '2', '2.5', '3']);
+
+  state.click(menu.children[3]);
+  assert.equal(state.video.playbackRate, 2.5);
+  assert.equal(state.document.getElementById('ppRate').textContent, '2.5×');
+  assert.equal(state.hint.textContent, '已切到 2.5×');
+
+  state.click(state.document.getElementById('ppRate'));
+  assert.match(state.document.getElementById('ppRateMenu').className, /on/);
+  state.click(menu.children[4]);
+  assert.equal(state.video.playbackRate, 3);
+  assert.doesNotMatch(state.document.getElementById('ppRateMenu').className, /on/, '选完要收起菜单');
+});
+
+test('a clamped playback rate is reported instead of pretending 3x works', () => {
+  const state = fixture({ maxRate: 2 }); state.ready();
+  state.click(state.document.getElementById('ppRateMenu').children[4]);
+  assert.equal(state.video.playbackRate, 2);
+  assert.equal(state.document.getElementById('ppRate').textContent, '2×');
+  assert.match(state.hint.textContent, /本机最高只支持 2×/);
+});
+
+test('control bar follows playback position and seeking', () => {
+  const state = fixture(); state.ready();
+  state.video.currentTime = 30;
+  state.emit('timeupdate', { target: state.video });
+  assert.equal(state.document.getElementById('ppTime').textContent, '0:30 / 2:00');
+  assert.equal(state.document.getElementById('ppPlay').textContent, '播放');
+
+  const seek = state.document.getElementById('ppSeek');
+  seek.value = '500';
+  state.emit('input', { target: seek });
+  assert.equal(state.video.currentTime, 60);
+
+  state.video.paused = false;
+  state.emit('play', { target: state.video });
+  assert.equal(state.document.getElementById('ppPlay').textContent, '暂停');
+});
+
+test('external playback hands the direct url to the native share sheet', () => {
+  const state = fixture(); state.ready();
+  state.click(state.document.getElementById('ppCast'));
+  const message = state.messages.at(-1);
+  assert.equal(message.action, 'share');
+  assert.equal(message.url, 'https://media.example/19.mp4');
+  assert.match(state.hint.textContent, /系统分享/);
+});
+
+test('external playback refuses blob streams and says why', () => {
+  const state = fixture(); state.ready();
+  state.video.currentSrc = 'blob:https://zhuiju.dpdns.org/9f1c';
+  state.click(state.document.getElementById('ppCast'));
+  assert.equal(state.messages.length, 0, '加密流不能当成直链交出去');
+  assert.match(state.hint.textContent, /加密或临时流/);
+});
+
+test('external playback without the app bridge falls back to the system share sheet', () => {
+  const state = fixture({ bridge: false }); state.ready();
+  state.click(state.document.getElementById('ppCast'));
+  assert.equal(state.shared.at(-1).url, 'https://media.example/19.mp4');
+});
+
+test('both brand logos use the supplied artwork and hide the old svg', () => {
+  const state = fixture(); state.ready();
+  const css = state.head.children.find((child) => child.id === 'iosShellStyle').textContent;
+  /* 图只内联一次：--brand-logo 一条，两处规则都引用它，避免把 11KB 的图塞三遍 */
+  assert.match(css, /html\{--brand-logo:url\("data:image\/webp;base64,[^"]+"\)\}/);
+  assert.equal((css.match(/data:image\/webp;base64/g) || []).length, 1, 'data URI 只应内联一次');
+  assert.match(css, /\.brand \.brand-mark\{[^}]*background-image:var\(--brand-logo\)/);
+  assert.match(css, /\.brand \.brand-mark>svg\{display:none\}/);
+  assert.match(css, /\.tabbar \.tab\.center \.tab-circle\{[^}]*background-image:var\(--brand-logo\)/);
+  assert.match(css, /\.tabbar \.tab\.center \.tab-circle>svg\{display:none\}/);
+  assert.match(css, /#iosFullBtn\{display:none\}/, '旧的全屏入口要彻底隐藏');
 });
 
 test('landscape playback becomes immersive without forcing rotation', () => {
@@ -277,7 +400,7 @@ test('explicit exit wins over automatic landscape immersion', () => {
   const state = fixture({ landscape: true }); state.ready();
   state.emit('play', { target: state.video });
   assert.equal(state.attributes['data-ios-immersive'], true);
-  const button = state.document.getElementById('iosFullBtn');
+  const button = state.document.getElementById('ppFull');
   state.click(button);
   assert.equal(state.attributes['data-ios-immersive'], true);
   state.click(button);
