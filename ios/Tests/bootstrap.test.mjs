@@ -23,9 +23,9 @@ function node(tag = 'div') {
       element.children.splice(index < 0 ? element.children.length : index, 0, child);
       return child;
     },
-    setAttribute(name, value) { element[name] = value; },
+    setAttribute(name, value) { if (name === 'hidden') element.hidden = true; else element[name] = value; },
     getAttribute(name) { return element[name]; },
-    removeAttribute(name) { delete element[name]; },
+    removeAttribute(name) { if (name === 'hidden') element.hidden = false; else delete element[name]; },
     get nextSibling() {
       const siblings = element.parentNode ? element.parentNode.children : [];
       const index = siblings.indexOf(element);
@@ -133,6 +133,12 @@ function fixture({ origin = 'https://zhuiju.dpdns.org', storageThrows = false, l
   const settingsPanel = node('div');
   settingsPanel.id = 'settingsPanel';
   settingsPanel.hidden = false;
+  const downloadLabel = node('div'); downloadLabel.id = 'iosDownloadLabel';
+  const downloadFill = node('div'); downloadFill.id = 'iosDownloadFill';
+  downloadFill.style.width = '0%';
+  const downloadOpen = node('button'); downloadOpen.id = 'iosOpenDownloaded'; downloadOpen.hidden = true;
+  settingsPanel.appendChild(downloadLabel); settingsPanel.appendChild(downloadFill); settingsPanel.appendChild(downloadOpen);
+  const tabbar = node('nav'); tabbar.className = 'tabbar';
   const lineBar = node('div');
   lineBar.id = 'lineBar';
   lineBar.hidden = false;
@@ -213,6 +219,9 @@ function fixture({ origin = 'https://zhuiju.dpdns.org', storageThrows = false, l
       if (id === 'playHint') return hint;
       if (id === 'epMore') return epMore;
       if (id === 'settingsPanel') return settingsPanel;
+      if (id === 'iosDownloadLabel') return downloadLabel;
+      if (id === 'iosDownloadFill') return downloadFill;
+      if (id === 'iosOpenDownloaded') return downloadOpen;
       if (id === 'lineBar') return lineBar;
       if (id === 'epGrid') return epGrid;
       if (id === 'days') return days;
@@ -228,7 +237,7 @@ function fixture({ origin = 'https://zhuiju.dpdns.org', storageThrows = false, l
         }
         return null;
       };
-      return walk(toolbar) || walk(player);
+      return walk(toolbar) || walk(player) || walk(settingsPanel);
     },
     createElement(tag) { return node(tag); },
     querySelector(selector) {
@@ -245,7 +254,9 @@ function fixture({ origin = 'https://zhuiju.dpdns.org', storageThrows = false, l
       if (selector === '.acct-name') return [acctName];
       if (selector === '#playTools') return [toolbar];
       if (selector === '#settingsPanel') return [settingsPanel];
+      if (selector === '.tabbar') return [tabbar];
       if (selector === '#lineBar') return [lineBar];
+      if (selector === '.tabbar') return [tabbar];
       if (selector === '#pipBtn') return [pipButton];
       if (selector === '#nextEpBtn') return [nextButton];
       if (selector === '#player .p-label') return [];
@@ -296,7 +307,8 @@ function fixture({ origin = 'https://zhuiju.dpdns.org', storageThrows = false, l
   vm.runInContext(source, context);
   return { window, document, replies, calls, redirects, selected, video, messages, attributes, head, toolbar, searchInput, shared, player,
     hint, epButtons, epGrid, epMore, mediaProto, days, dayButtons, observers, loginTrigger, storage,
-    settingsPanel, lineBar, tabRow, tabButtons, clicked, sbName, sbSub, acctName,
+    settingsPanel, lineBar, tabRow, tabButtons, clicked, sbName, sbSub, acctName, tabbar,
+    downloadLabel, downloadFill, downloadOpen,
     /* 悬浮提示：注入层只写 #iosToast，不再改写文档流里的 #playHint */
     toastText() {
       const box = document.getElementById('iosToast');
@@ -392,6 +404,8 @@ test('layout fallback carries fullscreen, light tabbar and category-card rules',
   assert.match(style.textContent, /html\[data-ios-immersive\] #settingsPanel,html\[data-ios-immersive\] #lineBar\{display:none!important\}/);
   assert.match(style.textContent, /html\[data-ios-immersive\] #ppCtrl\{z-index:10003/,
     '全屏控制栏要压在播放器之上并在安全区内');
+  assert.match(style.textContent, /html\[data-ios-immersive\] \.tabbar\{display:none!important;visibility:hidden!important;pointer-events:none!important\}/,
+    '全屏时底部导航必须隐藏，不能遮挡进度条');
   assert.match(style.textContent, /safe-area-inset-bottom/);
 });
 
@@ -420,6 +434,7 @@ test('fullscreen sits at the right end of the control bar and drives native rota
   assert.equal(state.attributes['data-ios-immersive'], undefined);
   assert.equal(button.textContent, '全屏');
   assert.equal(state.messages.at(-1).action, 'inline');
+  assert.equal(state.video.started, 1, '退出全屏后保持播放，避免方向恢复请求被 WebKit 忽略');
 });
 
 test('native fullscreen requests are rerouted to the in-page bar', () => {
@@ -689,7 +704,7 @@ test('fullscreen hides every floating control and restores them on exit', async 
   state.emit('play', { target: state.video });
   state.click(state.document.getElementById('ppFull'));
   await new Promise((resolve) => setTimeout(resolve, 5));
-  for (const [name, element] of [['工具条', state.toolbar], ['设置面板', state.settingsPanel],
+  for (const [name, element] of [['工具条', state.toolbar], ['设置面板', state.settingsPanel], ['底部导航', state.tabbar],
     ['线路面板', state.lineBar], ['提示行', state.hint]]) {
     assert.equal(element.hidden, true, '全屏里 ' + name + ' 应该收起');
     assert.equal(element.style.display, 'none');
@@ -701,7 +716,7 @@ test('fullscreen hides every floating control and restores them on exit', async 
   state.click(full);
   await new Promise((resolve) => setTimeout(resolve, 5));
   /* 工具条和提示行要原样回来 */
-  for (const [name, element] of [['工具条', state.toolbar], ['提示行', state.hint]]) {
+  for (const [name, element] of [['工具条', state.toolbar], ['底部导航', state.tabbar], ['提示行', state.hint]]) {
     assert.equal(element.hidden, false, '退出全屏后 ' + name + ' 应该恢复');
     assert.equal(element.style.display, '', '恢复时不能留下 display:none 的尾巴');
   }
@@ -796,7 +811,7 @@ test('cast menu lists share, copy and download, and hides the player row until a
   const state = fixture(); state.ready();
   const menu = state.document.getElementById('ppCastMenu');
   assert.deepEqual(menu.children.map((row) => row.id),
-    ['ppShareLink', 'ppCopyLink', 'ppDownload', 'ppOpenLocal']);
+    ['ppShareLink', 'ppCopyLink', 'ppDownload', 'ppDownloadProgress', 'ppOpenLocal']);
   assert.equal(state.document.getElementById('ppOpenLocal').hidden, true, '还没下载就没有「用其他播放器打开」');
   assert.equal(state.document.getElementById('ppCast').textContent, '外放');
 
@@ -841,18 +856,24 @@ test('download with an account hands the direct url to the native transfer', () 
   assert.equal(state.loginTrigger.opens, 0, '已登录就不要再弹登录');
 });
 
-test('download progress and completion are reported on the control bar', () => {
+test('download progress appears in settings panel and completion exposes external player choice', () => {
   const state = fixture({ signedIn: true }); state.ready();
   state.click(state.document.getElementById('ppDownload'));
   const { id } = state.messages.at(-1);
   state.window.__zhuijuDownload({ id, event: 'progress', received: 43, total: 100 });
   assert.equal(state.document.getElementById('ppCast').textContent, '下载 43%');
+  assert.equal(state.downloadLabel.textContent, '下载进度：43%');
+  assert.equal(state.downloadFill.style.width, '43%');
 
   state.window.__zhuijuDownload({ id, event: 'done', path: '/tmp/追剧AI_第19集.mp4', name: '追剧AI_第19集.mp4', size: 104857600 });
   assert.equal(state.document.getElementById('ppCast').textContent, '外放');
-  assert.equal(state.document.getElementById('ppOpenLocal').hidden, false, '下载完才能交给播放器 App');
+  assert.equal(state.document.getElementById('ppCtrl').children.find((row) => row.id === 'ppCastMenu').children.find((row) => row.id === 'ppOpenLocal').hidden, false, '下载完才能交给播放器 App');
+  assert.equal(state.downloadOpen.hidden, false, '设置面板提供系统播放器选择入口');
+  assert.equal(state.downloadFill.style.width, '100%');
   assert.match(state.toastText(), /已下载/);
   assert.match(state.toastText(), /100\.0 MB/);
+  state.click(state.downloadOpen);
+  assert.equal(state.messages.at(-1).action, 'openLocal', '按钮将本地视频交给用户选择播放器的系统面板');
 });
 
 test('download failure and cancellation both land back on a usable button', () => {

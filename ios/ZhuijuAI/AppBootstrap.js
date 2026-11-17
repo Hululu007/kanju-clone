@@ -214,6 +214,7 @@
          全屏只保留底部控制栏（播放 · 进度 · 外放 · 倍速 · 退出全屏）。 */
       'html[data-ios-immersive] #playTools{display:none!important}',
       'html[data-ios-immersive] #settingsPanel,html[data-ios-immersive] #lineBar{display:none!important}',
+      'html[data-ios-immersive] .tabbar{display:none!important;visibility:hidden!important;pointer-events:none!important}',
       'html[data-ios-immersive] .p-label{display:none!important}',
       /* 全屏里可能残留的其他浮层入口（弹幕输入、画中画、下一集、提示行等）一并收起 */
       'html[data-ios-immersive] .pp-toolbar,html[data-ios-immersive] .dm-input,html[data-ios-immersive] #dmInputWrap,html[data-ios-immersive] .pp-hint,html[data-ios-immersive] #playHint{display:none!important}',
@@ -252,6 +253,11 @@
       '#ppCtrl .pc-seek::-webkit-slider-thumb{-webkit-appearance:none;width:14px;height:14px;margin-top:-5px;border:0;border-radius:50%;background:#16e09d}',
       '#ppCtrl #ppRate{background:rgba(255,255,255,.16)}',
       '#ppCtrl #ppFull{background:rgba(22,224,157,.92);color:#04241a}',
+      '#iosDownloadStatus{margin:12px 0;padding:12px;border:1px solid rgba(255,255,255,.14);border-radius:10px;background:rgba(0,0,0,.12);color:inherit;font-size:13px}',
+      '#iosDownloadTrack{height:6px;margin-top:9px;overflow:hidden;border-radius:4px;background:rgba(127,127,127,.3)}',
+      '#iosDownloadFill{width:0;height:100%;border-radius:inherit;background:#16e09d;transition:width .15s linear}',
+      '#iosOpenDownloaded{margin-top:10px;padding:8px 12px;border-radius:8px;background:#16e09d;color:#04241a;font-weight:700}',
+      '#iosOpenDownloaded[hidden]{display:none!important}',
       '#ppRateMenu{position:absolute;right:6px;bottom:calc(100% + 6px);display:none;flex-direction:column;gap:2px;padding:6px;border-radius:12px;background:rgba(12,18,22,.97);border:1px solid rgba(255,255,255,.14)}',
       '#ppRateMenu.on{display:flex}',
       '#ppRateMenu .pc-rate-opt{border:0;background:transparent;color:#fff;font-size:13px;line-height:1;padding:9px 18px;border-radius:8px;white-space:nowrap;cursor:pointer}',
@@ -293,6 +299,7 @@
     ].join('\n');
     document.head.appendChild(style);
     mountCtrlBar();
+    mountDownloadPanel();
     applyImmersive();
     installPlaybackGuard();
   }
@@ -362,6 +369,7 @@
   /* ---------- 全屏 / 横屏 ---------- */
   var userFullscreen = false;
   var activePlayback = false;
+  var explicitInline = false;
 
   function postNative(payload) {
     try {
@@ -388,7 +396,7 @@
   }
 
   var HIDE_IN_IMMERSIVE = [
-    '#playTools', '.pp-toolbar', '#settingsPanel', '#lineBar',
+    '#playTools', '.pp-toolbar', '#settingsPanel', '#lineBar', '.tabbar',
     '.dm-input', '#dmInputWrap', '#pipBtn', '#nextEpBtn', '#iosFullBtn',
     '#player .p-label', '.pp-hint', '#playHint'
   ];
@@ -424,7 +432,7 @@
   function applyImmersive() {
     var root = document.documentElement;
     if (!root || typeof root.setAttribute !== 'function') return;
-    var immersive = userFullscreen || (activePlayback && landscape());
+    var immersive = userFullscreen || (activePlayback && landscape() && !explicitInline);
     if (immersive) root.setAttribute('data-ios-immersive', '');
     else root.removeAttribute('data-ios-immersive');
     if (immersive) {
@@ -447,11 +455,19 @@
   }
 
   function setUserFullscreen(on) {
+    var wasPlaying = activePlayback;
     userFullscreen = !!on;
+    explicitInline = !userFullscreen;
     // 进场时补一个播放态，退出时清掉，避免刚退出又被「横屏播放自动沉浸」拉回去
-    activePlayback = userFullscreen;
+    if (userFullscreen) activePlayback = true;
     applyImmersive();
     postNative({ action: userFullscreen ? 'fullscreen' : 'inline' });
+    if (!userFullscreen && wasPlaying) {
+      var video = document.getElementById('video');
+      if (video && typeof video.play === 'function') {
+        try { video.play().catch(function () {}); } catch (error) { /* 恢复方向不依赖播放 promise */ }
+      }
+    }
   }
 
   function toggleFullscreen() {
@@ -471,6 +487,36 @@
      所以应用内自带一条控制栏：播放 · 时间 · 进度条 · 外放 · 倍速 · 全屏，
      全屏正好落在进度条右端，和倍速挨着。 */
   var ctrlMounted = false;
+  var downloadPanelMounted = false;
+
+  function mountDownloadPanel() {
+    if (downloadPanelMounted) return true;
+    var panel = document.getElementById('settingsPanel');
+    if (!panel || typeof panel.appendChild !== 'function') return false;
+    var box = document.createElement('div');
+    box.id = 'iosDownloadStatus';
+    box.setAttribute('aria-live', 'polite');
+    var label = document.createElement('div');
+    label.id = 'iosDownloadLabel';
+    label.textContent = '下载进度：尚未下载';
+    box.appendChild(label);
+    var track = document.createElement('div');
+    track.id = 'iosDownloadTrack';
+    var fill = document.createElement('div');
+    fill.id = 'iosDownloadFill';
+    track.appendChild(fill);
+    box.appendChild(track);
+    var open = document.createElement('button');
+    open.id = 'iosOpenDownloaded';
+    open.type = 'button';
+    open.textContent = '用其他播放器播放';
+    open.hidden = true;
+    if (typeof open.setAttribute === 'function') open.setAttribute('hidden', '');
+    box.appendChild(open);
+    panel.appendChild(box);
+    downloadPanelMounted = true;
+    return true;
+  }
 
   function hit(node, id) {
     var cursor = node;
@@ -569,7 +615,10 @@
     castMenu.appendChild(castRow('ppShareLink', '分享播放地址', '系统面板'));
     castMenu.appendChild(castRow('ppCopyLink', '复制播放地址', '手动粘贴'));
     castMenu.appendChild(castRow('ppDownload', '下载本集', '需登录'));
-    var localRow = castRow('ppOpenLocal', '用其他播放器打开', '已下载');
+    var progressRow = castRow('ppDownloadProgress', '下载进度', '尚未下载');
+    progressRow.setAttribute('aria-live', 'polite');
+    castMenu.appendChild(progressRow);
+    var localRow = castRow('ppOpenLocal', '用其他播放器播放', '已下载');
     if (typeof localRow.setAttribute === 'function') localRow.setAttribute('hidden', '1');
     localRow.hidden = true;
     castMenu.appendChild(localRow);
@@ -822,12 +871,14 @@
   }
 
   function syncDownloadRow() {
+    mountDownloadPanel();
     var row = document.getElementById('ppDownload');
     if (row) row.className = 'pc-menu-row' + (downloadState.busy ? ' busy' : '');
     var open = document.getElementById('ppOpenLocal');
     if (open) {
       var has = !!downloadState.path;
-      if (typeof open.setAttribute === 'function') open.setAttribute('hidden', has ? '' : '1');
+      if (typeof open.removeAttribute === 'function' && has) open.removeAttribute('hidden');
+      else if (typeof open.setAttribute === 'function') open.setAttribute('hidden', '');
       open.hidden = !has;
     }
     var cast = document.getElementById('ppCast');
@@ -837,6 +888,24 @@
         : '外放';
     }
     noteOf('ppDownload', downloadNote());
+    noteOf('ppDownloadProgress', downloadProgressNote());
+    var downloadLabel = document.getElementById('iosDownloadLabel');
+    var downloadFill = document.getElementById('iosDownloadFill');
+    var downloadOpen = document.getElementById('iosOpenDownloaded');
+    if (downloadLabel) downloadLabel.textContent = '下载进度：' + downloadProgressNote();
+    if (downloadFill) downloadFill.style.width = (downloadState.busy ? downloadState.percent : (downloadState.path ? 100 : 0)) + '%';
+    if (downloadOpen) {
+      downloadOpen.hidden = !downloadState.path;
+      if (typeof downloadOpen.removeAttribute === 'function' && downloadState.path) downloadOpen.removeAttribute('hidden');
+      else if (typeof downloadOpen.setAttribute === 'function') downloadOpen.setAttribute('hidden', '');
+    }
+  }
+
+  function downloadProgressNote() {
+    if (downloadState.busy) return downloadState.percent ? downloadState.percent + '%' : '正在连接';
+    if (downloadState.path) return '已完成 · 点下方选择播放器';
+    if (downloadState.error) return downloadState.error;
+    return '尚未下载';
   }
 
   function closeCastMenu() {
@@ -974,11 +1043,13 @@
       downloadState.percent = 100;
       downloadState.path = payload.path || '';
       syncDownloadRow();
-      announce('已下载 ' + (payload.name || downloadState.name) + '（' + megabyte(payload.size) + '），点「外放」可用其他播放器打开');
+      announce('已下载 ' + (payload.name || downloadState.name) + '（' + megabyte(payload.size) + '），点「用其他播放器播放」选择 App');
       return;
     }
     downloadState.busy = false;
     downloadState.percent = 0;
+    downloadState.error = event === 'cancelled' ? '已取消' : (payload.reason || '下载失败');
+    downloadState.path = '';
     syncDownloadRow();
     if (event === 'cancelled') announce('已取消下载');
     else announce('下载失败：' + (payload.reason || '网络不给力，稍后再试'));
@@ -987,6 +1058,12 @@
   function handleCtrlClick(event) {
     var target = event.target;
     if (!target) return false;
+    if (hit(target, 'iosOpenDownloaded')) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      openLocal();
+      return true;
+    }
     if (hit(target, 'ppPlay')) {
       event.preventDefault();
       event.stopImmediatePropagation();
@@ -1106,6 +1183,7 @@
     applyImmersive();
   });
   onWindow('orientationchange', function () {
+    if (!landscape()) explicitInline = false;
     applyImmersive();
   });
   /* ---------- 首页日期条：一进来停在今天（只在条内横向定位，不动页面） ---------- */

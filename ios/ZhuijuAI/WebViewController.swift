@@ -158,7 +158,11 @@ final class WebViewController: UIViewController {
 
     /// 全屏时锁横屏，其余时候保留系统自动旋转。
     override var supportedInterfaceOrientations: UIInterfaceOrientationMask {
-        isPlayerFullscreen ? .landscape : .allButUpsideDown
+        Self.orientationMask(isFullscreen: isPlayerFullscreen)
+    }
+
+    static func orientationMask(isFullscreen: Bool) -> UIInterfaceOrientationMask {
+        isFullscreen ? .landscape : .portrait
     }
 
     override var shouldAutorotate: Bool {
@@ -297,7 +301,10 @@ final class WebViewController: UIViewController {
     }
 
     private func setPlayerFullscreen(_ on: Bool) {
-        guard isPlayerFullscreen != on else { return }
+        guard isPlayerFullscreen != on else {
+            if !on { requestRotation(landscape: false) }
+            return
+        }
         isPlayerFullscreen = on
         NSLayoutConstraint.deactivate(on ? safeAreaConstraints : fullscreenConstraints)
         NSLayoutConstraint.activate(on ? fullscreenConstraints : safeAreaConstraints)
@@ -311,11 +318,17 @@ final class WebViewController: UIViewController {
 
     private func requestRotation(landscape: Bool) {
         if #available(iOS 16.0, *) {
-            guard let scene = view.window?.windowScene else { return }
             let mask: UIInterfaceOrientationMask = landscape ? .landscape : .portrait
-            scene.requestGeometryUpdate(.iOS(interfaceOrientations: mask)) { _ in
-                // 旋转被系统拒绝时保持当前布局，不阻断播放
+            let update = { [weak self] in
+                guard let self = self, let scene = self.view.window?.windowScene else { return }
+                scene.requestGeometryUpdate(.iOS(interfaceOrientations: mask)) { _ in
+                    // 控制器 orientation mask 已同步更新，系统之后可继续尝试旋转。
+                }
             }
+            update()
+            // 某些 iOS 版本在视频 surface 切换期间会忽略第一次 geometry 请求。
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: update)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8, execute: update)
         } else {
             // iOS 15 没有公开的强制旋转接口，用 KVC 触发同一套系统旋转流程
             let target: UIInterfaceOrientation = landscape ? .landscapeRight : .portrait

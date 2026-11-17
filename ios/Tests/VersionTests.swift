@@ -5,6 +5,11 @@ import XCTest
 /// 版本号写在 UA 里。0.1.2 到 0.1.5 每发一版都要手改那一行字符串，
 /// 忘一次就会和包版本对不上，所以这里直接把两者钉在一起。
 final class VersionTests: XCTestCase {
+    func testOrientationMaskRestoresPortraitAfterFullscreen() {
+        XCTAssertEqual(WebViewController.orientationMask(isFullscreen: true), .landscape)
+        XCTAssertEqual(WebViewController.orientationMask(isFullscreen: false), .portrait)
+    }
+
     func testUserAgentCarriesTheBundleVersion() {
         let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String
         XCTAssertNotNil(version, "包信息里必须有 CFBundleShortVersionString")
