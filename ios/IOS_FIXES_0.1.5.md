@@ -132,6 +132,25 @@ App 注入层仍是真机上的生效层：站点没部署前，`src/` 的改动
 
 ---
 
+## 6b. CI 结果（2026-11-17）
+
+- 提交：`c0b91ab`（0.1.5 主体）+ `82286b7`（文件名规则修正）
+- 运行：run **44037471793**，workflow「Build unsigned iOS IPA」，branch main，**success**
+- CI 内 Node 回归：**46 项全过**
+- CI 内 XCTest：**14 项 0 失败**，21.646 秒（PlaybackTests 7 + ShareTests 2 + DownloadTests 5）
+- 首轮 run **44036102454 失败**，失败点是我自己写的断言：
+  `fileName("https://media.example/", "")` 产出 `".mp4"`（隐藏文件），
+  以及 `.../play/19` 会把网页算好的集名丢掉变成 `19.mp4`。
+  改法：只有当 URL 末段真的带视频扩展名时才采用它，否则保留网页给的集名；
+  只剩扩展名时退回 `video.mp4`。第二轮通过。
+  - 失败日志：`outputs-0.1.5/ci-run-44036102454-failed.log`
+- 产物：`ZhuijuAI-unsigned-ipa`（4,322,375 字节）
+  - 包内核对：`0.1.5` / build `6` / MinimumOSVersion 15.0 / `org.dpdns.zhuiju.ios`
+  - 包内 `AppBootstrap.js` 53,531 字节，含全屏收起工具条规则、外放菜单、复制地址、下载入口、
+    `kj-auth-token` 门控、页面地址拦截
+  - **SHA-256 `475a6d251d34aaedec2d8b8246a54390283d7214f70a9cf755cd0ca5e79c92c4`**
+    （CI 的 `.sha256` 与本地重算一致）
+
 ## 7. 本机无法验证 / 不声称已验证
 
 1. **原生分享面板里到底列出哪些 App**——取决于机子装了哪些 App 及其注册方式；WebView 里的 `navigator.share` 与原生 `UIActivityViewController` 的真实列表都没有在真机上看过。
