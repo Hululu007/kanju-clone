@@ -107,6 +107,24 @@ iOS 上的合法路径只有系统自己的能力，本轮按优先级串起来�
 截图：`shot-player-dev-ctrl.png`、`shot-player-dist-ctrl.png`、`shot-player-immersive-ctrl.png`、
 `shot-home-dev-logo.png`、`shot-home-dist-logo.png`。
 
+## 6b. CI 结果（2026-11-17）
+
+- 提交：`f2404c9`（0.1.4 主体）+ `c3ede79`（HLS 用例等待时间与现场诊断）
+- 运行：run 44025740246，workflow「Build unsigned iOS IPA」，branch main，**success**
+- Node 回归（CI 内）：35 项通过
+- XCTest（iOS Simulator）：**9 项执行，0 失败**，25.858 秒
+  - PlaybackTests 7 项（含 `testNativeHlsCompatibilityAndLatePlay` 2.206 秒）
+  - ShareTests 2 项（https 白名单）
+- 首轮 run 44024619205 失败在 1 个用例：`testNativeHlsCompatibilityAndLatePlay`，
+  同一台机器那轮整体慢约 4 倍（10 秒的用例跑了 2 秒的活），HLS 起播超过了 12 秒预算；
+  同一本地服务器上的 MP4 用例仍然正常，说明不是播放逻辑或注入层的问题。
+  把等待放到 30 秒并加上 `currentTime/readyState/videoWidth/MediaError` 现场输出后，下一轮 2.2 秒通过。
+- 产物：`ZhuijuAI-unsigned-ipa`（4,298,192 字节）
+  - 包内核对：`0.1.4` / build `5` / MinimumOSVersion 15.0 / 横屏方向已声明
+  - 包内 `AppBootstrap.js` 44,186 字节，含 `#ppCtrl`、五档倍速、`ppCast`、`action: 'share'`、
+    `--brand-logo`（data URI 仅 1 处）
+  - SHA-256：`c3ba724357a343d0f41d93200ff5e73b484590d440ba028e1c537fbca718db30`（CI 的 .sha256 与本地重算一致）
+
 ## 7. 本机无法验证的部分
 
 - **Swift 编译与 XCTest**：这台机器是 Windows，没有 `xcodebuild`。本轮把地址校验抽成纯函数
