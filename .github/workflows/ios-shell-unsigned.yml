@@ -1,0 +1,79 @@
+name: Build unsigned iOS H5 shell IPA
+
+# 和 ios-unsigned.yml 并存：那份构建原生 App (ios/)，这份构建 H5 外壳 (ios-shell/)。
+# 两边互不触发，路径过滤器是唯一的边界。
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'ios-shell/**'
+      - '.github/workflows/ios-shell-unsigned.yml'
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify shell bootstrap script
+        run: node ios-shell/Tests/bootstrap.test.mjs
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        working-directory: ios-shell
+        run: xcodegen generate
+
+      - name: Build Release for device
+        working-directory: ios-shell
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project ZhuijuAIH5.xcodeproj \
+            -scheme ZhuijuAIH5 \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build | tee xcodebuild.log
+
+      - name: Package unsigned IPA
+        working-directory: ios-shell
+        run: |
+          set -euo pipefail
+          APP="build/Build/Products/Release-iphoneos/ZhuijuAIH5.app"
+          test -d "$APP"
+          # 包信息就是验收口径：bundle id 必须和原生包不同，版本必须是 0.1.0 (1)
+          plutil -p "$APP/Info.plist" | tee Info-packaged.log
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP/Info.plist" | grep -qx 'org.dpdns.zhuiju.h5'
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Info.plist" | grep -qx '0.1.0'
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP/Info.plist" | grep -qx '1'
+          mkdir Payload
+          cp -R "$APP" Payload/
+          /usr/bin/zip -qry ZhuijuAI-H5-0.1.0.ipa Payload
+          shasum -a 256 ZhuijuAI-H5-0.1.0.ipa | tee ZhuijuAI-H5-0.1.0.ipa.sha256
+          ls -l ZhuijuAI-H5-0.1.0.ipa | tee IPA-size.log
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: ZhuijuAI-H5-unsigned-ipa
+          path: |
+            ios-shell/ZhuijuAI-H5-0.1.0.ipa
+            ios-shell/ZhuijuAI-H5-0.1.0.ipa.sha256
+            ios-shell/IPA-size.log
+          retention-days: 14
+
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ZhuijuAI-H5-xcodebuild-log
+          path: ios-shell/xcodebuild.log
+          retention-days: 7
