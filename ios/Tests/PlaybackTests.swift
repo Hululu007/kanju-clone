@@ -87,7 +87,8 @@ final class PlaybackTests: XCTestCase, WKNavigationDelegate {
 
     /// Runs an async JavaScript expression in the page and polls for its resolved boolean result.
     /// Avoids `callAsyncJavaScript` (Swift overlay) by storing the promise outcome in a page slot.
-    private func awaitValue(_ source: String) async throws -> Bool {
+    private func awaitValue(_ source: String, timeout: Double = 15) async throws -> Bool {
+        let budget = Int(timeout * 1000)
         slotCounter += 1
         let slot = "slot\(slotCounter)"
         let kick = """
@@ -95,7 +96,7 @@ final class PlaybackTests: XCTestCase, WKNavigationDelegate {
           window.__zhuijuTestSlots = window.__zhuijuTestSlots || {};
           var state = window.__zhuijuTestSlots['\(slot)'] = {done:false,value:false};
           var settle = function(value){ state.done = true; state.value = value === true; };
-          var timeout = new Promise(function(resolve){ setTimeout(function(){ resolve(false); }, 15000); });
+          var timeout = new Promise(function(resolve){ setTimeout(function(){ resolve(false); }, \(budget)); });
           var target;
           try { target = Promise.resolve((\(source))); } catch (error) { target = Promise.reject(error); }
           Promise.race([target, timeout]).then(settle, function(){ settle(false); });
@@ -103,7 +104,7 @@ final class PlaybackTests: XCTestCase, WKNavigationDelegate {
         })();
         """
         _ = try await javaScript(kick)
-        let deadline = Date().addingTimeInterval(20)
+        let deadline = Date().addingTimeInterval(timeout + 5)
         while Date() < deadline {
             let probe = try await javaScript("""
             (function(){
@@ -209,6 +210,9 @@ final class PlaybackTests: XCTestCase, WKNavigationDelegate {
         let source = try String(contentsOf: XCTUnwrap(Bundle.main.url(forResource: "NativeHls", withExtension: "js")), encoding: .utf8)
         try await execute("window.Hls=function Original(){};window.Hls.Events={ERROR:'error'};")
         try await execute(source)
+        // 模拟器里的 HLS 起播比 MP4 慢得多，CI 排队时整体会被拖慢好几倍；这里等 30 秒，
+        // 并在失败时把 currentTime / readyState / videoWidth / MediaError 打出来，
+        // 免得只得到一句 "XCTAssertTrue failed"。
         let result = try await awaitValue("""
         (async function(){
           var video=document.getElementById('video');video.muted=true;
@@ -216,12 +220,22 @@ final class PlaybackTests: XCTestCase, WKNavigationDelegate {
           replies.push({data:{showId:'fixture',idx:18,episodeNumber:19,verified:true,kind:'hls',url:'https://fixture.invalid/sample.m3u8'}});
           await fetch('https://zhuiju.dpdns.org/api/play?show=fixture&ep=18');
           var hls=new Hls();hls.loadSource(address);hls.attachMedia(video);
-          await video.play();
-          return await new Promise(function(resolve){var timer=setTimeout(function(){resolve(false)},12000);
-            video.addEventListener('timeupdate',function(){if(video.currentTime>0.15){clearTimeout(timer);resolve(video.videoWidth===320)}});
+          await video.play().catch(function(){});
+          var report=function(advanced){
+            window.__hlsDiag={advanced:advanced,currentTime:video.currentTime,readyState:video.readyState,
+              width:video.videoWidth,height:video.videoHeight,
+              error:video.error?video.error.code:0,src:(video.currentSrc||'').slice(0,80)};
+            return advanced && video.videoWidth===320;
+          };
+          return await new Promise(function(resolve){
+            var timer=setTimeout(function(){resolve(report(false))},30000);
+            video.addEventListener('timeupdate',function(){
+              if(video.currentTime>0.15){clearTimeout(timer);resolve(report(true))}
+            });
           });
         })()
-        """)
-        XCTAssertTrue(result)
+        """, timeout: 45)
+        let diag = (try? await javaScript("JSON.stringify(window.__hlsDiag||{})")) as? String ?? "{}"
+        XCTAssertTrue(result, "原生 HLS 没有正常起播，现场：\(diag)")
     }
 }
