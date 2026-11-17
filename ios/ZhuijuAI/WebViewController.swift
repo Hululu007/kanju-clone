@@ -137,7 +137,7 @@ final class WebViewController: UIViewController {
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        view.backgroundColor = UIColor(red: 0.043, green: 0.071, blue: 0.125, alpha: 1)
+        view.backgroundColor = UIColor.black
         configureLayout()
         configureErrorView()
         observeProgress()
@@ -166,7 +166,7 @@ final class WebViewController: UIViewController {
     }
 
     private func configureLayout() {
-        progressView.progressTintColor = UIColor(red: 0.13, green: 0.72, blue: 0.95, alpha: 1)
+        progressView.progressTintColor = UIColor(red: 22.0 / 255.0, green: 224.0 / 255.0, blue: 90.0 / 255.0, alpha: 1)
         progressView.trackTintColor = .clear
         progressView.translatesAutoresizingMaskIntoConstraints = false
         webView.translatesAutoresizingMaskIntoConstraints = false
@@ -325,7 +325,7 @@ final class WebViewController: UIViewController {
     }
 
     private func configureErrorView() {
-        errorContainer.backgroundColor = UIColor(red: 0.043, green: 0.071, blue: 0.125, alpha: 1)
+        errorContainer.backgroundColor = UIColor.black
         errorContainer.isHidden = true
         errorContainer.translatesAutoresizingMaskIntoConstraints = false
 
