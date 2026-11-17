@@ -123,7 +123,20 @@ iosFullBtn  y=515 x=12    ← 单独一行，文案「全屏」
 | `ios/project.yml` | 0.1.3 / build 4 |
 | `ios/ZhuijuAI/Assets.xcassets/AppIcon.appiconset/AppIcon-1024.png` | 用户提供的图标 |
 
-## 四、打包与真机复测
+## 四、CI 结果（2026-11-17）
+
+- 提交：`9109c63`（0.1.3 主体）+ `9d128ea`（首个 WKWebView 冷启动超时从 15s 放宽到 60s）
+- 运行：run 44015817232，workflow「Build unsigned iOS IPA」，branch main，**success**
+- 首轮 run 44014826116 失败在 1 个用例：`setUp` 里等 `loadHTMLString` 的 `didFinish` 超时，
+  发生在任何 App 代码执行之前（冷启动 + runner 排队），放宽到 60s 后 7 项全过。
+- Node 回归（CI 内）：27 项通过
+- XCTest（iOS Simulator）：7 项执行，0 失败，13.054 秒，`"result": "Passed"`
+- 产物：`ZhuijuAI-unsigned-ipa`（4,283,038 字节）
+  - IPA 内容核对：`CFBundleShortVersionString 0.1.3`、`CFBundleVersion 4`、`MinimumOSVersion 15.0`、
+    `UISupportedInterfaceOrientations` 含左右横屏、含 `AppBootstrap.js` / `NativeHls.js` / `hls.min.js`
+  - SHA-256：`a8b32b8a8b78bb7aece7bea143b6a988ab21a54964723c9312c66810453d0e2f`（CI 产出的 .sha256 与本地重算一致）
+
+## 五、打包与真机复测
 
 本机（Windows）无法产出 IPA，路径只有 GitHub Actions `.github/workflows/ios-unsigned.yml`
 （macos-15，先跑 23 项 Node 回归、再跑模拟器播放回归，最后产出 `ZhuijuAI-unsigned.ipa` + sha256），
