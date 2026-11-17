@@ -127,6 +127,18 @@
 - 构建产物 32 条规则（CSS/JS 双份核对）。
 - 浏览器端到端 **76 项**：两层（站点源码 + 构建产物+注入层）×（滚动、日期条、横滑、下载文案、全屏、账号）＋横屏沉浸态，截图 3 张。
 
+## 9b. CI 结果（2026-11-17）
+
+- 提交：`df7fd21`
+- 运行：run **44058441401**，workflow「Build unsigned iOS IPA」，branch main，**success**
+- CI 内 Node 回归：**54 项全过**
+- CI 内 XCTest：**17 项 0 失败**，38.336 秒（PlaybackTests 7 + ShareTests 2 + DownloadTests 5 + VersionTests 3）
+- 产物：`ZhuijuAI-unsigned-ipa`（4,326,359 字节）
+  - 包内核对：`0.1.6` / build `7` / MinimumOSVersion 15.0 / `org.dpdns.zhuiju.ios`
+  - 包内 `AppBootstrap.js` 68,697 字节，含沉浸态隐藏清单、弹幕 transform、去模糊、横滑取消平滑、提示行预留高度、直链记忆、标签横滑标记、账号文案同步
+  - **SHA-256 `9b9245beab9aac110ad4e1b121f4f1b9c30cc18782f907b6292ffd62c487de14`**
+    （CI 的 `.sha256` 与本地重算一致）
+
 ## 10. 本机无法验证 / 不声称已验证
 
 1. 真机帧率与手感：滚动改动的收益只有浏览器侧证据。
