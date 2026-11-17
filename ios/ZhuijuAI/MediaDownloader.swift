@@ -40,20 +40,28 @@ final class MediaDownloader: NSObject {
     var isBusy: Bool { task != nil }
 
     /// 文件名清洗：只留文件名本身，路径分隔符、控制字符一律换掉，并补上视频扩展名。
+    ///
+    /// 只有当地址最后一段**真的带视频扩展名**时才用它 ——
+    /// 否则 `.../play/19` 会变成 `19.mp4`，把网页给的集名丢掉；
+    /// `.m3u8` 这类清单也不能冒充成视频文件。
     static func fileName(from raw: String?, fallback: String) -> String {
+        let videoExtensions = [".mp4", ".m4v", ".mov", ".mkv", ".ts"]
         var name = fallback
         if let raw = raw, let parsed = URL(string: raw) {
             let last = parsed.lastPathComponent
-            if !last.isEmpty, last.contains(".") { name = last }
+            if !last.isEmpty, videoExtensions.contains(where: { last.lowercased().hasSuffix($0) }) {
+                name = last
+            }
         }
         let banned = CharacterSet(charactersIn: "/\\:*?\"<>|")
             .union(.controlCharacters)
             .union(.newlines)
         name = name.components(separatedBy: banned).joined(separator: "_")
-        let known = [".mp4", ".m4v", ".mov", ".mkv", ".ts"]
-        if !known.contains(where: { name.lowercased().hasSuffix($0) }) { name += ".mp4" }
+        if !videoExtensions.contains(where: { name.lowercased().hasSuffix($0) }) { name += ".mp4" }
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? "video.mp4" : String(trimmed.prefix(120))
+        // 只剩一个扩展名（".mp4"）就是隐藏文件，退回固定名字
+        if trimmed.isEmpty || trimmed.hasPrefix(".") { return "video.mp4" }
+        return String(trimmed.prefix(120))
     }
 
     static func directory() -> URL? {

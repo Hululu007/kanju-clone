@@ -26,9 +26,10 @@ final class DownloadTests: XCTestCase {
         XCTAssertTrue(name.hasSuffix(".mp4"))
     }
 
-    func testFileNameAddsAVideoExtensionWhenTheUrlIsNotAVideo() {
-        let name = MediaDownloader.fileName(from: "https://media.example/19.m3u8", fallback: "x")
-        XCTAssertEqual(name, "19.m3u8.mp4", "分片清单即使被下载也不该冒充视频文件")
+    func testFileNameDoesNotLetAPlaylistPassAsVideo() {
+        let name = MediaDownloader.fileName(from: "https://media.example/19.m3u8", fallback: "追剧AI_第19集")
+        XCTAssertEqual(name, "追剧AI_第19集.mp4", "分片清单不能冒充视频文件，用页面给的集名")
+        XCTAssertFalse(name.contains("m3u8"))
     }
 
     func testDownloadDirectoryIsInsideTheSandbox() {
