@@ -1,0 +1,7 @@
+build/
+ZhuijuAIH5.xcodeproj/
+*.ipa
+*.ipa.sha256
+xcodebuild.log
+Info-packaged.log
+IPA-size.log

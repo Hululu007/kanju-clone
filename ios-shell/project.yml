@@ -1,0 +1,38 @@
+name: ZhuijuAIH5
+options:
+  bundleIdPrefix: org.dpdns
+  deploymentTarget:
+    iOS: "15.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    ENABLE_USER_SCRIPT_SANDBOXING: "NO"
+targets:
+  ZhuijuAIH5:
+    type: application
+    platform: iOS
+    sources:
+      - path: ZhuijuH5
+    settings:
+      base:
+        # 和原生 App (org.dpdns.zhuiju.ios) 分开，两个包可以同时装在一台机器上对比。
+        PRODUCT_BUNDLE_IDENTIFIER: org.dpdns.zhuiju.h5
+        PRODUCT_NAME: ZhuijuAIH5
+        INFOPLIST_FILE: ZhuijuH5/Info.plist
+        GENERATE_INFOPLIST_FILE: "NO"
+        TARGETED_DEVICE_FAMILY: "1,2"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        CODE_SIGN_STYLE: Automatic
+        SUPPORTS_MACCATALYST: "NO"
+schemes:
+  ZhuijuAIH5:
+    build:
+      targets:
+        ZhuijuAIH5: all
+    run:
+      config: Debug
+    archive:
+      config: Release
