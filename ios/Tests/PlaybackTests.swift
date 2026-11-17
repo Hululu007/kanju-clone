@@ -29,7 +29,9 @@ final class PlaybackTests: XCTestCase, WKNavigationDelegate {
         <div id="playHint"></div><div id="playTools"></div><select id="lineSelect"></select>
         </body></html>
         """, baseURL: URL(string: "https://zhuiju.dpdns.org/"))
-        await fulfillment(of: [loaded!], timeout: 15)
+        // 模拟器冷启动时第一个 WKWebView 要等 WebContent 进程起来，macOS runner 排队时会超过 15 秒；
+        // 这条只决定「页面是否加载完」，与 App 逻辑无关，所以给足冷启动时间。
+        await fulfillment(of: [loaded!], timeout: 60)
         try await execute("""
         window.calls=[]; window.replies=[];
         window.fetch=async function(input,options){
