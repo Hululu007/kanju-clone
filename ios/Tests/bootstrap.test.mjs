@@ -52,7 +52,7 @@ function node(tag = 'div') {
   return element;
 }
 
-function fixture({ origin = 'https://zhuiju.dpdns.org', storageThrows = false, landscape = false, keyword = '', search = '?id=fixture', episodes = [], playRejects = false, maxRate = 0, bridge = true, signedIn = false } = {}) {
+function fixture({ origin = 'https://zhuiju.dpdns.org', storageThrows = false, landscape = false, keyword = '', search = '?id=fixture', episodes = [], playRejects = false, maxRate = 0, bridge = true, signedIn = false, noSelectedEpisode = false } = {}) {
   const shared = [];
   const listeners = {};
   const replies = [];
@@ -232,7 +232,7 @@ function fixture({ origin = 'https://zhuiju.dpdns.org', storageThrows = false, l
     },
     createElement(tag) { return node(tag); },
     querySelector(selector) {
-      if (selector === '.ep.on') return selected;
+      if (selector === '.ep.on') return noSelectedEpisode ? null : selected;
       if (selector === '[data-action="login"]') return loginTrigger;
       if (selector === '.pp-tabs') return tabRow;
       return null;
@@ -497,6 +497,21 @@ test('verified playback resolution keeps its direct url available after iOS swap
   state.click(state.document.getElementById('ppShareLink'));
   assert.equal(state.messages.at(-1).url, valid.url,
     '外放应复用当前选集已校验的解析地址，而不是把 blob 误判成未解析');
+});
+
+test('a one-episode movie uses episode zero for verified direct-link state', async () => {
+  const state = fixture({ noSelectedEpisode: true, signedIn: true }); state.ready();
+  state.replies.push(json({ ...valid, idx: 0, episodeNumber: 1 }));
+  await state.window.fetch('https://kanju-api.kenzhao123.workers.dev/api/play?show=fixture&ep=0&line=official');
+  state.video.currentSrc = 'blob:https://zhuiju.dpdns.org/movie';
+  state.click(state.document.getElementById('ppCast'));
+  const row = state.document.getElementById('ppDownload');
+  assert.match(row.children[1].textContent, /开始下载/,
+    '单集电影的下载提示应识别已通过校验的第 0 集直链');
+  state.click(state.document.getElementById('ppShareLink'));
+  assert.equal(state.messages.at(-1).action, 'share');
+  assert.equal(state.messages.at(-1).url, valid.url,
+    '单集电影应将已验证的第 0 集直链交给分享面板');
 });
 
 test('external playback without the app bridge falls back to the system share sheet', () => {

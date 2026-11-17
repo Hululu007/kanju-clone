@@ -687,6 +687,8 @@
 
   function episodeKey() {
     var active = document.querySelector ? document.querySelector('.ep.on') : null;
+    /* 电影和单集内容不会渲染 .ep 选集按钮；它们的唯一一集索引固定为 0。 */
+    if (!active) return '0';
     var ep = active && active.dataset ? active.dataset.ep : '';
     return ep === undefined || ep === null ? '' : String(ep);
   }
