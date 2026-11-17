@@ -194,6 +194,17 @@
     style.id = 'iosShellStyle';
     style.textContent = [
       'html{--brand-logo:url("' + BRAND_LOGO + '")}',
+      /* 滚动中 WKWebView 曾短暂切到 WebKit.GPU 并丢掉卡片图层。
+         首页背景原本由两个全屏 fixed pseudo-element + mask/filter 组成，
+         会长期占用独立 GPU surface；改成根视图的一张静态渐变，减少滚动层回收压力。 */
+      'html{background-color:#07131b!important;background-image:linear-gradient(90deg,rgba(0,0,0,.2),rgba(0,0,0,0) 58%),radial-gradient(125% 95% at 100% 0%,#15333a 0%,rgba(21,51,58,0) 58%),radial-gradient(80% 60% at 62% -12%,#0e2530 0%,rgba(14,37,48,0) 60%),linear-gradient(180deg,#0b1f2b 0%,#0a1a26 42%,#07131b 100%);background-attachment:fixed}',
+      "html[data-theme='light']{background-color:#eef1f4!important;background-image:radial-gradient(125% 95% at 100% 0%,#d8f3ea 0%,rgba(216,243,234,0) 58%),linear-gradient(180deg,#f7fafb 0%,#eef1f4 45%,#e6ebee 100%)}",
+      'body{background:transparent!important}',
+      'body:before,body:after{content:none!important;display:none!important}',
+      /* WKWebView 用唯一主滚动容器；不要让卡片 hover/隔离再为每张海报建立合成层。 */
+      '.main{-webkit-overflow-scrolling:touch;transform:none!important;will-change:auto!important}',
+      '.pcard-link{isolation:auto!important;transition:none!important;transform:none!important}',
+      '@media(hover:none){.pcard-link:hover{transform:none!important}}',
       /* 全屏：竖屏也铺满，横屏时整屏播放，不再只有中间一条 */
       'html[data-ios-immersive] #player{position:fixed!important;inset:0!important;width:100%!important;height:100%!important;z-index:10000!important;border-radius:0!important;margin:0!important;background:#000!important;display:flex!important;align-items:center!important;justify-content:center!important}',
       'html[data-ios-immersive] #player video{width:100%!important;height:100%!important;aspect-ratio:auto!important;object-fit:contain!important;background:#000}',

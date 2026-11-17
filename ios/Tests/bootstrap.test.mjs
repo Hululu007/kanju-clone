@@ -732,6 +732,14 @@ test('scrolling surfaces drop expensive blur and smooth positioning', async () =
   assert.match(css, /\.days,\.strip,\.cat-list,\.line-group\{scroll-behavior:auto!important\}/,
     '横滑条不接受平滑滚动，否则重建后一设 scrollLeft 就整条滑过去');
   assert.match(css, /#playHint,\.pp-hint\{min-height:2\.6em/, '提示行预留高度，文案变化不推动下方内容');
+  assert.match(css, /html\{background-color:#07131b!important;background-image:/,
+    'App 内固定渐变背景绘制在根视图，不再保留全屏伪元素 GPU 图层');
+  assert.match(css, /html\[data-theme='light'\]\{background-color:#eef1f4!important;background-image:/,
+    '静态根背景继续适配浅色主题');
+  assert.match(css, /body:before,body:after\{content:none!important;display:none!important\}/,
+    '去掉滚动时会被 WebKit GPU 回收的两张全屏 fixed 背景层');
+  assert.match(css, /\.pcard-link\{isolation:auto!important;transition:none!important;transform:none!important\}/,
+    'iOS 卡片不可 hover，不应因每张卡 isolation/transform 生成 GPU 合成层');
 });
 
 test('swiping the tab row switches to the next tab', async () => {
