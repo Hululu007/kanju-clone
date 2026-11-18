@@ -226,6 +226,11 @@
       /* 全屏：竖屏也铺满，横屏时整屏播放，不再只有中间一条 */
       'html[data-ios-immersive] #player{position:fixed!important;inset:0!important;width:100%!important;height:100%!important;z-index:10000!important;border-radius:0!important;margin:0!important;background:#000!important;display:flex!important;align-items:center!important;justify-content:center!important}',
       'html[data-ios-immersive] #player video{width:100%!important;height:100%!important;aspect-ratio:auto!important;object-fit:contain!important;background:#000}',
+      /* 画面档位：三条写在沉浸态那条之后，同样的优先级下由它们覆盖 contain。
+         适应=完整画面（可留边），裁剪=等比铺满（裁边），拉伸=不等比铺满。 */
+      'html[data-ios-fit="contain"] #player video{object-fit:contain!important}',
+      'html[data-ios-fit="cover"] #player video{object-fit:cover!important}',
+      'html[data-ios-fit="fill"] #player video{object-fit:fill!important}',
       'html[data-ios-immersive],html[data-ios-immersive] body{overflow:hidden!important}',
       /* 全屏：上方那一排「显示设置 / 线路 / 弹幕 / 画中画 / 下一集」整条收起。
          它原本被固定到右上角，正好压在画面上，是真机上最挡视线的一排；
@@ -295,6 +300,7 @@
       '#ppCtrl .pc-seek::-webkit-slider-thumb{-webkit-appearance:none;width:14px;height:14px;margin-top:-5px;border:0;border-radius:50%;background:#16e09d}',
       '#ppCtrl #ppRate{background:rgba(255,255,255,.16)}',
       '#ppCtrl #ppFull{background:rgba(22,224,157,.92);color:#04241a}',
+      '#ppCtrl #ppFit{background:rgba(255,255,255,.16)}',
       '#iosDownloadStatus{margin:12px 0;padding:12px;border:1px solid rgba(255,255,255,.14);border-radius:10px;background:rgba(0,0,0,.12);color:inherit;font-size:13px}',
       /* 首页没有站点面板（只有一句「设置面板即将上线」），注入层自带一个：
          下载进度和播放方式都在里面，任何页面都能打开。 */
@@ -524,6 +530,43 @@
     }
     syncCtrlVisibility();
     syncFullButton();
+    applyFit();
+  }
+
+  /* ---------- 画面模式：适应 / 裁剪 / 拉伸 ----------
+     4:3 或 2.35:1 的片源在「适应」下会留黑边，用户可能想铺满。三档写到
+     html[data-ios-fit] 上，由样式表落到真正的 #player video；选择落 localStorage，
+     换集/旋转/重进 App 都按记住的那一档来，不重置回默认值。 */
+  var FIT_PREF = 'kj-ios-fit';
+  var FIT_MODES = ['contain', 'cover', 'fill'];
+  var FIT_LABELS = { contain: '适应', cover: '裁剪', fill: '拉伸' };
+  var fitMode = 'contain';
+
+  function readFitPref() {
+    var stored = '';
+    try { stored = String(localStorage.getItem(FIT_PREF) || ''); } catch (error) { stored = ''; }
+    return FIT_MODES.indexOf(stored) >= 0 ? stored : 'contain';
+  }
+
+  function applyFit() {
+    fitMode = readFitPref();
+    var root = document.documentElement;
+    if (root && typeof root.setAttribute === 'function') root.setAttribute('data-ios-fit', fitMode);
+    var button = document.getElementById('ppFit');
+    if (!button) return;
+    var label = FIT_LABELS[fitMode] || '适应';
+    button.textContent = label;
+    if (typeof button.setAttribute === 'function') {
+      button.setAttribute('aria-label', '画面比例：' + label + '，点击切换');
+    }
+  }
+
+  function cycleFit() {
+    var next = FIT_MODES[(FIT_MODES.indexOf(fitMode) + 1) % FIT_MODES.length];
+    try { localStorage.setItem(FIT_PREF, next); } catch (error) { /* 存不了就只在本次生效 */ }
+    applyFit();
+    announce('画面：' + (FIT_LABELS[fitMode] || '适应'));
+    return fitMode;
   }
 
   /* ---------- 全屏里控制栏“点一下才出来，几秒后自己收起” ----------
@@ -1144,6 +1187,7 @@
     barButton('ppCast', '外放', '用其他 App 播放或投屏');
     barButton('ppRate', '1×', '倍速');
     barButton('ppFull', '全屏', '全屏播放');
+    barButton('ppFit', '适应', '画面比例：适应，点击切换');
 
     /* 外放菜单：分享直链 / 复制直链 / 下载（登录后）/ 用其他播放器打开（下载后） */
     var castMenu = document.createElement('div');
@@ -1807,6 +1851,13 @@
       event.preventDefault();
       event.stopImmediatePropagation();
       toggleFullscreen();
+      return true;
+    }
+    if (hit(target, 'ppFit')) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      cycleFit();
+      hideCtrlSoon();
       return true;
     }
     if (hit(target, 'ppCast')) {
