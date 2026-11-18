@@ -639,6 +639,105 @@ final class InjectedUITests: XCTestCase, WKNavigationDelegate {
         XCTAssertEqual(done["firstCounter"] as? String, "已下载 1/1 集")
     }
 
+    // MARK: - REG-008 工具条上的下载入口被换成了「用播放器打开」
+
+    /// 真机原话：下载完一集之后，工具条那一格变成「用播放器打开」，下一次想下载就找不到入口了。
+    /// 这一格必须永远是下载入口；播放器入口留在「外放」菜单和设置面板里。
+    func testToolbarDownloadStaysADownloadEntryAfterAFinishedDownload() async throws {
+        let mounted = try await awaitValue("!!document.getElementById('ppToolDownload')")
+        XCTAssertTrue(mounted, "工具条上没有下载入口，这条用例没有意义")
+        let raw = try await javaScript("""
+        (function () {
+          var video = document.getElementById('video');
+          video.src = 'https://media.example/19.mp4';
+          /* 上一集已经下完：真机上是原生回传 done，这里走同一条回传函数 */
+          window.__zhuijuDownload({ id: 'dl1', event: 'done', path: '/tmp/追剧AI_第3集.mp4',
+            name: '追剧AI_第3集.mp4', size: 10485760 });
+          var button = document.getElementById('ppToolDownload');
+          var dm = document.getElementById('dmBtn');
+          if (!button) return 'missing-button';
+          return JSON.stringify({
+            text: button.textContent,
+            display: getComputedStyle(button).display,
+            inDanmakuSlot: !!(dm && button.nextElementSibling === dm),
+            playerRowVisible: !!document.getElementById('ppOpenLocal') && !document.getElementById('ppOpenLocal').hidden
+          });
+        })();
+        """)
+        let text = try XCTUnwrap(raw as? String)
+        let result = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any])
+        XCTAssertEqual(result["text"] as? String, "下载本集",
+                       "下完一集之后这一格必须还是下载入口，不能变成「用播放器打开」（0.1.12 真机回归）：\(text)")
+        XCTAssertNotEqual(result["display"] as? String, "none", "下载入口必须看得见：\(text)")
+        XCTAssertEqual(result["inDanmakuSlot"] as? Bool, true, "下载入口还在原来那一格：\(text)")
+        XCTAssertEqual(result["playerRowVisible"] as? Bool, true, "播放器入口在「外放」菜单里，不该占用下载那一格：\(text)")
+
+        /* 点它必须走原生下载队列（download），不能是 openLocal/share */
+        let clicked = try await javaScript("""
+        (function () {
+          document.getElementById('video').src = 'https://media.example/19.mp4';
+          document.getElementById('ppToolDownload').click();
+          return document.getElementById('ppToolDownload').textContent;
+        })();
+        """)
+        XCTAssertEqual(clicked as? String, "下载 0%", "点下载本集要立刻开始下载：\(String(describing: clicked))")
+        let message = try await awaitPlayerMessage()
+        XCTAssertEqual(message["action"] as? String, "download",
+                       "这一格点下去必须是下载，不能是把文件交给播放器：\(message)")
+        XCTAssertEqual(message["url"] as? String, "https://media.example/19.mp4")
+        let downloadId = try XCTUnwrap(message["id"] as? String)
+
+        /* 下载中 + 完成：按钮始终是下载，片库里有剧名/集号/进度 */
+        let flow = try await javaScript("""
+        (function () {
+          var button = document.getElementById('ppToolDownload');
+          var running = null;
+          window.__zhuijuDownload({ id: '\(downloadId)', event: 'progress', received: 42, total: 100 });
+          if (!document.getElementById('iosSettingsSheet') || document.getElementById('iosSettingsSheet').hidden) {
+            document.querySelector('[data-action="settings"]').click();
+          }
+          running = document.getElementById('iosDlRunning');
+          var runningText = running ? running.textContent : 'missing';
+          window.__zhuijuDownload({ id: '\(downloadId)', event: 'done', path: '/tmp/追剧AI_第19集.mp4',
+            name: '追剧AI_第19集.mp4', size: 10485760 });
+          var item = document.getElementById('iosDlShows').children[0];
+          var openRow = document.getElementById('iosOpenDownloaded');
+          return JSON.stringify({
+            runningText: runningText,
+            textAfterDone: button.textContent,
+            firstShow: item ? item.querySelector('.ios-dl-name').textContent : '',
+            firstCount: item ? item.querySelector('.ios-dl-count').textContent : '',
+            firstEpisode: item ? item.querySelector('.ios-dl-eps').children[0].textContent : '',
+            settingsPlayerEntry: !!openRow && !openRow.hidden
+          });
+        })();
+        """)
+        let flowText = try XCTUnwrap(flow as? String)
+        let flowResult = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(flowText.utf8)) as? [String: Any])
+        let runningText = try XCTUnwrap(flowResult["runningText"] as? String)
+        XCTAssertTrue(runningText.contains("42%"), "下载中要在片库里看到实时进度：\(flowText)")
+        XCTAssertTrue(runningText.contains("测试剧"), "下载中要能看到剧名：\(flowText)")
+        XCTAssertTrue(runningText.contains("第19集"), "下载中要能看到集号：\(flowText)")
+        XCTAssertEqual(flowResult["textAfterDone"] as? String, "下载本集",
+                       "下载完成后这一格还要是下载入口：\(flowText)")
+        XCTAssertEqual(flowResult["firstShow"] as? String, "测试剧")
+        XCTAssertEqual(flowResult["firstCount"] as? String, "已下载 1/1 集")
+        XCTAssertEqual(flowResult["firstEpisode"] as? String, "第19集")
+        XCTAssertEqual(flowResult["settingsPlayerEntry"] as? Bool, true,
+                       "「用播放器打开」在设置里保留，不该挤掉下载入口：\(flowText)")
+
+        /* 下载完再点一次仍然是下载（不是打开文件），并真的发出新的下载任务 */
+        let again = try await javaScript("""
+        (function () {
+          document.getElementById('ppToolDownload').click();
+          return document.getElementById('ppToolDownload').textContent;
+        })();
+        """)
+        XCTAssertEqual(again as? String, "下载 0%", "下完再点也要能重新下载这一集：\(String(describing: again))")
+        let second = try await awaitPlayerMessage()
+        XCTAssertEqual(second["action"] as? String, "download", "下完再点仍然是下载，不是交给播放器：\(second)")
+    }
+
     // MARK: - 桥接工具
 
     /// JSONSerialization 给的矩形是 NSNumber 数组：拆成 [Int] 再比，避免桥接不稳。
