@@ -115,7 +115,7 @@ jobs:
       # ---- 出包关卡：真启动 App、真点页面、逐张截图 ----------------------------------
       # 页面来自同机受控夹具站（无账号、不连公网），片源是真 mp4，所以截图里有真画面。
       - name: Serve the controlled fixture site
-        if: ${{ github.event_name != 'workflow_dispatch' || inputs.ui_smoke != 'false' }}
+        if: always() && (github.event_name != 'workflow_dispatch' || inputs.ui_smoke != 'false')
         working-directory: ios
         run: |
           set -uo pipefail
@@ -138,7 +138,7 @@ jobs:
       # 批量下载那一项在下载队列合入前会如实变红（没有 skip 掩护）。
       - name: Run the app UI smoke and shoot every screen
         id: ui_smoke
-        if: ${{ github.event_name != 'workflow_dispatch' || inputs.ui_smoke != 'false' }}
+        if: always() && (github.event_name != 'workflow_dispatch' || inputs.ui_smoke != 'false')
         working-directory: ios
         run: |
           set -o pipefail
