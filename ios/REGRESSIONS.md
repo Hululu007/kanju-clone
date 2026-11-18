@@ -153,10 +153,13 @@ node --test --test-name-pattern='landscape playback goes immersive again' ios/Te
 | --- | --- | --- |
 | [44215579006](https://github.com/kenzhao11/kanju-clone/actions/runs/44215579006) | 0.1.9 的 `AppBootstrap.js`（临时对照分支，已删） | **7 条全红**，失败信息就是本次的三个 bug |
 | [44214561047](https://github.com/kenzhao11/kanju-clone/actions/runs/44214561047) | 本分支（0.1.10） | 7 条全绿 + Node 接口测试全绿 + Release 包编译通过 |
+| [44222400396](https://github.com/kenzhao11/kanju-clone/actions/runs/44222400396) | 0.1.10 的 `AppBootstrap.js`（对照分支，已删） | 头栏那条**红**：`replayed=true/none/none/block`（片名小签收起了，顶上头栏还是 block）；工具条下载按钮那条也红（按钮不存在） |
+| [44221519568](https://github.com/kenzhao11/kanju-clone/actions/runs/44221519568) | 本分支（0.1.11） | 模拟器 26 条全绿 + Node 76 项全绿 + Release 包编译通过 |
 
 0.1.9 那次的具体失败（可直接对照现象）：
 
 ```
+# 0.1.9：连片名小签都没收起（replayed=false/inline/block）
 landscape=true playing=true/none/none fullscreen=true/none/none exited=false/inline/block replayed=false/inline/block
   → 退出一次全屏后再播，标题回到 display:inline，工具条 block（REG-001）
 {"label":0,"toolbar":0,"tabbar":0}
@@ -165,6 +168,16 @@ TypeError: null is not an object (evaluating 'sheet.hidden')
   → 注入层自己的设置面板压根不存在（REG-002）
 {"pauseCalls":0,"menuOpen":true,"preference":null}
   → 「外放」只弹菜单、没暂停、也没记住使用方式（REG-003）
+```
+
+0.1.10 复核时新增的失败（真机上标题还在的那条）：
+
+```
+# 小签和工具条都收起了，但顶上那条头栏还在 —— 就是手机截图里看到的「百日谎言」
+landscape=true playing=true/none/none/block fullscreen=true/none/none/block exited=false/inline/block/block replayed=true/none/none/block
+  → `.page-head`（返回 + 片名 + 主题 + 菜单）始终 display:block（REG-001 第三条）
+testToolbarDownloadButtonReplacesTheDanmakuSlot → missing-button
+  → 工具条上根本没有下载按钮（REG-004）
 ```
 
 ## 历史条目
