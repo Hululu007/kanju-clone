@@ -77,6 +77,12 @@ final class EpisodeDownloadSheetUITests: XCTestCase {
         return nil
     }
 
+    /// 列表里的一条：aria-label 是「集名 + 状态」，选集网格里的那个按钮只有纯集名，
+    /// 所以用「集名 + 空格」开头来区分（光写集名会点到网格，变成切集）。
+    private func rowPredicate(_ label: String) -> NSPredicate {
+        NSPredicate(format: "label BEGINSWITH %@", label + " ")
+    }
+
     // MARK: - 入口：投屏换成了下载
 
     func testTheCastEntryNextToTheEpisodesIsADownloadButtonThatExpandsInPlace() throws {
@@ -115,9 +121,13 @@ final class EpisodeDownloadSheetUITests: XCTestCase {
                         "点了下载按钮之后页面被换掉了（原来的播放页元素不见了），要求是在原页面里展开")
         attach(app, "011-download-panel")
 
-        // 每一条都带状态：刚进来全是「未下载」
-        XCTAssertNotNil(element(web, containing: "未下载", timeout: 10),
-                        "展开的列表没有显示每集的下载状态")
+        // 每一条都带真实状态。不能写死成「未下载」：同一台模拟器上先跑过的用例
+        // 可能已经把这一集下完了，那它就该显示「已下载」——这也正是本需求要的状态区分。
+        let stateful = web.descendants(matching: .any).matching(rowPredicate("第19集")).firstMatch
+        XCTAssertTrue(stateful.exists, "展开的列表里第19集那一条没有「集名 + 状态」")
+        let stateLabels = ["已下载", "下载中", "排队中", "已暂停", "失败", "未下载"]
+        XCTAssertTrue(stateLabels.contains { (stateful.label).contains($0) },
+                      "第19集那一条没带下载状态：\(stateful.label)")
     }
 
     // MARK: - 单选 / 多选 / 全选 → 进共享队列，并显示已下载与下载中
@@ -134,10 +144,12 @@ final class EpisodeDownloadSheetUITests: XCTestCase {
         RunLoop.current.run(until: Date().addingTimeInterval(0.8))
         _ = requireElement(app, web, "共 5 集", "sheet-total", timeout: 15)
 
-        // 单选：点第 20 集那一条。
-        // 用「第20集 + 状态」定位，而不是光「第20集」——选集网格里也有同名按钮，
-        // 点那个是切集，不是选中下载。
-        let row20 = requireElement(app, web, "第20集 未下载", "sheet-row-20", timeout: 10)
+        // 单选：点第 20 集那一条（用「集名 + 状态」定位，不会误点选集网格里的切集按钮）
+        let row20 = web.descendants(matching: .any).matching(rowPredicate("第20集")).firstMatch
+        guard row20.waitForExistence(timeout: 15) else {
+            _ = fail(app, "sheet-row-20", "展开的列表里没有第20集那一条")
+            return
+        }
         row20.tap()
         RunLoop.current.run(until: Date().addingTimeInterval(0.4))
         XCTAssertNotNil(element(web, containing: "已选 1 集", timeout: 10),

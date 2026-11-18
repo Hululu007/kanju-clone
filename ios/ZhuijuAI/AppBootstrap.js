@@ -2552,8 +2552,11 @@
       if (cast.style) cast.style.display = 'none';
       if (typeof cast.setAttribute === 'function') cast.setAttribute('data-ios-hidden', 'cast');
     }
+    /* 入口挂在**选集网格正上方**：投屏按钮所在的那一行是站点自己的 flex 标题行，
+       把整块列表塞进去会把「选集」标题挤成竖排。投屏按钮仍然在原处隐藏（让位），
+       下载入口落在选集标题下面、选集网格上面 —— 也就是用户说的「视频下方选集旁」。 */
     var grid = document.getElementById('epGrid');
-    var host = cast && cast.parentNode ? cast.parentNode : (grid && grid.parentNode ? grid.parentNode : null);
+    var host = grid && grid.parentNode ? grid.parentNode : (cast && cast.parentNode ? cast.parentNode : null);
     if (!host) return false;
     var entry = document.createElement('div');
     entry.id = 'iosDlEntry';
@@ -2567,8 +2570,8 @@
     panel.hidden = true;
     if (typeof panel.setAttribute === 'function') panel.setAttribute('hidden', '');
     entry.appendChild(panel);
-    /* 投屏入口原地替换；没有投屏入口就放在选集网格前面 */
-    host.insertBefore(entry, cast && cast.parentNode === host ? cast : (grid && grid.parentNode === host ? grid : null));
+    /* 选集网格前面就是「选集旁」；拿不到网格时才退回投屏入口原位 */
+    host.insertBefore(entry, grid && grid.parentNode === host ? grid : (cast && cast.parentNode === host ? cast : null));
     syncDlSheet();
     return true;
   }
@@ -2576,7 +2579,7 @@
   function toggleDlSheet() {
     dlSheetOpen = !dlSheetOpen;
     syncDlSheet();
-    announce(dlSheetOpen ? '选择要下载的集数' : '已收起可下载集数');
+    /* 不弹 toast：它会盖在刚展开的列表上，点选和截图都受干扰 */
     return dlSheetOpen;
   }
 
