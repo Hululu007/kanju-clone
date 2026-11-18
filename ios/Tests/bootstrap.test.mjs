@@ -964,7 +964,7 @@ test('download with an account hands the direct url to the native transfer', () 
   const message = state.messages.at(-1);
   assert.equal(message.action, 'download');
   assert.equal(message.url, 'https://media.example/19.mp4');
-  assert.equal(message.name, '追剧AI_第19集.mp4');
+  assert.equal(message.name, '测试剧 第19集.mp4');
   assert.equal(message.signedIn, true);
   assert.ok(message.id, '每个下载任务要有自己的 id');
   assert.equal(state.document.getElementById('ppCast').textContent, '下载 0%');

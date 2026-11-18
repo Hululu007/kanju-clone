@@ -707,6 +707,15 @@
         });
       }
       if (!eps.length) continue;
+      /* 0.1.13 及以前的记录名是「追剧AI 第19集」：有真实剧名和集号就补名，
+         只改显示名，不动 path、不移动文件、不覆盖同名文件；重复执行结果一样。 */
+      for (var m = 0; m < eps.length; m++) {
+        var oldName = eps[m].name || '';
+        if (!/^追剧AI(?:_|\s|$)/.test(oldName)) continue;
+        var extMatch = /\.(mp4|m4v|mov|mkv|ts)$/i.exec(oldName);
+        var migrated = safeName(String(show.title) + (eps[m].label ? ' ' + eps[m].label : ''));
+        eps[m].name = migrated + (extMatch ? '.' + extMatch[1].toLowerCase() : '.mp4');
+      }
       clean.push({
         id: String(show.id || show.title),
         title: String(show.title),
@@ -1249,6 +1258,7 @@
       video.pause();
       return;
     }
+    syncNowPlaying();
     var promise = video.play();
     if (promise && typeof promise.catch === 'function') {
       promise.catch(function () { announce('播放没有启动，再点一次试试'); });
@@ -1355,13 +1365,54 @@
     return text.replace(/\s+/g, '').slice(0, 16);
   }
 
-  /* 文件名：优先用真实扩展名，集号来自当前选集；原生层还会再清洗一次 */
+  /* 真实剧名：站点标题优先，绝不用 App 名冒充（REG-009） */
+  function showTitle() {
+    var meta = showMeta();
+    var title = String(meta.title || '').replace(/\s+/g, ' ').trim();
+    if (!title || /^追剧AI$/.test(title)) return '';
+    return title;
+  }
+
+  /* 安全文件名：只换掉文件系统真的不接受的字符，不动中文和空格，不损真实剧名 */
+  function safeName(raw) {
+    var name = String(raw || '')
+      .replace(/[\/\:*?"<>|]/g, '_')
+      /* eslint-disable-next-line no-control-regex */
+      .replace(/[ -]/g, '')
+      .replace(/\s+/g, ' ')
+      .replace(/^[. ]+/, '')
+      .trim();
+    return name.slice(0, 80);
+  }
+
+  /* 文件名：真实剧名 + 集号，扩展名来自直链；原生层还会再清洗一次 */
   function downloadName() {
     var url = mediaUrl();
     var match = /\.(mp4|m4v|mov|mkv|ts)(?:[?#]|$)/i.exec(url || '');
     var ext = match ? '.' + match[1].toLowerCase() : '.mp4';
+    var title = showTitle();
     var label = episodeLabel();
-    return '追剧AI' + (label ? '_' + label : '') + ext;
+    var base = title || '未命名';
+    if (label) base += ' ' + label;
+    else if (Number(showMeta().total) === 1 || !showMeta().total) base += ' 正片';
+    return safeName(base) + ext;
+  }
+
+  /* 锁屏/通知里的「现在播放」：走真实媒体会话元数据，iOS 读的是它，不是 DOM */
+  function syncNowPlaying() {
+    try {
+      var session = navigator.mediaSession;
+      if (!session || typeof MediaMetadata !== 'function') return;
+      var meta = showMeta();
+      var label = episodeLabel();
+      var artwork = meta.cover && /^https?:/i.test(meta.cover) ? [{ src: meta.cover }] : [];
+      session.metadata = new MediaMetadata({
+        title: showTitle() || '追剧AI',
+        artist: label || '',
+        album: '',
+        artwork: artwork,
+      });
+    } catch (error) { /* 媒体会话是增强项，失败不影响播放和下载 */ }
   }
 
   function castRow(id, label, note) {
@@ -1633,6 +1684,7 @@
     meta.epKey = episodeKey();
     meta.epLabel = episodeLabel() || (meta.total === 1 ? '正片' : '');
     pendingMeta = meta;
+    syncNowPlaying();
     downloadState = { id: 'dl' + Date.now(), name: name, show: meta.title, ep: meta.epLabel, path: '', busy: true, percent: 0 };
     syncDownloadRow();
     saveDownload(true);

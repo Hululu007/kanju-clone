@@ -279,6 +279,40 @@ node --test --test-name-pattern='landscape playback goes immersive again' ios/Te
 - **修复版本**：0.1.13（build 14）
 - **验证边界**：真机仍需肉眼确认这一格的位置与点击手感；下载本身的后台行为见 REG-007。
 
+## REG-009 下载文件、列表、通知、锁屏都写着「追剧AI 第X集」
+
+- **现象**：下载下来的文件叫 `追剧AI_第19集.mp4`，设置里的下载列表、完成通知、
+  锁屏「现在播放」也都只有 App 名和集号，看不出是哪部剧；换一部剧下载还是一样。
+- **复现步骤**：
+  1. 登录，进任意剧集播放页，点「下载本集」，等它完成。
+  2. 看设置-下载列表里的条目名，或到「文件」App 里看文件名：`追剧AI_第19集.mp4`。
+  3. 锁屏看「现在播放」：标题不是剧名。
+- **引入提交**：`2a2ea5a`（0.1.11）的 `downloadName()` 一开始就是
+  `return '追剧AI' + (label ? '_' + label : '') + ext;` —— 拿 App 名当剧名；
+  `MediaDownloader.fileName(from:fallback:)` 还会被直链最后一段（`19.mp4`）顶掉，
+  把剧名又丢一次。0.1.13 及以前没有任何媒体会话元数据，锁屏信息来自 WebKit 的兜底。
+- **根因**（`ios/ZhuijuAI/AppBootstrap.js` `downloadName()` / `ios/ZhuijuAI/MediaDownloader.swift`
+  `fileName(from:fallback:)`）：文件名从来没有读 `showMeta().title`；原生层又会用链接里的
+  文件名覆盖调用方给的剧名。
+- **修复**：
+  - JS 新增 `showTitle()`（取 `.detail-info h1` / `document.title` / `.ph-title`，拒绝 App 名）
+    与 `safeName()`（只替换文件系统不接受的字符，保留中文和空格），文件名改成
+    `真实剧名 第X集.mp4`；单集没有集号时用「正片」。
+  - 原生 `fileName(from:fallback:)` 改为调用方给的名字优先，只有没给名字时才用链接最后一段。
+  - 新增 `syncNowPlaying()`：播放开始和下载开始时写 `navigator.mediaSession.metadata`
+    （`title` = 真实剧名，`artist` = 第X集，`artwork` = 海报）——iOS 锁屏读的是这份真实媒体会话
+    元数据，不是 DOM 标题。
+  - 旧记录补名：`readLibrary()` 里把仍是 `追剧AI…` 的名字按 `剧名 + 集号` 改写；只动显示名，
+    不动 `path`、不移动/覆盖任何已有文件，重复执行结果一致（幂等）。
+- **测试名**（模拟器，真 WKWebView + 原生桥接）：
+  `InjectedUITests.testDownloadedFileAndNowPlayingUseTheShowTitle`（断言桥接消息里
+  `name == 测试剧 第19集.mp4`，以及 `navigator.mediaSession.metadata.title/artist` 是真实剧名/集号）
+- **测试名**（原生单元）：`DownloadTests.testFileNamePrefersTheCallersNameOverTheUrlSegment`
+- **测试名**（Node 夹具）：`the download file is named after the show, not the app`
+- **修复版本**：0.1.14（build 15）
+- **验证边界**：真机锁屏/通知中心的呈现仍需肉眼确认（`navigator.mediaSession` 在模拟器里可读，
+  但系统锁屏 UI 不进模拟器截图）；本次不声称已在真机上看过锁屏。
+
 ## 模拟器验收记录
 
 `InjectedUITests` 在 GitHub Actions 的 `macos-15` + iOS 模拟器上跑（`ios-unsigned.yml` 的

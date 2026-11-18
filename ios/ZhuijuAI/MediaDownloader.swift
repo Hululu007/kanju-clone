@@ -88,11 +88,16 @@ final class MediaDownloader: NSObject {
     /// `.m3u8` 这类清单也不能冒充成视频文件。
     static func fileName(from raw: String?, fallback: String) -> String {
         let videoExtensions = [".mp4", ".m4v", ".mov", ".mkv", ".ts"]
-        var name = fallback
-        if let raw = raw, let parsed = URL(string: raw) {
-            let last = parsed.lastPathComponent
-            if !last.isEmpty, videoExtensions.contains(where: { last.lowercased().hasSuffix($0) }) {
-                name = last
+        var name = fallback.trimmingCharacters(in: .whitespacesAndNewlines)
+        /* 调用方给的通常就是「真实剧名 第X集.mp4」，它优先：
+           站点直链最后一段往往只是 `19.mp4`，拿它顶掉会把剧名丢掉（REG-009）。
+           只有调用方没给名字时才退回链接里的文件名。 */
+        if name.isEmpty || !videoExtensions.contains(where: { name.lowercased().hasSuffix($0) }) {
+            if let raw = raw, let parsed = URL(string: raw) {
+                let last = parsed.lastPathComponent
+                if !last.isEmpty, videoExtensions.contains(where: { last.lowercased().hasSuffix($0) }) {
+                    name = last
+                }
             }
         }
         let banned = CharacterSet(charactersIn: "/\\:*?\"<>|")
