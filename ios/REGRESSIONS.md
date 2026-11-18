@@ -119,6 +119,29 @@ node --test --test-name-pattern='landscape playback goes immersive again' ios/Te
   也证明不了本机音频焦点确实交出去了。验收清单：装了 VLC/Infuse 的机器上点一次「外放」，
   应在系统播放器列表里看到它们；选中后手机不再外放出声；返回 App 后播放器控制栏仍可用。
 
+## 模拟器验收记录
+
+`InjectedUITests` 在 GitHub Actions 的 `macos-15` + iOS 模拟器上跑（`ios-unsigned.yml` 的
+“Run WKWebView playback regression on simulator” 步骤），不联网、不签名、不需要站点密码。
+
+| 运行 | 代码 | 结果 |
+| --- | --- | --- |
+| [44215579006](https://github.com/kenzhao11/kanju-clone/actions/runs/44215579006) | 0.1.9 的 `AppBootstrap.js`（临时对照分支，已删） | **7 条全红**，失败信息就是本次的三个 bug |
+| [44214561047](https://github.com/kenzhao11/kanju-clone/actions/runs/44214561047) | 本分支（0.1.10） | 7 条全绿 + Node 接口测试全绿 + Release 包编译通过 |
+
+0.1.9 那次的具体失败（可直接对照现象）：
+
+```
+landscape=true playing=true/none/none fullscreen=true/none/none exited=false/inline/block replayed=false/inline/block
+  → 退出一次全屏后再播，标题回到 display:inline，工具条 block（REG-001）
+{"label":0,"toolbar":0,"tabbar":0}
+  → 标准全屏的 :fullscreen 规则一条都没有（REG-001 第二条路）
+TypeError: null is not an object (evaluating 'sheet.hidden')
+  → 注入层自己的设置面板压根不存在（REG-002）
+{"pauseCalls":0,"menuOpen":true,"preference":null}
+  → 「外放」只弹菜单、没暂停、也没记住使用方式（REG-003）
+```
+
 ## 历史条目
 
 0.1.1~0.1.9 的问题与修复过程记录在 `IOS_FIXES_0.1.2.md` ~ `IOS_FIXES_0.1.6.md`、`IOS_REVIEW_0.1.1.md`；
