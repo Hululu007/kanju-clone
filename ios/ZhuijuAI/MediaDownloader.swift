@@ -85,6 +85,9 @@ final class MediaDownloader: NSObject {
     /// 用来确定性地复现「用户已经继续/取消，旧任务的回调才回来」这个顺序。
     /// Release 不编译这段，产品行为不受影响。
     static var testResumeDataCallbackDelay: TimeInterval = 0
+    /// **仅测试构建**：系统这次回调到底给了多少字节的 resumeData（-1 = 没给）。
+    /// 测试靠它证明「竞态这一轮真的走的是有数据的旧任务」，不然绿了也可能是空跑。
+    static var testLastResumeDataBytes: Int = -1
     #endif
 
     /// 后台会话的标识：App 被重新拉起时系统就是用它把回调交回来的，不能改。
@@ -448,6 +451,9 @@ final class MediaDownloader: NSObject {
             if let task = tasks.removeValue(forKey: id) {
                 let generation = record(id)?.generation ?? 0
                 task.cancel(byProducingResumeData: { data in
+                    #if DEBUG
+                    testLastResumeDataBytes = data?.count ?? -1
+                    #endif
                     /* 回调来自系统内部队列：回到主队列再改状态，和 pause/resume/pump 串行，
                        并且要核对「还是那条被暂停的任务」，否则宁可丢弃。 */
                     let deliver = {

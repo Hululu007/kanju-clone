@@ -366,14 +366,19 @@ extension DownloadQueueTests {
                       + "\(String(describing: saved("race-stale")))")
         guard gotResumeData else { return }
 
+        let beforeResume = received("race-stale")
         downloader.resume(showId: "race")
         XCTAssertTrue(waitUntil(timeout: 20) { self.status("race-stale") == "running" },
                       "从 resumeData 继续之后任务没有跑起来：\(String(describing: saved("race-stale")))")
         let resumedTask = taskIdentifier("race-stale")
         XCTAssertGreaterThan(resumedTask, 0, "继续后必须有真实任务：\(String(describing: saved("race-stale")))")
-        XCTAssertTrue(waitUntil { self.received("race-stale") > 0 }, "继续后的任务没有收到字节")
+        /* 必须是**继续之后新收到的**字节：只看到旧进度就说明新任务其实还没传起来，
+           那么下面那次暂停也拿不到 resumeData，竞态会被空跑过去。 */
+        XCTAssertTrue(waitUntil(timeout: 30) { self.received("race-stale") > beforeResume },
+                      "继续后的任务没有真的收到新字节：\(String(describing: saved("race-stale")))")
 
         /* 第二段：真正的竞态——暂停后立刻继续，旧任务的回调被推迟到新任务建好之后才回来 */
+        MediaDownloader.testLastResumeDataBytes = -1
         setPendingCallbackDelay(1.0)
         downloader.pause(showId: "race")
         XCTAssertEqual(status("race-stale"), "paused", "第二轮暂停要先落成 paused")
@@ -383,6 +388,10 @@ extension DownloadQueueTests {
 
         /* 给旧任务的异步回调足够时间回来（它必须被丢弃） */
         Thread.sleep(forTimeInterval: 2.5)
+        /* 这一轮真的走的是「有数据的旧任务晚到」那条路径吗？空跑出来的绿不算证据。 */
+        XCTAssertGreaterThan(MediaDownloader.testLastResumeDataBytes, 0,
+                             "这一轮系统没有给出 resumeData，竞态没有被覆盖到（不能算通过）："
+                             + "\(MediaDownloader.testLastResumeDataBytes) 字节")
         let record = saved("race-stale")
         XCTAssertNil(record?["resumeData"] as? String,
                      "旧任务的 resumeData 不能写进已经重新开始的新任务：\(String(describing: record))")
