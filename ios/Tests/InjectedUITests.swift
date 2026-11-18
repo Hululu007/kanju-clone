@@ -199,15 +199,19 @@ final class InjectedUITests: XCTestCase, WKNavigationDelegate {
     func testToolbarDownloadButtonReplacesTheDanmakuSlot() async throws {
         let raw = try await javaScript("""
         (function () {
+          /* 夹具里预置了一条「正在下载 42%」：先收尾回空闲态，再验按钮本身。 */
+          window.__zhuijuDownload({ id: 'dl1', event: 'cancelled' });
           var tools = document.getElementById('playTools');
           var dm = document.getElementById('dmBtn');
           var button = document.getElementById('ppToolDownload');
           if (!button) return 'missing-button';
+          var ids = [];
+          for (var i = 0; i < tools.children.length; i++) ids.push(tools.children[i].id);
           return JSON.stringify({
             dmHidden: dm ? getComputedStyle(dm).display === 'none' : 'no-dm',
-            firstChild: tools.children[0].id,
-            label: button.textContent,
-            dmStillInDom: !!dm
+            ids: ids,
+            dmStillInDom: !!dm,
+            label: button.textContent
           });
         })();
         """)
@@ -215,7 +219,9 @@ final class InjectedUITests: XCTestCase, WKNavigationDelegate {
         let result = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any])
         XCTAssertEqual(result["dmHidden"] as? Bool, true, "弹幕按钮要让位（隐藏，不删除站点节点）：\(text)")
         XCTAssertEqual(result["dmStillInDom"] as? Bool, true)
-        XCTAssertEqual(result["firstChild"] as? String, "ppToolDownload", "下载占弹幕那一格，位置不能跑：\(text)")
+        let ids = try XCTUnwrap(result["ids"] as? [String])
+        let slot = try XCTUnwrap(ids.firstIndex(of: "ppToolDownload"), "工具条上必须有下载按钮：\(text)")
+        XCTAssertEqual(ids.firstIndex(of: "dmBtn"), slot + 1, "下载要正好占住弹幕那一格（紧挨在它前面）：\(text)")
         XCTAssertEqual(result["label"] as? String, "下载本集")
 
         /* 点一下就要真的发起下载（夹具已塞登录 token 与直链） */
@@ -226,9 +232,33 @@ final class InjectedUITests: XCTestCase, WKNavigationDelegate {
         })();
         """)
         XCTAssertEqual(clicked as? String, "下载 0%", "点了之后按钮要立刻显示进度：\(String(describing: clicked))")
-        let message = try await awaitPlayerMessage()
+        var message = try await awaitPlayerMessage()
         XCTAssertEqual(message["action"] as? String, "download", "工具条上的下载也要走原生传输：\(message)")
         XCTAssertEqual(message["url"] as? String, "https://media.example/19.mp4")
+
+        /* 进度要显示在按钮上，完成就地变成交给播放器的入口 */
+        let downloadId = try XCTUnwrap(message["id"] as? String)
+        let afterProgress = try await javaScript("""
+        (function () {
+          window.__zhuijuDownload({ id: '\(downloadId)', event: 'progress', received: 43, total: 100 });
+          return document.getElementById('ppToolDownload').textContent;
+        })();
+        """)
+        XCTAssertEqual(afterProgress as? String, "下载 43%")
+        let afterDone = try await javaScript("""
+        (function () {
+          window.__zhuijuDownload({ id: '\(downloadId)', event: 'done', path: '/tmp/追剧AI_第19集.mp4',
+            name: '追剧AI_第19集.mp4', size: 10485760 });
+          var button = document.getElementById('ppToolDownload');
+          var label = button.textContent;
+          button.click();
+          return label;
+        })();
+        """)
+        XCTAssertEqual(afterDone as? String, "用播放器打开", "下完就地变成交给播放器 App 的入口：\(String(describing: afterDone))")
+        message = try await awaitPlayerMessage()
+        XCTAssertEqual(message["action"] as? String, "openLocal", "点一下就交给系统播放器列表：\(message)")
+        XCTAssertEqual(message["path"] as? String, "/tmp/追剧AI_第19集.mp4")
     }
 
     // MARK: - REG-002 首页设置面板里的下载进度
