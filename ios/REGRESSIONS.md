@@ -505,6 +505,41 @@ node --test --test-name-pattern='landscape playback goes immersive again' ios/Te
 - **验证边界**：断言的是网页片库与原生完成事件的绑定；真实片源下载与后台传输由
   `BackgroundTransferIntegrationTests` 覆盖，真机锁屏/通知仍属真机项。
 
+## REG-014 选集旁的「投屏」占了下载的位置，下载只能绕到工具条上
+
+- **现象**：播放页视频下方、选集标题旁边是一个「投屏」入口。App 里没有投屏能力，
+  点它只会弹出一个不属于这里的菜单；用户想下一整部剧时，这个最顺手的位置上没有下载，
+  只能去工具条找那一格「下载本集」，或者先展开选集再慢慢挑。
+- **复现步骤**：
+  1. 进任意剧集播放页，看视频下方、选集标题右侧。
+  2. 那里写着「投屏」；点它没有任何可用的下载动作。
+- **根因**：这一格是站点模板渲染的投屏入口，注入层从没接管过它；
+  0.1.14 的批量下载挂在选集区上方的一条批量条上，和「选集」这个位置是分开的。
+- **修复**：
+  - 注入层新增 `castEntryNode()` / `mountDlEntry()`：把站点那个投屏入口隐藏
+    （`data-ios-hidden="cast"`，不删节点）、在**同一位置**换成 `#iosDlButton`「下载」。
+  - 点它**不跳页、不弹层**：`#iosDlPanel` 是按钮下面普通文档流里的一块，
+    就地展开可下载的集数列表（`选集下载 · 共 N 集`），把下方内容推开而不是盖住画面。
+  - 每一条是 `#iosDlRow<集号>`，带状态文字：`已下载`（片库里有这一集）/ `下载中 N%`
+    （队列里这一集在跑，总长度未知时只写「下载中」，不编百分比）/ `排队中` / `已暂停` /
+    `失败` / `已取消` / `未下载`。状态优先看共享队列，其次看片库。
+  - 单选 = 点条目；`全选` / `清空` / `下载已选 (k)` 与选集网格上的选中状态是**同一份**，
+    入队走 `startBatch()`，也就是 0.1.14 那条原生持久队列（并发上限 2、按 showId+集号去重、
+    暂停/继续/取消都在原生层）。网页侧没有第二条下载通道。
+  - 0.1.14 的批量条 `#iosBatchBar` 原样保留（REG-010 的入口不回退），两处共享选中与队列。
+- **测试名**（模拟器，真 App + 真点击 + 截图）：
+  - `EpisodeDownloadSheetUITests.testTheCastEntryNextToTheEpisodesIsADownloadButtonThatExpandsInPlace`
+    （投屏入口消失、下载按钮在原位、展开前没有列表、点开后同一页面里出现「共 5 集」与每集状态、
+    原播放页元素仍在即没有跳页）
+  - `EpisodeDownloadSheetUITests.testSelectingEpisodesQueuesThemAndShowsDownloadedAndDownloadingStates`
+    （单选 1 集 → 全选 5 集 → 下载已选 → 队列真的出现下载中/排队 → 有集变成已下载）
+  - 截图：`010-download-entry`、`011-download-panel`、`012-download-panel-all-selected`、
+    `013-download-queue-states`、`014-download-final-states`
+- **修复版本**：0.1.15（build 16）
+- **验证边界**：模拟器能证明入口替换、就地展开、选中状态与真实入队；真机上仍需确认
+  站点实际投屏按钮的命中（不同模板可能用不同的文案/类名，`castEntryNode()` 按文字、
+  无障碍名和 cast/dlna/airplay 类名三路识别，认不出时会退回挂在选集网格上方，不会瞎挡功能）。
+
 ## 模拟器验收记录
 
 `InjectedUITests` 在 GitHub Actions 的 `macos-15` + iOS 模拟器上跑（`ios-unsigned.yml` 的

@@ -347,6 +347,25 @@
       '#iosBatchBar button{border:0;border-radius:8px;padding:9px 11px;font-size:12px;font-weight:700;background:rgba(255,255,255,.14);color:#f4f7f8;min-height:38px}',
       '#iosBatchBar button#iosBatchStart{background:#16e09d;color:#04241a}',
       '#iosBatchBar span{font-size:12px;color:rgba(244,247,248,.76)}',
+      /* 选集旁的下载入口与它下面就地展开的列表（0.1.15）。
+         列表是普通文档流里的一块，不是浮层：它把下方面板推开，不会盖住画面。 */
+      '#iosDlEntry{display:block;margin:8px 0 0;padding:0 12px}',
+      '#iosDlEntry #iosDlButton{appearance:none;width:100%;border:1px solid rgba(22,224,157,.45);border-radius:10px;padding:11px 12px;font-size:13px;font-weight:700;background:rgba(22,224,157,.16);color:#16e09d;min-height:44px}',
+      '#iosDlPanel{margin-top:8px;padding:10px;border-radius:12px;background:rgba(255,255,255,.06)}',
+      '#iosDlPanel[hidden]{display:none!important}',
+      '#iosDlPanel .ios-dl-head{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:8px}',
+      '#iosDlPanel .ios-dl-head span{flex:1 1 100%;font-size:12px;font-weight:700;color:rgba(244,247,248,.9)}',
+      '#iosDlPanel button{border:0;border-radius:8px;padding:9px 11px;font-size:12px;font-weight:700;background:rgba(255,255,255,.14);color:#f4f7f8;min-height:38px}',
+      '#iosDlPanel #iosDlStart{background:#16e09d;color:#04241a}',
+      '#iosDlPanel .ios-dl-row{display:flex;align-items:center;gap:8px;width:100%;margin-top:6px;text-align:left}',
+      '#iosDlPanel .ios-dl-row .ios-dl-name{flex:1 1 auto;font-size:13px;font-weight:600}',
+      '#iosDlPanel .ios-dl-row .ios-dl-state{flex:0 0 auto;font-size:11px;font-weight:600;color:rgba(244,247,248,.7)}',
+      '#iosDlPanel .ios-dl-row.on{outline:2px solid #16e09d;outline-offset:-2px}',
+      '#iosDlPanel .ios-dl-row .ios-dl-tick{flex:0 0 auto;width:16px;text-align:center;color:#16e09d}',
+      "html[data-theme='light'] #iosDlPanel{background:rgba(15,20,24,.06)}",
+      "html[data-theme='light'] #iosDlPanel button{background:rgba(15,20,24,.1);color:#141a1e}",
+      "html[data-theme='light'] #iosDlPanel .ios-dl-row .ios-dl-state{color:rgba(15,20,24,.66)}",
+      "html[data-theme='light'] #iosDlEntry #iosDlButton{background:rgba(18,153,111,.14);color:#0b8a5f}", 
       '#epGrid .ep.ios-pick{outline:2px solid #16e09d!important;outline-offset:-2px}',
       'html[data-theme=\'light\'] #iosBatchBar{background:rgba(15,20,24,.06)}',
       'html[data-theme=\'light\'] #iosBatchBar button{background:rgba(15,20,24,.1);color:#141a1e}',
@@ -2118,9 +2137,12 @@
     if (start) start.textContent = batchPicked.length ? '下载已选 (' + batchPicked.length + ')' : '下载已选';
     var note = document.getElementById('iosBatchNote');
     if (note) note.textContent = batchBarNote();
+    /* 选集旁的下载列表和批量条是同一份选中状态与同一条队列，任何一边变了都要一起刷新 */
+    if (document.getElementById('iosDlPanel')) syncDlSheet();
   }
 
   function mountBatchBar() {
+    mountDlEntry();
     var grid = document.getElementById('epGrid');
     if (!grid || !grid.parentNode) return false;
     if (document.getElementById('iosBatchBar')) { syncBatchBar(); return true; }
@@ -2325,7 +2347,267 @@
     saveQueue();
     renderDownloadLibrary();
     syncBatchBar();
+    syncDlSheet();
   };
+
+
+  /* ---------- 选集旁的下载按钮（0.1.15） ----------
+     站点在选集标题旁边放了一个「投屏」入口；App 里没有对应的能力，点了只会弹出一个
+     不属于这里的菜单。这里让它让位：隐藏站点节点（不删除，退出后原样可用），
+     就在同一个位置换成一个「下载」按钮。点它**不跳页、不弹层**，只在按钮下面就地
+     展开可下载的集数列表：总集数、每集状态（已下载 / 下载中 N% / 排队 / 已暂停 /
+     失败 / 未下载）、单选 / 多选 / 全选，选完交给 0.1.14 那条共享下载队列
+     （并发上限、去重、暂停取消全部沿用原生层，网页侧不另起一套）。 */
+  var dlSheetOpen = false;
+
+  /// 站点那个投屏入口：按文字/无障碍名/类名认，跳过自己的控制栏（那里也有「投屏」字样）。
+  /// 自己的节点：控制栏、外放菜单、批量条、这个下载入口本身。
+  function ownNode(node) {
+    var cursor = node;
+    while (cursor) {
+      var id = String(cursor.id || '');
+      if (id === 'ppCtrl' || id === 'ppCastMenu' || id === 'iosBatchBar' || id === 'iosDlEntry') return true;
+      cursor = cursor.parentNode;
+    }
+    return false;
+  }
+
+  function castEntryNode() {
+    var all = document.querySelectorAll ? document.querySelectorAll('button,a,[role="button"]') : [];
+    for (var i = 0; i < all.length; i++) {
+      var node = all[i];
+      if (!node) continue;
+      if (ownNode(node)) continue;
+      var text = String(node.textContent || '').replace(/\s+/g, '');
+      var aria = node.getAttribute ? String(node.getAttribute('aria-label') || '') : '';
+      var marks = String(node.id || '') + ' ' + String(node.className || '');
+      if (text === '投屏' || text === '投影' || /投屏|投影/.test(aria) || /(^|\s|-)(cast|dlna|airplay|tvcast)(\s|-|$)/i.test(marks)) {
+        if (node.parentNode) return node;
+      }
+    }
+    return null;
+  }
+
+  /// 这一集在共享队列里的状态（同一集可能有多条历史记录，取最「活跃」的一条）。
+  function dlTaskState(showId, key) {
+    var rank = { running: 5, queued: 4, paused: 3, failed: 2, cancelled: 1, done: 0 };
+    var best = null;
+    var bestRank = -1;
+    for (var i = 0; i < queueTasks.length; i++) {
+      var task = queueTasks[i];
+      if (!task || String(task.showId || '') !== String(showId)) continue;
+      var taskKey = task.epKey === undefined || task.epKey === null ? '' : String(task.epKey);
+      if (taskKey !== String(key)) continue;
+      var status = String(task.status || '');
+      var value = rank[status] === undefined ? 0 : rank[status];
+      if (value > bestRank) { best = task; bestRank = value; }
+    }
+    return best;
+  }
+
+  /// 这一集是否已经在片库里（下载完成过）。
+  function dlDownloaded(showId, key) {
+    var library = readLibrary();
+    for (var s = 0; s < library.shows.length; s++) {
+      var show = library.shows[s];
+      if (String(show.id) !== String(showId)) continue;
+      for (var e = 0; e < show.eps.length; e++) {
+        if (String(show.eps[e].key) === String(key)) return true;
+      }
+    }
+    return false;
+  }
+
+  /// 每集那一行的状态文字：先看队列（在跑/排队优先于历史完成），再看片库。
+  function dlStateText(showId, key) {
+    var task = dlTaskState(showId, key);
+    var status = task ? String(task.status || '') : '';
+    if (status === 'running') {
+      var total = Number(task.total) || 0;
+      var received = Number(task.received) || 0;
+      /* 总长度未知就只写「下载中」，绝不编一个百分比 */
+      return total > 0 ? '下载中 ' + Math.min(100, Math.round(received / total * 100)) + '%' : '下载中';
+    }
+    if (status === 'queued') return '排队中';
+    if (status === 'paused') return '已暂停';
+    if (status === 'failed') return '失败';
+    if (status === 'cancelled') return '已取消';
+    if (dlDownloaded(showId, key)) return '已下载';
+    if (status === 'done') return '已下载';
+    return '未下载';
+  }
+
+  function dlShowId() {
+    var meta = showMeta();
+    return String(meta.id || meta.title || '');
+  }
+
+  function syncDlEntry() {
+    var button = document.getElementById('iosDlButton');
+    if (!button) return;
+    var total = epNodes().length || Number(showMeta().total) || 0;
+    button.textContent = dlSheetOpen ? '收起可下载集数' : '下载';
+    if (typeof button.setAttribute === 'function') {
+      button.setAttribute('aria-label', dlSheetOpen ? '收起可下载集数' : '下载：展开可下载的集数');
+    }
+    button.setAttribute('data-total', String(total));
+  }
+
+  /// 就地展开的列表：每次同步都按真实队列/片库重建每一行的状态文字。
+  function syncDlPanel() {
+    var panel = document.getElementById('iosDlPanel');
+    if (!panel) return;
+    var showId = dlShowId();
+    var nodes = epNodes();
+    panel.hidden = !dlSheetOpen;
+    if (!nodes.length) {
+      panel.innerHTML = '';
+      return;
+    }
+    var head = document.getElementById('iosDlHead');
+    if (!head) {
+      panel.innerHTML = '';
+      head = document.createElement('div');
+      head.className = 'ios-dl-head';
+      head.id = 'iosDlHead';
+      var title = document.createElement('span');
+      title.id = 'iosDlTitle';
+      head.appendChild(title);
+      var all = document.createElement('button');
+      all.id = 'iosDlAll';
+      all.type = 'button';
+      all.textContent = '全选';
+      head.appendChild(all);
+      var clear = document.createElement('button');
+      clear.id = 'iosDlClear';
+      clear.type = 'button';
+      clear.textContent = '清空';
+      head.appendChild(clear);
+      var start = document.createElement('button');
+      start.id = 'iosDlStart';
+      start.type = 'button';
+      start.textContent = '下载已选';
+      head.appendChild(start);
+      var note = document.createElement('span');
+      note.id = 'iosDlNote';
+      head.appendChild(note);
+      panel.appendChild(head);
+    }
+    var titleNode = document.getElementById('iosDlTitle');
+    if (titleNode) titleNode.textContent = '选集下载 · 共 ' + nodes.length + ' 集';
+    var startNode = document.getElementById('iosDlStart');
+    if (startNode) startNode.textContent = batchPicked.length ? '下载已选 (' + batchPicked.length + ')' : '下载已选';
+    var noteNode = document.getElementById('iosDlNote');
+    if (noteNode) {
+      noteNode.textContent = batchPicked.length ? '已选 ' + batchPicked.length + ' 集' : '点条目选中要下载的集';
+    }
+    for (var i = 0; i < nodes.length; i++) {
+      var node = nodes[i];
+      var key = epKeyOf(node);
+      var row = document.getElementById('iosDlRow' + key);
+      if (!row) {
+        row = document.createElement('button');
+        row.type = 'button';
+        row.id = 'iosDlRow' + key;
+        row.className = 'ios-dl-row';
+        row.setAttribute('data-dl-ep', key);
+        var tick = document.createElement('span');
+        tick.className = 'ios-dl-tick';
+        row.appendChild(tick);
+        var name = document.createElement('span');
+        name.className = 'ios-dl-name';
+        row.appendChild(name);
+        var state = document.createElement('span');
+        state.className = 'ios-dl-state';
+        row.appendChild(state);
+        panel.appendChild(row);
+      }
+      var label = epLabelOf(node) || ('第' + key + '集');
+      var picked = batchPicked.indexOf(key) >= 0;
+      row.className = 'ios-dl-row' + (picked ? ' on' : '');
+      var nameNode = row.querySelector ? row.querySelector('.ios-dl-name') : null;
+      if (nameNode) nameNode.textContent = label;
+      var tickNode = row.querySelector ? row.querySelector('.ios-dl-tick') : null;
+      if (tickNode) tickNode.textContent = picked ? '✓' : '○';
+      var stateNode = row.querySelector ? row.querySelector('.ios-dl-state') : null;
+      if (stateNode) stateNode.textContent = dlStateText(showId, key);
+      /* 无障碍名把「第几集 + 状态」一起说出来，读屏和自动化都读得到 */
+      row.setAttribute('aria-label', label + ' ' + (stateNode ? stateNode.textContent : ''));
+    }
+  }
+
+  function syncDlSheet() {
+    syncDlEntry();
+    syncDlPanel();
+  }
+
+  /// 把「下载」按钮挂到投屏入口原来的位置；找不到投屏入口就退回选集区上方。
+  function mountDlEntry() {
+    if (document.getElementById('iosDlEntry')) { syncDlSheet(); return true; }
+    var body = document.body;
+    if (!body || typeof body.insertBefore !== 'function') return false;
+    var cast = castEntryNode();
+    if (cast) {
+      cast.hidden = true;
+      if (cast.style) cast.style.display = 'none';
+      if (typeof cast.setAttribute === 'function') cast.setAttribute('data-ios-hidden', 'cast');
+    }
+    var grid = document.getElementById('epGrid');
+    var host = cast && cast.parentNode ? cast.parentNode : (grid && grid.parentNode ? grid.parentNode : null);
+    if (!host) return false;
+    var entry = document.createElement('div');
+    entry.id = 'iosDlEntry';
+    var button = document.createElement('button');
+    button.id = 'iosDlButton';
+    button.type = 'button';
+    button.textContent = '下载';
+    entry.appendChild(button);
+    var panel = document.createElement('div');
+    panel.id = 'iosDlPanel';
+    panel.hidden = true;
+    if (typeof panel.setAttribute === 'function') panel.setAttribute('hidden', '');
+    entry.appendChild(panel);
+    /* 投屏入口原地替换；没有投屏入口就放在选集网格前面 */
+    host.insertBefore(entry, cast && cast.parentNode === host ? cast : (grid && grid.parentNode === host ? grid : null));
+    syncDlSheet();
+    return true;
+  }
+
+  function toggleDlSheet() {
+    dlSheetOpen = !dlSheetOpen;
+    syncDlSheet();
+    announce(dlSheetOpen ? '选择要下载的集数' : '已收起可下载集数');
+    return dlSheetOpen;
+  }
+
+  function dlRowKeyOf(node) {
+    var cursor = node;
+    while (cursor) {
+      var key = '';
+      if (typeof cursor.getAttribute === 'function') {
+        try { key = cursor.getAttribute('data-dl-ep'); } catch (error) { key = ''; }
+      }
+      if (key !== null && key !== undefined && String(key) !== '') return String(key);
+      cursor = cursor.parentNode;
+    }
+    return '';
+  }
+
+  /// 列表里点一行 = 选中/取消这一集，和选集网格上的选中状态是同一份。
+  function toggleDlRow(node) {
+    var key = dlRowKeyOf(node);
+    if (!key) return false;
+    var at = batchPicked.indexOf(key);
+    if (at >= 0) batchPicked.splice(at, 1);
+    else batchPicked.push(key);
+    var nodes = epNodes();
+    for (var i = 0; i < nodes.length; i++) {
+      if (epKeyOf(nodes[i]) === key) syncPickClass(nodes[i], at < 0);
+    }
+    syncBatchBar();
+    syncDlSheet();
+    return true;
+  }
 
   function handleCtrlClick(event) {
     var target = event.target;
@@ -2339,6 +2621,48 @@
         togglePick(epNode);
         return true;
       }
+    }
+    if (hit(target, 'iosDlButton')) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      toggleDlSheet();
+      return true;
+    }
+    if (hit(target, 'iosDlAll')) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      batchPicked = [];
+      var everyone = epNodes();
+      for (var a = 0; a < everyone.length; a++) {
+        var key = epKeyOf(everyone[a]);
+        if (key && batchPicked.indexOf(key) < 0) batchPicked.push(key);
+        syncPickClass(everyone[a], true);
+      }
+      syncBatchBar();
+      syncDlSheet();
+      return true;
+    }
+    if (hit(target, 'iosDlClear')) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      batchPicked = [];
+      var allNodes = epNodes();
+      for (var c = 0; c < allNodes.length; c++) syncPickClass(allNodes[c], false);
+      syncBatchBar();
+      syncDlSheet();
+      return true;
+    }
+    if (hit(target, 'iosDlStart')) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      startBatch(pickedNodes());
+      return true;
+    }
+    if (dlRowKeyOf(target)) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      toggleDlRow(target);
+      return true;
     }
     if (hit(target, 'iosBatchSelect')) {
       event.preventDefault();
