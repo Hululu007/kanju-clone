@@ -167,8 +167,7 @@ jobs:
               --xcresult ui-smoke.xcresult --output ui-screenshots | tee ui-screenshots-export.log
             echo "export-exit=${PIPESTATUS[0]}" | tee -a ui-screenshots-export.log
           else
-            echo 'no ui-smoke.xcresult (the smoke did not run)' | tee ui-screenshots-export.log
-            exit 1
+            echo 'no ui-smoke.xcresult: the UI smoke step did not get to run (that step already failed, so this one does not add a second red)' | tee ui-screenshots-export.log
           fi
 
       - name: Upload the UI smoke screenshots

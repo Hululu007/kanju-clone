@@ -158,37 +158,66 @@ final class FitModeTests: XCTestCase, WKNavigationDelegate {
     // MARK: - 用例
 
     func testTheFitButtonCyclesContainCoverAndFillAndRemembersTheChoice() async throws {
-        XCTAssertTrue(try await awaitValue("!!document.getElementById('ppFit')", timeout: 8),
-                      "控制栏没有画面档位那一格（#ppFit）")
-        XCTAssertEqual(try await fitLabel(), "适应", "默认档位应当是适应（不裁画面、不加灰罩）")
-        XCTAssertEqual(try await fitAttribute(), "contain", "默认档位要真的写到 html[data-ios-fit] 上")
-        XCTAssertEqual(try await objectFit(), "contain", "默认档位要落到 video 的计算样式")
+        let mounted = try await awaitValue("!!document.getElementById('ppFit')", timeout: 8)
+        XCTAssertTrue(mounted, "控制栏没有画面档位那一格（#ppFit）")
+        let defaultLabel = try await fitLabel()
+        XCTAssertEqual(defaultLabel, "适应", "默认档位应当是适应（不裁画面、不加灰罩）")
+        let defaultAttribute = try await fitAttribute()
+        XCTAssertEqual(defaultAttribute, "contain", "默认档位要真的写到 html[data-ios-fit] 上")
+        let defaultFit = try await objectFit()
+        XCTAssertEqual(defaultFit, "contain", "默认档位要落到 video 的计算样式")
 
         try await tapFit()
-        XCTAssertEqual(try await fitLabel(), "裁剪", "点一下应当切到裁剪")
-        XCTAssertEqual(try await fitAttribute(), "cover")
-        XCTAssertEqual(try await objectFit(), "cover", "裁剪档必须真的铺满（object-fit: cover）")
-        XCTAssertEqual(try await storedFit(), "cover", "裁剪档要记住")
+        let coverLabel = try await fitLabel()
+        let coverAttribute = try await fitAttribute()
+        let coverFit = try await objectFit()
+        let coverStored = try await storedFit()
+        XCTAssertEqual(coverLabel, "裁剪", "点一下应当切到裁剪")
+        XCTAssertEqual(coverAttribute, "cover")
+        XCTAssertEqual(coverFit, "cover", "裁剪档必须真的铺满（object-fit: cover）")
+        XCTAssertEqual(coverStored, "cover", "裁剪档要记住")
 
         try await tapFit()
-        XCTAssertEqual(try await fitLabel(), "拉伸")
-        XCTAssertEqual(try await fitAttribute(), "fill")
-        XCTAssertEqual(try await objectFit(), "fill", "拉伸档必须真的不等比铺满（object-fit: fill）")
-        XCTAssertEqual(try await storedFit(), "fill")
+        let fillLabel = try await fitLabel()
+        let fillAttribute = try await fitAttribute()
+        let fillFit = try await objectFit()
+        let fillStored = try await storedFit()
+        XCTAssertEqual(fillLabel, "拉伸")
+        XCTAssertEqual(fillAttribute, "fill")
+        XCTAssertEqual(fillFit, "fill", "拉伸档必须真的不等比铺满（object-fit: fill）")
+        XCTAssertEqual(fillStored, "fill")
 
         try await tapFit()
-        XCTAssertEqual(try await fitLabel(), "适应", "循环回到适应")
-        XCTAssertEqual(try await fitAttribute(), "contain")
-        XCTAssertEqual(try await objectFit(), "contain")
-        XCTAssertEqual(try await storedFit(), "contain")
+        let backLabel = try await fitLabel()
+        let backAttribute = try await fitAttribute()
+        let backFit = try await objectFit()
+        let backStored = try await storedFit()
+        XCTAssertEqual(backLabel, "适应", "循环回到适应")
+        XCTAssertEqual(backAttribute, "contain")
+        XCTAssertEqual(backFit, "contain")
+        XCTAssertEqual(backStored, "contain")
+    }
+
+    /// 反向对照：把档位属性拿掉之后画面必须回到站点默认的 contain。
+    /// 这条证明上面的断言真的由我们那条样式驱动，而不是跟着默认值一起变绿。
+    func testRemovingTheFitAttributeFallsBackToTheSiteDefault() async throws {
+        try await tapFit()
+        let beforeRemoval = try await objectFit()
+        XCTAssertEqual(beforeRemoval, "cover", "先切到裁剪，才谈得上证明拿掉之后会退回去")
+        _ = try await javaScript("document.documentElement.removeAttribute('data-ios-fit');")
+        let afterRemoval = try await objectFit()
+        XCTAssertEqual(afterRemoval, "contain", "拿掉 data-ios-fit 之后没有退回站点默认的 contain，说明上面测的不是这条样式")
     }
 
     func testARememberedFitAppliesToANewEpisodeAndSurvivesANewPage() async throws {
         try await mountPage(rememberedFit: "cover")
 
-        XCTAssertTrue(try await awaitValue("!!document.getElementById('ppFit')", timeout: 8))
-        XCTAssertEqual(try await objectFit(), "cover", "重新进页面要按上次记住的「裁剪」来")
-        XCTAssertEqual(try await fitLabel(), "裁剪")
+        let mounted = try await awaitValue("!!document.getElementById('ppFit')", timeout: 8)
+        XCTAssertTrue(mounted)
+        let appliedFit = try await objectFit()
+        XCTAssertEqual(appliedFit, "cover", "重新进页面要按上次记住的「裁剪」来")
+        let appliedLabel = try await fitLabel()
+        XCTAssertEqual(appliedLabel, "裁剪")
 
         /* 换集：站点重渲染播放器、视频换源后重新 play，档位不能被默认值顶回去 */
         _ = try await javaScript("""
@@ -204,14 +233,18 @@ final class FitModeTests: XCTestCase, WKNavigationDelegate {
           return true;
         })();
         """)
-        XCTAssertTrue(try await awaitValue("document.documentElement.getAttribute('data-ios-fit') === 'cover'", timeout: 5),
-                      "换集后档位被重置了")
-        XCTAssertEqual(try await objectFit(), "cover", "换集后 video 仍然是裁剪")
+        let keptAfterEpisode = try await awaitValue("document.documentElement.getAttribute('data-ios-fit') === 'cover'", timeout: 5)
+        XCTAssertTrue(keptAfterEpisode, "换集后档位被重置了")
+        let fitAfterEpisode = try await objectFit()
+        XCTAssertEqual(fitAfterEpisode, "cover", "换集后 video 仍然是裁剪")
 
         /* 再挂一次页面（等价于退出重进 App）：localStorage 里的选择要跟过来 */
         try await mountPage(rememberedFit: nil)
-        XCTAssertTrue(try await awaitValue("!!document.getElementById('ppFit')", timeout: 8))
-        XCTAssertEqual(try await objectFit(), "cover", "重进之后忘掉了上次的档位")
-        XCTAssertEqual(try await fitLabel(), "裁剪")
+        let mountedAgain = try await awaitValue("!!document.getElementById('ppFit')", timeout: 8)
+        XCTAssertTrue(mountedAgain)
+        let fitAfterRelaunch = try await objectFit()
+        XCTAssertEqual(fitAfterRelaunch, "cover", "重进之后忘掉了上次的档位")
+        let labelAfterRelaunch = try await fitLabel()
+        XCTAssertEqual(labelAfterRelaunch, "裁剪")
     }
 }
