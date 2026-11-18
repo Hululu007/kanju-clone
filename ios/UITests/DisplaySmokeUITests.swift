@@ -127,6 +127,31 @@ final class DisplaySmokeUITests: XCTestCase {
         return false
     }
 
+    /// 档位是持久化的（localStorage kj-ios-fit），同一台模拟器上前一条用例可能把它留在
+    /// 拉伸；不能假设「点一下就是裁剪」。最多循环三档到目标，再返回那个真按钮。
+    private func cycleToFit(_ app: XCUIApplication, _ target: String) -> XCUIElement? {
+        var current = webButton(app, labels: ["画面比例"], timeout: 15)
+        for _ in 0..<4 {
+            guard let fit = current else { return nil }
+            let text = [fit.label, fit.value as? String ?? "", fit.identifier].joined(separator: " ")
+            if text.contains(target) { return fit }
+            fit.tap()
+            // 等档位文案真的翻转（不是拿到一个还没刷新的旧元素）
+            let deadline = Date().addingTimeInterval(8)
+            var next: XCUIElement?
+            while Date() < deadline {
+                if let candidate = webButton(app, labels: ["画面比例"], timeout: 1) {
+                    let candidateText = [candidate.label, candidate.value as? String ?? "", candidate.identifier]
+                        .joined(separator: " ")
+                    if candidateText != text { next = candidate; break }
+                }
+                RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+            }
+            current = next
+        }
+        return nil
+    }
+
     private func waitForFit(_ app: XCUIApplication, _ label: String, timeout: TimeInterval = 10) -> XCUIElement? {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
@@ -203,11 +228,10 @@ final class DisplaySmokeUITests: XCTestCase {
         attachScreenshot("03-fullscreen-adapt")
 
         // 04 裁剪：档位按钮是「画面比例：X，点击切换」这一格。
-        let fit = requireButton(app, labels: ["画面比例"], what: "fit-button")
-        guard fit != nil else { return }
-        let startLabel = [fit!.label, fit!.value as? String ?? "", fit!.identifier].joined(separator: " ")
-        if !startLabel.contains("适应") {
-            fail("进全屏后画面档位不是「适应」：\(startLabel)", "fit-not-contain", app)
+        // 档位跨用例持久化，先真点循环到适应（最多 3 档），不假设默认值。
+        let fit = cycleToFit(app, "适应")
+        if fit == nil {
+            fail("进全屏后循环不到「适应」档", "fit-not-contain", app)
             return
         }
         // 计算样式 object-fit=contain 由 FitModeTests 真 WKWebView 断言；这里点真按钮看显示结果。
@@ -277,10 +301,8 @@ final class DisplaySmokeUITests: XCTestCase {
             return
         }
         guard ensureControlsVisible(app) else { return }
-        let fit = requireButton(app, labels: ["画面比例"], what: "fit-button")
-        guard fit != nil else { return }
-        fit!.tap()   // 适应 → 裁剪
-        let coverFit = waitForFit(app, "裁剪")
+        // 上一条用例会把档位留在拉伸；循环到裁剪再拍，避免跨用例状态污染。
+        let coverFit = cycleToFit(app, "裁剪")
         guard let coverLabel = coverFit else {
             fail("切到裁剪失败", "relaunch-cover", app)
             return
