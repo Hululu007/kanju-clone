@@ -313,6 +313,84 @@ node --test --test-name-pattern='landscape playback goes immersive again' ios/Te
 - **验证边界**：真机锁屏/通知中心的呈现仍需肉眼确认（`navigator.mediaSession` 在模拟器里可读，
   但系统锁屏 UI 不进模拟器截图）；本次不声称已在真机上看过锁屏。
 
+## REG-010 选集页没有批量下载，下载仍是一次一集
+
+- **现象**：详情/选集页只有单集入口（工具条上的「下载本集」），想下一整部剧只能一集一集点；
+  没有多选、没有「一键全集」、没有「从本集往后」；也没有任何地方能看到「整部剧下到第几集了」，
+  更没法对整部剧暂停/继续/取消。原生层同时只跑一条任务，第二条会顶掉第一条。
+- **复现步骤**：
+  1. 登录，进任意剧集的详情/选集页。
+  2. 看选集区上方：没有任何批量下载入口。
+  3. 点工具条「下载本集」，再换一集点一次：第一集被取消（`MediaDownloader.begin` 里先 `stop`）。
+  4. 回首页 → 设置：只有一条「下载进度」，看不到「这部剧下了几集、还剩几集」。
+- **根因**：
+  1. `MediaDownloader` 是单槽（`activeId` / `activeTask`），`start` 第一件事就是 `stop(silent: true)`；
+     没有队列、没有并发上限、没有按剧聚合，也没有暂停（`cancel(byProducingResumeData:)` 从未用过）。
+  2. 网页侧 `startDownload()` 只处理「当前这一集」：用 `mediaUrl()` 拿正在播放的地址，
+     没有逐集解析（`/api/play?show=&ep=&line=`），也没有选集页的批量入口与队列进度面板。
+- **修复**：
+  - 原生：`MediaDownloader` 改成持久队列。`queued/running/paused/done/failed/cancelled` 六态落
+    `kj-ios-download-tasks`；并发上限 `maxConcurrent = 2`（`planStarts`）；按 `showId + epKey` 去重
+    （`duplicateIndex`，只挡排队/下载/暂停，完成或失败过的集还能重下）；暂停用
+    `cancel(byProducingResumeData:)` 拿真实 resumeData 落盘、继续时 `downloadTask(withResumeData:)`；
+    取消只停任务、只改状态，**不删除已下载文件**；`reconcile` 把不在系统里的 running 标「系统中断」并把
+    排队任务重新调度；`summary` 让「有一集失败」永远不等于「整部剧完成」；总字节未知时 `knownBytes=false`。
+  - 原生：`rejection(of:)` 如实拒绝 HLS（`.m3u8`）、`.html` 播放页、明文 http、图片等非视频扩展名，
+    并留一条 `failed` 记录说明原因（不静默丢弃）。
+  - 原生：新增桥接 `downloadBatch` / `downloadPause` / `downloadResume` / `downloadCancel`，
+    以及 `window.__zhuijuDownloads('snapshot', tasks)` 队列快照（重启后网页也能对齐状态）。
+  - 网页：选集区上方新增批量条 `#iosBatchBar`（`iosBatchSelect` 选择 / `iosBatchAll` 一键全集 /
+    `iosBatchForward` 从本集往后 / `iosBatchStart` 下载已选）；每一集先用
+    `/api/play?show=&ep=&line=` 解析真实片源并核对 `showId/idx/verified`，HLS、播放页 URL、
+    不匹配的集跳过并给出原因（不把播放网页当视频）。
+  - 网页：设置面板的下载列表按剧显示「任务 N/M 集 · 进行中 · 排队 · 已暂停 · 失败 · 总进度」，
+    并带「暂停整部剧 / 继续下载 / 取消整部剧」；总字节未知时只写「已收 X MB」，不编百分比。
+  - 原位「下载本集」（工具条那一格）保持不变，和批量走同一条队列（REG-008 不回退）。
+- **测试名**（模拟器 XCTest，队列纯逻辑 + 落盘状态机）：
+  - `DownloadQueueTests.testTheQueueNeverRunsMoreThanTwoDownloadsAtOnce`
+  - `DownloadQueueTests.testTheSameShowEpisodeIsNeverQueuedTwiceWhileItIsStillActive`
+  - `DownloadQueueTests.testAFinishedOrFailedEpisodeCanBeDownloadedAgain`
+  - `DownloadQueueTests.testOneFailedEpisodeNeverLetsTheWholeShowLookComplete`
+  - `DownloadQueueTests.testAnUnknownLengthNeverProducesAFabricatedPercentage`
+  - `DownloadQueueTests.testHlsPagesAndPlainHttpAreRejectedWithARealReason`
+  - `DownloadQueueTests.testPauseMarksQueuedEpisodesPausedAndResumePutsThemBackInTheQueue`
+  - `DownloadQueueTests.testCancelStopsTheTasksButKeepsFilesThatAreAlreadyDownloaded`
+  - `DownloadQueueTests.testQueuedEpisodesAreScheduledAgainAfterARelaunch`
+  - `DownloadQueueTests.testANewQueueRecordCarriesTheShowAndEpisodeForDeduplication`
+- **测试名**（模拟器，真 WKWebView）：`InjectedUITests.testEpisodePageHasBatchDownloadEntryAndSelectionMode`
+- **测试名**（Node 夹具）：
+  - `one tap batch download resolves every episode to its real media url before queueing`
+  - `an HLS or page-url episode is skipped with a reason instead of being downloaded`
+  - `download from the current episode onward starts at the selected episode`
+  - `the selection mode picks episodes for a chosen batch without leaving the page`
+  - `the settings sheet shows the whole show queue with pause, resume and cancel`
+  - `a failed episode never lets the show look complete and an unknown length has no percent`
+- **修复版本**：0.1.14（build 15）
+- **验证边界**：暂停的续传效果取决于片源服务器是否支持 Range；拿不到 resumeData 时继续会从 0 重下
+  （如实重置进度，不谎报）。真机锁屏/强杀后的队列恢复仍需肉眼验收。
+
+## REG-011 全屏只有一种画面比例，没有适应/裁剪/拉伸
+
+- **现象**：全屏只能看到固定的一种画面比例；4:3 或超宽片源要么上下留黑边、要么被裁掉，
+  用户无法选择「整画面留黑边（适应）」「等比裁边（裁剪，填满屏幕）」「不等比填满（拉伸）」，
+  而且换集/旋转/重进 App 后也没有任何记忆。
+- **复现步骤**：进播放页 → 全屏 → 想看满屏但保留全部画面，没有任何切换入口。
+- **根因**：注入层只写死了一条 `html[data-ios-immersive] #player video{object-fit:contain!important}`，
+  没有适配档位、没有控件、没有持久化。
+- **修复**：
+  - 控制栏新增 `#ppFit`（适应 → 裁剪 → 拉伸 循环），选择落 `localStorage['kj-ios-fit']`；
+    `html[data-ios-fit=contain|cover|fill]` 三条 CSS 落到真正的 `#player video`。
+  - `applyFit()` 在挂载、`loadedmetadata`/`play`/`durationchange`（换集重渲染）、
+    `applyImmersive()`（全屏/旋转）时重新应用，切集/旋转/重进都保持记住的那一档。
+  - 不改变控制栏自动收起、点击手势、安全区与全屏遮罩逻辑（REG-001/REG-005 的断言仍在）。
+- **测试名**（模拟器，真 WKWebView）：`InjectedUITests.testFitModesApplyRealObjectFitAndAreRemembered`
+- **测试名**（Node 夹具）：
+  - `the fit button cycles contain, cover and fill and remembers the choice`
+  - `the remembered fit survives a new page and is applied to the new video element`
+- **修复版本**：0.1.14（build 15）
+- **验证边界**：模拟器能证明 `object-fit` 真的落到 video 计算样式上；真机上仍需确认不同片源
+  （4:3/2.35:1/竖屏）在三种档位下的观感，以及刘海/安全区不被裁。
+
 ## 模拟器验收记录
 
 `InjectedUITests` 在 GitHub Actions 的 `macos-15` + iOS 模拟器上跑（`ios-unsigned.yml` 的

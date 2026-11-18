@@ -770,6 +770,106 @@ final class InjectedUITests: XCTestCase, WKNavigationDelegate {
         XCTAssertEqual(second["action"] as? String, "download", "下完再点仍然是下载，不是交给播放器：\(second)")
     }
 
+    // MARK: - REG-011 全屏画面适配（真 WKWebView、真 CSS 计算值）
+
+    /// 用户要的三档：适应（整画面留黑边）/ 裁剪（等比裁边）/ 拉伸（不等比填满）。
+    /// 控件循环切换、选择被记住；旋转/重进后按记住的那一档重新落到 video 上。
+    func testFitModesApplyRealObjectFitAndAreRemembered() async throws {
+        _ = try await awaitValue("!!document.getElementById('ppFit')")
+        let initial = try await javaScript("""
+        (function () {
+          var video = document.getElementById('video');
+          var button = document.getElementById('ppFit');
+          return JSON.stringify({
+            label: button.textContent,
+            fit: getComputedStyle(video).objectFit,
+            attr: document.documentElement.getAttribute('data-ios-fit')
+          });
+        })();
+        """)
+        var text = try XCTUnwrap(initial as? String)
+        var result = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any])
+        XCTAssertEqual(result["label"] as? String, "适应")
+        XCTAssertEqual(result["fit"] as? String, "contain", "默认整画面可见：\(text)")
+
+        let cycled = try await javaScript("""
+        (function () {
+          var button = document.getElementById('ppFit');
+          var video = document.getElementById('video');
+          var seen = [];
+          for (var i = 0; i < 3; i++) {
+            button.click();
+            seen.push([button.textContent, getComputedStyle(video).objectFit,
+              document.documentElement.getAttribute('data-ios-fit'),
+              localStorage.getItem('kj-ios-fit')].join('|'));
+          }
+          return JSON.stringify(seen);
+        })();
+        """)
+        let seen = try XCTUnwrap(cycled as? [String])
+        XCTAssertEqual(seen.count, 3)
+        XCTAssertEqual(seen[0], "裁剪|cover|cover|cover", "第二档是等比裁边：\(seen)")
+        XCTAssertEqual(seen[1], "拉伸|fill|fill|fill", "第三档是不等比填满：\(seen)")
+        XCTAssertEqual(seen[2], "适应|contain|contain|contain", "循环回适应，并且每一档都被记住：\(seen)")
+
+        /* 换集/重渲染：站点会把 <video> 整块换掉，新元素也要按记住的那一档应用 */
+        let replaced = try await javaScript("""
+        (function () {
+          localStorage.setItem('kj-ios-fit', 'fill');
+          var old = document.getElementById('video');
+          var fresh = document.createElement('video');
+          fresh.id = 'video';
+          fresh.setAttribute('playsinline', '');
+          old.parentNode.replaceChild(fresh, old);
+          fresh.dispatchEvent(new Event('loadedmetadata'));
+          return getComputedStyle(fresh).objectFit;
+        })();
+        """)
+        XCTAssertEqual(replaced as? String, "fill", "换集后必须还是记住的那一档，不能回到默认")
+    }
+
+    // MARK: - REG-010 选集批量下载入口（真 WKWebView）
+
+    /// 选集页要有批量入口：选择 / 一键全集 / 从本集往后 / 下载已选；
+    /// 同时不能把原位「下载本集」挤掉。点一下批量按钮会真的发桥接消息或进入选择模式。
+    func testEpisodePageHasBatchDownloadEntryAndSelectionMode() async throws {
+        _ = try await awaitValue("!!document.getElementById('iosBatchBar')")
+        let bar = try await javaScript("""
+        (function () {
+          var bar = document.getElementById('iosBatchBar');
+          var grid = document.getElementById('epGrid');
+          return JSON.stringify({
+            buttonIds: Array.prototype.map.call(bar.querySelectorAll('button'), function (b) { return b.id; }),
+            beforeGrid: bar.nextElementSibling === grid,
+            singleStillThere: !!document.getElementById('ppToolDownload')
+          });
+        })();
+        """)
+        let text = try XCTUnwrap(bar as? String)
+        let result = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any])
+        let ids = try XCTUnwrap(result["buttonIds"] as? [String])
+        XCTAssertEqual(ids, ["iosBatchSelect", "iosBatchAll", "iosBatchForward", "iosBatchStart"], "批量入口不齐：\(text)")
+        XCTAssertEqual(result["beforeGrid"] as? Bool, true, "批量条要在选集区上方：\(text)")
+        XCTAssertEqual(result["singleStillThere"] as? Bool, true, "原位「下载本集」必须保留：\(text)")
+
+        let picking = try await javaScript("""
+        (function () {
+          document.getElementById('iosBatchSelect').click();
+          var ep = document.querySelector('#epGrid .ep');
+          ep.click();
+          return JSON.stringify({
+            picked: ep.className.indexOf('ios-pick') >= 0,
+            start: document.getElementById('iosBatchStart').textContent,
+            note: document.getElementById('iosBatchNote').textContent
+          });
+        })();
+        """)
+        let pickText = try XCTUnwrap(picking as? String)
+        let pick = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(pickText.utf8)) as? [String: Any])
+        XCTAssertEqual(pick["picked"] as? Bool, true, "选择模式下点选集要能选中：\(pickText)")
+        XCTAssertEqual(pick["start"] as? String, "下载已选 (1)", "选中数要显示出来：\(pickText)")
+    }
+
     // MARK: - 桥接工具
 
     /// JSONSerialization 给的矩形是 NSNumber 数组：拆成 [Int] 再比，避免桥接不稳。

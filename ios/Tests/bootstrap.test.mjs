@@ -85,7 +85,7 @@ function fixture({ origin = 'https://zhuiju.dpdns.org', storageThrows = false, l
   const selected = { dataset: { ep: '18' }, textContent: '第19集' };
   let videoRate = 1;
   const video = { id: 'video', tagName: 'VIDEO', readyState: 2, currentSrc: 'https://media.example/19.mp4',
-    controls: true, paused: true, duration: 120, currentTime: 0, removed: [],
+    controls: true, paused: true, duration: 120, currentTime: 0, removed: [], style: {},
     load() {}, querySelectorAll() { return []; },
     removeAttribute(name) { video.removed.push(name); },
     pause() { video.paused = true; },
@@ -182,6 +182,7 @@ function fixture({ origin = 'https://zhuiju.dpdns.org', storageThrows = false, l
     const button = node('button');
     button.className = idx === 0 ? 'ep on' : 'ep';
     button.dataset = { ep: String(idx) };
+    button.textContent = '第' + (idx + 1) + '集';
     button.classList = {
       toggle(name, force) {
         const on = button.className.split(' ').filter(Boolean).includes(name);
@@ -233,6 +234,7 @@ function fixture({ origin = 'https://zhuiju.dpdns.org', storageThrows = false, l
   });
   tabRow.querySelectorAll = (selector) => (selector === '.pp-tab' ? tabButtons : []);
   const body = node('body');
+  /* 选集区要真的在页面上：0.1.14 的批量下载条插在 #epGrid 前面（没有父节点就挂不上） */
   /* 顶栏设置入口：首页用它打开设置面板（站点自己只会弹「即将上线」） */
   const settingsTrigger = node('button');
   settingsTrigger.dataset = { action: 'settings' };
@@ -243,6 +245,8 @@ function fixture({ origin = 'https://zhuiju.dpdns.org', storageThrows = false, l
     if (child.id) idIndex.set(child.id, child);
     return child;
   };
+  /* 选集区和它的批量下载条要真的在页面上 */
+  body.appendChild(epGrid);
   const document = { readyState: 'loading', visibilityState: 'visible', head, body,
     title: '测试剧 - 看剧AI',
     addEventListener(name, listener) { (listeners[name] ||= []).push(listener); },
@@ -479,8 +483,8 @@ test('fullscreen sits at the right end of the control bar and drives native rota
   const bar = state.document.getElementById('ppCtrl');
   assert.ok(bar, '自带控制栏没有挂上');
   assert.deepEqual(bar.children.map((child) => child.id),
-    ['ppPlay', 'ppTime', 'ppSeek', 'ppCast', 'ppRate', 'ppFull', 'ppCastMenu', 'ppRateMenu'],
-    '全屏必须是进度条后面的最后一个按钮，倍速紧挨着它');
+    ['ppPlay', 'ppTime', 'ppSeek', 'ppCast', 'ppRate', 'ppFit', 'ppFull', 'ppCastMenu', 'ppRateMenu'],
+    '全屏仍是进度条后面的最后一个按钮；0.1.14 在它左边新增画面适配键（适应/裁剪/拉伸）');
   assert.equal(state.video.controls, false, '自带控制栏挂上后必须收起原生控件');
   assert.ok(state.video.removed.includes('controls'));
   assert.deepEqual(state.toolbar.children.map((child) => child.id), ['ppToolDownload', 'dmBtn', 'pipBtn', 'nextEpBtn'],
@@ -1463,4 +1467,169 @@ test('the download file is named after the show, not the app', () => {
   const message = state.messages.at(-1);
   assert.equal(message.name, '测试剧 第19集.mp4');
   assert.ok(!/追剧AI/.test(message.name), '文件名里不能再用 App 名冒充剧名');
+});
+
+/* ---------- REG-010 选集批量下载：多选 / 一键全集 / 从本集往后 / 整部剧队列 ---------- */
+
+function batchReply(showId, idx) {
+  return json({ showId, idx, episodeNumber: idx + 1, verified: true, kind: 'mp4', url: `https://media.example/${idx}.mp4` });
+}
+
+const settle = () => new Promise((resolve) => setTimeout(resolve, 60));
+
+test('one tap batch download resolves every episode to its real media url before queueing', async () => {
+  const state = fixture({ signedIn: true, episodes: [0, 1, 2] });
+  state.ready();
+  const bar = state.document.getElementById('iosBatchBar');
+  assert.ok(bar, '选集区没有批量下载条');
+  state.replies.push(batchReply('fixture', 0), batchReply('fixture', 1), batchReply('fixture', 2));
+
+  state.click(state.document.getElementById('iosBatchAll'));
+  await settle();
+
+  const message = state.messages.at(-1);
+  assert.equal(message.action, 'downloadBatch');
+  assert.equal(message.signedIn, true);
+  assert.equal(message.items.length, 3, `三集都要入队：${JSON.stringify(message)}`);
+  assert.equal(message.items.map((item) => item.url).join(','),
+    'https://media.example/0.mp4,https://media.example/1.mp4,https://media.example/2.mp4',
+    '每一集都要用站点解析出来的真实片源，不能拿播放页地址顶替');
+  assert.ok(message.items.every((item) => item.url !== 'https://zhuiju.dpdns.org/player/?id=fixture'),
+    '播放页 URL 不是视频');
+  assert.equal(message.items.map((item) => item.epKey).join(','), '0,1,2', 'showId + 集号是原生队列的去重键');
+  assert.equal(message.items[0].showId, 'fixture');
+  assert.equal(message.items[0].title, '测试剧');
+  assert.equal(message.items[1].name, '测试剧 第2集.mp4', '批量下载的文件名也是真实剧名 + 集号');
+});
+
+test('an HLS or page-url episode is skipped with a reason instead of being downloaded', async () => {
+  const state = fixture({ signedIn: true, episodes: [0, 1, 2] });
+  state.ready();
+  state.replies.push(
+    batchReply('fixture', 0),
+    json({ showId: 'fixture', idx: 1, episodeNumber: 2, verified: true, kind: 'hls', url: 'https://media.example/1.m3u8' }),
+    json({ showId: 'fixture', idx: 2, episodeNumber: 3, verified: true, kind: 'mp4', url: 'https://zhuiju.dpdns.org/player/?id=fixture&ep=2' })
+  );
+
+  state.click(state.document.getElementById('iosBatchAll'));
+  await settle();
+
+  const message = state.messages.at(-1);
+  assert.equal(message.action, 'downloadBatch');
+  assert.equal(message.items.length, 1, `只有真正解析出视频的那一集能入队：${JSON.stringify(message)}`);
+  assert.equal(message.items[0].epKey, '0');
+  assert.match(state.toastText(), /跳过 2 集/, '跳过的集要如实告诉用户');
+});
+
+test('download from the current episode onward starts at the selected episode', async () => {
+  const state = fixture({ signedIn: true, episodes: [0, 1, 2, 3, 4] });
+  state.ready();
+  /* 真机上「当前集」是选集区里 .ep.on 那一格 */
+  for (const button of state.epButtons) button.className = 'ep';
+  state.epButtons[2].className = 'ep on';
+  state.replies.push(batchReply('fixture', 2), batchReply('fixture', 3), batchReply('fixture', 4));
+
+  state.click(state.document.getElementById('iosBatchForward'));
+  await settle();
+
+  const message = state.messages.at(-1);
+  assert.equal(message.action, 'downloadBatch');
+  assert.equal(message.items.map((item) => item.epKey).join(','), '2,3,4',
+    '从本集往后：当前集和它后面的每一集，前面的不重复下');
+});
+
+test('the selection mode picks episodes for a chosen batch without leaving the page', async () => {
+  const state = fixture({ signedIn: true, episodes: [0, 1, 2] });
+  state.ready();
+  state.click(state.document.getElementById('iosBatchSelect'));
+  state.click(state.epButtons[1]);
+  assert.match(state.epButtons[1].className, /ios-pick/, '选中的集要有可见标记');
+  assert.equal(state.document.getElementById('iosBatchStart').textContent, '下载已选 (1)');
+  state.replies.push(batchReply('fixture', 1));
+
+  state.click(state.document.getElementById('iosBatchStart'));
+  await settle();
+  const message = state.messages.at(-1);
+  assert.equal(message.action, 'downloadBatch');
+  assert.equal(message.items.map((item) => item.epKey).join(','), '1', '只下用户选中的那一集');
+});
+
+test('the settings sheet shows the whole show queue with pause, resume and cancel', () => {
+  const state = fixture({ signedIn: true, episodes: [0, 1, 2] });
+  state.ready();
+  /* 打开设置，原生回一份队列快照（和我们真实下发的是同一个函数） */
+  state.click(state.settingsTrigger);
+  state.window.__zhuijuDownloads('snapshot', [
+    { id: 'a', showId: 'fixture', epKey: '0', epLabel: '第1集', title: '测试剧', status: 'done', received: 100, total: 100, path: '/tmp/a.mp4', size: 100, name: 'a.mp4' },
+    { id: 'b', showId: 'fixture', epKey: '1', epLabel: '第2集', title: '测试剧', status: 'running', received: 40, total: 100, path: '', size: 0, name: 'b.mp4' },
+    { id: 'c', showId: 'fixture', epKey: '2', epLabel: '第3集', title: '测试剧', status: 'queued', received: 0, total: 100, path: '', size: 0, name: 'c.mp4' }
+  ]);
+  const item = state.document.getElementById('iosDlShows').children[0];
+  assert.ok(item, '队列里的剧要出现在设置面板里');
+  const queueNode = item.querySelector('.ios-dl-queue');
+  assert.ok(queueNode, '设置里要有整部剧的队列进度');
+  const text = queueNode.textContent;
+  assert.match(text, /任务 1\/3 集/, `要按整部剧汇总：${text}`);
+  assert.match(text, /进行中 1/, text);
+  assert.match(text, /排队 1/, text);
+  const actions = item.querySelector('.ios-dl-actions');
+  assert.ok(actions && actions.children.length >= 2, '要能暂停整部剧/取消整部剧');
+  const pause = actions.children[0];
+  state.click(pause);
+  assert.equal(state.messages.at(-1).action, 'downloadPause');
+  assert.equal(state.messages.at(-1).showId, 'fixture');
+});
+
+test('a failed episode never lets the show look complete and an unknown length has no percent', () => {
+  const state = fixture({ signedIn: true, episodes: [0, 1] });
+  state.ready();
+  state.click(state.settingsTrigger);
+  state.window.__zhuijuDownloads('snapshot', [
+    { id: 'a', showId: 'fixture', epKey: '0', epLabel: '第1集', title: '测试剧', status: 'done', received: 1048576, total: 1048576, path: '/tmp/a.mp4', size: 1048576, name: 'a.mp4' },
+    { id: 'b', showId: 'fixture', epKey: '1', epLabel: '第2集', title: '测试剧', status: 'failed', received: 0, total: 0, path: '', size: 0, name: 'b.mp4' },
+    { id: 'c', showId: 'fixture', epKey: '2', epLabel: '第3集', title: '测试剧', status: 'paused', received: 1048576, total: 0, path: '', size: 0, name: 'c.mp4' }
+  ]);
+  const queueNode = state.document.getElementById('iosDlShows').children[0].querySelector('.ios-dl-queue');
+  assert.ok(queueNode, '设置里要有整部剧的队列进度');
+  const text = queueNode.textContent;
+  assert.match(text, /失败 1/, text);
+  assert.match(text, /已暂停 1/, text);
+  assert.ok(!/全部完成/.test(text), `有一集失败就不能说整部剧完成：${text}`);
+  assert.match(text, /已收 2\.0 MB/, '总长度未知时只报实收字节');
+  assert.ok(!/%/.test(text), `不知道总长度就不许造百分比：${text}`);
+});
+
+/* ---------- REG-011 全屏画面适配：适应 / 裁剪 / 拉伸 ---------- */
+
+test('the fit button cycles contain, cover and fill and remembers the choice', () => {
+  const state = fixture();
+  state.ready();
+  const button = state.document.getElementById('ppFit');
+  assert.ok(button, '控制栏没有画面适配键');
+  assert.equal(button.textContent, '适应', '默认整画面可见（contain）');
+  assert.equal(state.video.style.objectFit, 'contain');
+
+  state.click(button);
+  assert.equal(state.storage['kj-ios-fit'], 'cover');
+  assert.equal(state.video.style.objectFit, 'cover');
+  assert.equal(button.textContent, '裁剪');
+
+  state.click(button);
+  assert.equal(state.storage['kj-ios-fit'], 'fill');
+  assert.equal(state.video.style.objectFit, 'fill');
+  assert.equal(button.textContent, '拉伸');
+
+  state.click(button);
+  assert.equal(state.storage['kj-ios-fit'], 'contain');
+  assert.equal(state.video.style.objectFit, 'contain');
+});
+
+test('the remembered fit survives a new page and is applied to the new video element', () => {
+  const state = fixture({ seed: { 'kj-ios-fit': 'fill' } });
+  state.ready();
+  assert.equal(state.video.style.objectFit, 'fill', '记住的适配方式要在挂载时就落到 video 上');
+  assert.equal(state.document.getElementById('ppFit').textContent, '拉伸');
+  /* 换集/重渲染后（loadedmetadata）仍然按记住的那一档应用，不会回到默认 */
+  state.emit('loadedmetadata', { target: state.video });
+  assert.equal(state.video.style.objectFit, 'fill');
 });
