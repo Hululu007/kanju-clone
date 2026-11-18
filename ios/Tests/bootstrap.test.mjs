@@ -94,6 +94,12 @@ function fixture({ origin = 'https://zhuiju.dpdns.org', storageThrows = false, l
   const head = node('head');
   const toolbar = node('div');
   toolbar.id = 'playTools';
+  /* 站点的工具条顺序：显示设置 / 线路 / 弹幕 / 画中画 / 下一集。弹幕按钮要让位给下载。 */
+  const dmButton = node('button');
+  dmButton.id = 'dmBtn';
+  dmButton.className = 'pp-tool on';
+  dmButton.textContent = '弹幕 开';
+  toolbar.appendChild(dmButton);
   const pipButton = node('button');
   pipButton.id = 'pipBtn';
   toolbar.appendChild(pipButton);
@@ -147,6 +153,14 @@ function fixture({ origin = 'https://zhuiju.dpdns.org', storageThrows = false, l
   const settingsPanel = node('div');
   settingsPanel.id = 'settingsPanel';
   settingsPanel.hidden = false;
+  /* 播放页顶栏：pageHead({title: show.title, back:'/'}) —— 真机上压在画面上的就是它。 */
+  const pageHead = node('header');
+  pageHead.className = 'page-head';
+  pageHead.hidden = false;
+  const phTitle = node('h1');
+  phTitle.className = 'ph-title';
+  phTitle.textContent = '测试剧';
+  pageHead.appendChild(phTitle);
   const tabbar = node('nav'); tabbar.className = 'tabbar';
   const lineBar = node('div');
   lineBar.id = 'lineBar';
@@ -233,6 +247,7 @@ function fixture({ origin = 'https://zhuiju.dpdns.org', storageThrows = false, l
       if (id === 'epMore') return epMore;
       if (id === 'settingsPanel') return homePage ? null : settingsPanel;
       if (id === 'lineBar') return lineBar;
+      if (id === 'dmBtn') return dmButton;
       if (id === 'epGrid') return epGrid;
       if (id === 'days') return days;
       if (id === 'player') return homePage ? null : player;
@@ -268,6 +283,8 @@ function fixture({ origin = 'https://zhuiju.dpdns.org', storageThrows = false, l
       if (selector === '#playTools') return [toolbar];
       if (selector === '#settingsPanel') return [settingsPanel];
       if (selector === '.tabbar') return [tabbar];
+      if (selector === '.page-head') return [pageHead];
+      if (selector === '.topbar') return [];
       if (selector === '#lineBar') return [lineBar];
       if (selector === '.tabbar') return [tabbar];
       if (selector === '#pipBtn') return [pipButton];
@@ -327,6 +344,7 @@ function fixture({ origin = 'https://zhuiju.dpdns.org', storageThrows = false, l
   return { window, document, replies, calls, redirects, selected, video, messages, attributes, head, toolbar, searchInput, shared, player,
     hint, epButtons, epGrid, epMore, mediaProto, days, dayButtons, observers, loginTrigger, storage,
     settingsPanel, lineBar, tabRow, tabButtons, clicked, sbName, sbSub, acctName, tabbar, settingsTrigger,
+    pageHead, dmButton, phTitle,
     /* 下载进度控件由注入层自己建（0.1.9 之后不再依赖站点预设的节点），
        所以按 id 现取，不让夹具自己造一份同名节点。 */
     get downloadLabel() { return document.getElementById('iosDownloadLabel'); },
@@ -448,8 +466,9 @@ test('fullscreen sits at the right end of the control bar and drives native rota
     '全屏必须是进度条后面的最后一个按钮，倍速紧挨着它');
   assert.equal(state.video.controls, false, '自带控制栏挂上后必须收起原生控件');
   assert.ok(state.video.removed.includes('controls'));
-  assert.deepEqual(state.toolbar.children.map((child) => child.id), ['pipBtn', 'nextEpBtn'],
-    '工具条里那个够不到的全屏键必须消失');
+  assert.deepEqual(state.toolbar.children.map((child) => child.id), ['ppToolDownload', 'dmBtn', 'pipBtn', 'nextEpBtn'],
+    '工具条里那个够不到的全屏键必须消失；弹幕按钮的位置换成下载');
+  assert.equal(state.dmButton.hidden, true, '弹幕按钮让位给下载，隐藏而不是删除');
 
   const button = state.document.getElementById('ppFull');
   assert.equal(button.textContent, '全屏');
@@ -782,7 +801,7 @@ test('fullscreen hides every floating control and restores them on exit', async 
   state.click(state.document.getElementById('ppFull'));
   await new Promise((resolve) => setTimeout(resolve, 5));
   for (const [name, element] of [['工具条', state.toolbar], ['设置面板', state.settingsPanel], ['底部导航', state.tabbar],
-    ['线路面板', state.lineBar], ['提示行', state.hint]]) {
+    ['线路面板', state.lineBar], ['提示行', state.hint], ['站点头栏', state.pageHead]]) {
     assert.equal(element.hidden, true, '全屏里 ' + name + ' 应该收起');
     assert.equal(element.style.display, 'none');
   }
@@ -793,7 +812,8 @@ test('fullscreen hides every floating control and restores them on exit', async 
   state.click(full);
   await new Promise((resolve) => setTimeout(resolve, 5));
   /* 工具条和提示行要原样回来 */
-  for (const [name, element] of [['工具条', state.toolbar], ['底部导航', state.tabbar], ['提示行', state.hint]]) {
+  for (const [name, element] of [['工具条', state.toolbar], ['底部导航', state.tabbar], ['提示行', state.hint],
+    ['站点头栏', state.pageHead]]) {
     assert.equal(element.hidden, false, '退出全屏后 ' + name + ' 应该恢复');
     assert.equal(element.style.display, '', '恢复时不能留下 display:none 的尾巴');
   }
@@ -1208,4 +1228,55 @@ test('a burst of progress events never loses the finished state on disk', () => 
   assert.equal(saved.state, 'done');
   assert.equal(saved.percent, 100);
   assert.equal(saved.path, '/tmp/追剧AI_第19集.mp4');
+});
+
+/* 真机上压在画面顶上的不是播放器里那行小字，而是站点头栏 `pageHead()`：
+   返回箭头 + 片名 + 主题 + 菜单。0.1.10 漏了它，横屏全屏里「百日谎言」一直挂着。 */
+test('immersive hides the site page header that carries the film title', () => {
+  const state = fixture({ landscape: true }); state.ready();
+  assert.equal(state.pageHead.hidden, false);
+  state.emit('play', { target: state.video });
+  assert.equal(state.attributes['data-ios-immersive'], true);
+  assert.equal(state.pageHead.hidden, true, '横屏播放时片名头栏必须收起');
+  assert.equal(state.pageHead.style.display, 'none');
+  const css = state.head.children.find((child) => child.id === 'iosShellStyle').textContent;
+  assert.match(css, /html\[data-ios-immersive\] \.page-head\{display:none!important\}/,
+    '头栏要单独一条规则收起来：它和播放器不在同一个层叠上下文里');
+  state.emit('ended', { target: state.video });
+  assert.equal(state.pageHead.hidden, false, '退出沉浸后头栏要回来，否则回不去上一页');
+  assert.equal(state.pageHead.style.display, '');
+});
+
+/* 用户要求：把播放器下方那排工具里的「弹幕」换成「下载」，因为下载入口藏进「外放」后找不到了。 */
+test('the toolbar download button takes the danmaku slot and drives the transfer', () => {
+  const state = fixture({ signedIn: true }); state.ready();
+  const button = state.document.getElementById('ppToolDownload');
+  assert.ok(button, '工具条上必须有下载按钮');
+  assert.equal(state.dmButton.hidden, true, '弹幕按钮让位');
+  assert.equal(state.toolbar.children[0].id, 'ppToolDownload', '下载占用弹幕那一格，位置不变');
+  assert.equal(button.textContent, '下载本集');
+
+  state.click(button);
+  const message = state.messages.at(-1);
+  assert.equal(message.action, 'download');
+  assert.equal(message.url, 'https://media.example/19.mp4');
+  assert.equal(button.textContent, '下载 0%');
+
+  state.window.__zhuijuDownload({ id: message.id, event: 'progress', received: 43, total: 100 });
+  assert.equal(button.textContent, '下载 43%', '进度要显示在按钮上，用户点一下就知道在跑');
+
+  state.window.__zhuijuDownload({ id: message.id, event: 'done', path: '/tmp/追剧AI_第19集.mp4', name: '追剧AI_第19集.mp4', size: 10485760 });
+  assert.equal(button.textContent, '用播放器打开', '下完就地变成交给播放器的入口');
+  state.click(button);
+  assert.equal(state.messages.at(-1).action, 'openLocal');
+  assert.equal(state.messages.at(-1).path, '/tmp/追剧AI_第19集.mp4');
+});
+
+test('the toolbar download button asks for login instead of transferring', () => {
+  const state = fixture(); state.ready();
+  const button = state.document.getElementById('ppToolDownload');
+  state.click(button);
+  assert.equal(state.messages.length, 0, '未登录不许发起传输');
+  assert.equal(state.loginTrigger.opens, 1, '要顺手打开站点登录弹窗');
+  assert.match(state.toastText(), /登录后才能下载/);
 });

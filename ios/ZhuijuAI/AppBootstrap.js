@@ -224,6 +224,12 @@
       'html[data-ios-immersive] #settingsPanel,html[data-ios-immersive] #lineBar{display:none!important}',
       'html[data-ios-immersive] .tabbar{display:none!important;visibility:hidden!important;pointer-events:none!important}',
       'html[data-ios-immersive] .p-label{display:none!important}',
+      /* 全屏里压在最上面的其实是站点头栏（返回 + 片名 + 菜单）。
+         它和播放器不在同一个层叠上下文里，z-index 压不住，只能直接收起来。 */
+      'html[data-ios-immersive] .page-head{display:none!important}',
+      'html[data-ios-immersive] .topbar{display:none!important}',
+      'html[data-ios-immersive] .ph-back{display:none!important}',
+      'html[data-ios-immersive] .ph-title{display:none!important}',
       /* 站点的「全屏」按钮优先走标准全屏 API（player.requestFullscreen），
          这条路不经过 data-ios-immersive，片名标题和工具条会留在画面上。
          用 :fullscreen 兜住：无论谁开的全屏，标题都不许压在视频上。
@@ -422,6 +428,9 @@
 
   var HIDE_IN_IMMERSIVE = [
     '#playTools', '.pp-toolbar', '#settingsPanel', '#lineBar', '.tabbar',
+    /* 站点头栏：播放页的 `pageHead({title: show.title})` 就是那条「返回 + 片名 + 菜单」。
+       它不在播放器里，但同样会压在画面上，必须一起收。 */
+    '.page-head', '.topbar',
     '.dm-input', '#dmInputWrap', '#pipBtn', '#nextEpBtn', '#iosFullBtn',
     '#player .p-label', '.pp-hint', '#playHint'
   ];
@@ -731,6 +740,8 @@
   }
 
   function mountCtrlBar() {
+    /* 工具条上的「下载」不依赖播放器，先补上再说 */
+    mountToolDownload();
     if (ctrlMounted) return true;
     var player = document.getElementById('player');
     var video = document.getElementById('video');
@@ -1069,7 +1080,54 @@
       if (typeof downloadOpen.removeAttribute === 'function' && downloadState.path) downloadOpen.removeAttribute('hidden');
       else if (typeof downloadOpen.setAttribute === 'function') downloadOpen.setAttribute('hidden', '');
     }
+    syncToolDownload();
     saveDownload();
+  }
+
+  /* 播放器下方那排工具里，「弹幕」按钮给换成「下载」：
+     下载入口原来藏在「外放」里（而外放默认又交给了第三方播放器），真机上根本找不到。 */
+  var toolDownloadMounted = false;
+
+  function mountToolDownload() {
+    var tools = document.getElementById('playTools');
+    if (!tools) return false;
+    var dm = document.getElementById('dmBtn');
+    if (dm) {
+      /* 弹幕按钮让位：宝免占着那行的位置，但不能删除站点节点 */
+      dm.hidden = true;
+      if (dm.style) dm.style.display = 'none';
+    }
+    if (document.getElementById('ppToolDownload')) {
+      toolDownloadMounted = true;
+      syncToolDownload();
+      return true;
+    }
+    if (typeof tools.appendChild !== 'function') return false;
+    var button = document.createElement('button');
+    button.id = 'ppToolDownload';
+    button.type = 'button';
+    button.className = 'pp-tool';
+    button.textContent = '下载本集';
+    if (dm && dm.parentNode === tools && typeof tools.insertBefore === 'function') tools.insertBefore(button, dm);
+    else tools.appendChild(button);
+    toolDownloadMounted = true;
+    syncToolDownload();
+    return true;
+  }
+
+  function syncToolDownload() {
+    var button = document.getElementById('ppToolDownload');
+    if (!button) return;
+    if (downloadState.busy) {
+      button.textContent = '下载 ' + (downloadState.percent ? downloadState.percent + '%' : '0%');
+      button.className = 'pp-tool on';
+    } else if (downloadState.path) {
+      button.textContent = '用播放器打开';
+      button.className = 'pp-tool on';
+    } else {
+      button.textContent = '下载本集';
+      button.className = 'pp-tool';
+    }
   }
 
   function downloadProgressNote() {
@@ -1361,6 +1419,13 @@
       event.preventDefault();
       event.stopImmediatePropagation();
       startDownload();
+      return true;
+    }
+    if (hit(target, 'ppToolDownload')) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      if (downloadState.path) openLocal();
+      else startDownload();
       return true;
     }
     if (hit(target, 'ppOpenLocal')) {
@@ -1667,12 +1732,13 @@
   }
   /* 站点是 SPA：换集或重渲染可能整块换掉 #player，几次补挂 */
   [0, 400, 1200, 2600].forEach(function (delay) {
-    setTimeout(mountCtrlBar, delay);
+    setTimeout(function () { mountCtrlBar(); mountToolDownload(); }, delay);
   });
   /* 首页/播放页的站点渲染是异步的：面板和状态晚一步再补一次 */
   [0, 600, 1600].forEach(function (delay) {
     setTimeout(function () {
       mountDownloadPanel();
+      mountToolDownload();
       syncExtToggle();
       syncDownloadRow();
     }, delay);

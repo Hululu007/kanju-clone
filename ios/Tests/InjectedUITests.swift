@@ -48,12 +48,18 @@ final class InjectedUITests: XCTestCase, WKNavigationDelegate {
     <html><head><meta name="viewport" content="width=device-width,initial-scale=1"></head>
     <body>
       <button class="icon-btn" type="button" data-action="settings" aria-label="设置">设置</button>
+      <header class="page-head">
+        <a class="ph-back" href="/" aria-label="返回">返回</a>
+        <h1 class="ph-title">百日谎言</h1>
+        <button class="ph-menu" type="button" aria-label="打开菜单">菜单</button>
+      </header>
       <section class="player" id="player">
         <video id="video" playsinline preload="metadata"></video>
         <span class="p-label" id="playerLabel">测试剧 · 第19集</span>
       </section>
       <div class="pp-toolbar" id="playTools">
         <button class="pp-tool" id="settingsBtn" type="button">显示设置</button>
+        <button class="pp-tool on" id="dmBtn" type="button">弹幕 开</button>
         <button class="pp-tool" id="pipBtn" type="button">画中画</button>
         <button class="pp-tool" id="nextEpBtn" type="button">下一集</button>
       </div>
@@ -132,10 +138,12 @@ final class InjectedUITests: XCTestCase, WKNavigationDelegate {
           var label = document.getElementById('playerLabel');
           var tools = document.getElementById('playTools');
           if (!full || !label) return 'missing:' + [!!full, !!label].join(',');
+          var head = document.querySelector('.page-head');
           var shot = function (tag) {
             return tag + '=' + document.documentElement.hasAttribute('data-ios-immersive')
               + '/' + getComputedStyle(label).display
-              + '/' + getComputedStyle(tools).display;
+              + '/' + getComputedStyle(tools).display
+              + '/' + (head ? getComputedStyle(head).display : 'no-head');
           };
           var log = ['landscape=' + window.matchMedia('(orientation: landscape)').matches];
           video.dispatchEvent(new Event('play', { bubbles: true }));
@@ -151,11 +159,11 @@ final class InjectedUITests: XCTestCase, WKNavigationDelegate {
         """)
         let log = try XCTUnwrap(raw as? String)
         XCTAssertTrue(log.contains("landscape=true"), "夹具不是横屏，这条用例就失去意义：\(log)")
-        XCTAssertTrue(log.contains("playing=true/none/none"), "横屏播放时标题和上方工具条必须收起：\(log)")
-        XCTAssertTrue(log.contains("fullscreen=true/none/none"), "进全屏后标题必须收起：\(log)")
-        XCTAssertTrue(log.contains("exited=false"), "退出全屏应回到页内布局：\(log)")
-        XCTAssertTrue(log.contains("replayed=true/none/none"),
-                      "退出全屏后再播（换集/重播）必须重新沉浸，标题不能留在画面上（0.1.9 的 bug）：\(log)")
+        XCTAssertTrue(log.contains("playing=true/none/none/none"), "横屏播放时片名小签、上方工具条、以及顶上的站点头栏都必须收起：\(log)")
+        XCTAssertTrue(log.contains("fullscreen=true/none/none/none"), "进全屏后标题必须收起：\(log)")
+        XCTAssertTrue(log.contains("exited=false/inline/block/block"), "退出全屏应回到页内布局：\(log)")
+        XCTAssertTrue(log.contains("replayed=true/none/none/none"),
+                      "退出全屏后再播（换集/重播）必须重新沉浸，标题和头栏都不能留在画面上（0.1.9 / 0.1.10 的 bug）：\(log)")
     }
 
     /// 站点的全屏按钮走标准全屏 API，那条路只靠 `:fullscreen` 规则和 fullscreenchange。
@@ -184,6 +192,43 @@ final class InjectedUITests: XCTestCase, WKNavigationDelegate {
         XCTAssertGreaterThan(found["label"] ?? 0, 0, "标准全屏里没有隐藏片名的规则，标题会压在视频上：\(text)")
         XCTAssertGreaterThan(found["toolbar"] ?? 0, 0, "标准全屏里工具条也要收起：\(text)")
         XCTAssertGreaterThan(found["tabbar"] ?? 0, 0, "标准全屏里底部导航也要收起：\(text)")
+    }
+
+    // MARK: - REG-002 工具条上的下载按钮（占「弹幕」那一格）
+
+    func testToolbarDownloadButtonReplacesTheDanmakuSlot() async throws {
+        let raw = try await javaScript("""
+        (function () {
+          var tools = document.getElementById('playTools');
+          var dm = document.getElementById('dmBtn');
+          var button = document.getElementById('ppToolDownload');
+          if (!button) return 'missing-button';
+          return JSON.stringify({
+            dmHidden: dm ? getComputedStyle(dm).display === 'none' : 'no-dm',
+            firstChild: tools.children[0].id,
+            label: button.textContent,
+            dmStillInDom: !!dm
+          });
+        })();
+        """)
+        let text = try XCTUnwrap(raw as? String)
+        let result = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any])
+        XCTAssertEqual(result["dmHidden"] as? Bool, true, "弹幕按钮要让位（隐藏，不删除站点节点）：\(text)")
+        XCTAssertEqual(result["dmStillInDom"] as? Bool, true)
+        XCTAssertEqual(result["firstChild"] as? String, "ppToolDownload", "下载占弹幕那一格，位置不能跑：\(text)")
+        XCTAssertEqual(result["label"] as? String, "下载本集")
+
+        /* 点一下就要真的发起下载（夹具已塞登录 token 与直链） */
+        let clicked = try await javaScript("""
+        (function () {
+          document.getElementById('ppToolDownload').click();
+          return document.getElementById('ppToolDownload').textContent;
+        })();
+        """)
+        XCTAssertEqual(clicked as? String, "下载 0%", "点了之后按钮要立刻显示进度：\(String(describing: clicked))")
+        let message = try await awaitPlayerMessage()
+        XCTAssertEqual(message["action"] as? String, "download", "工具条上的下载也要走原生传输：\(message)")
+        XCTAssertEqual(message["url"] as? String, "https://media.example/19.mp4")
     }
 
     // MARK: - REG-002 首页设置面板里的下载进度

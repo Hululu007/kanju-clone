@@ -1,6 +1,6 @@
 # 追剧 AI iOS 客户端
 
-独立的 Swift 工程，用 WKWebView 加载 `https://zhuiju.dpdns.org/`，复用现有账号、片源和观看进度后端。修复版 0.1.10（build 11，回归清单见 `REGRESSIONS.md`）最低支持 iOS 15，因为站点的模块使用顶层 await。
+独立的 Swift 工程，用 WKWebView 加载 `https://zhuiju.dpdns.org/`，复用现有账号、片源和观看进度后端。修复版 0.1.11（build 12，回归清单见 `REGRESSIONS.md`）最低支持 iOS 15，因为站点的模块使用顶层 await。
 
 ## 已实现
 

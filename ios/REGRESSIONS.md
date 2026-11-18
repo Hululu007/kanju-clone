@@ -23,6 +23,8 @@ node --test --test-name-pattern='landscape playback goes immersive again' ios/Te
 ## REG-001 横屏全屏里影视标题不消失
 
 - **现象**：横屏全屏播放时，画面上方仍压着「片名 · 第N集」和整条页眉工具条；必须反复点两次全屏才偶尔消失。
+  真机复核（0.1.10）又发现更显眼的一处：站点播放页的**顶栏**（返回箭头 + 片名「百日谎言」 + 主题 + 菜单，
+  即 `pageHead()` 渲染的 `.page-head`）也一直挂在画面最上面——它不在播放器里，所以第一条修法管不到。
 - **复现步骤**：
   1. 打开任意剧集的播放页，开始播放。
   2. 点底部控制栏「全屏」，进入横屏全屏。
@@ -33,10 +35,14 @@ node --test --test-name-pattern='landscape playback goes immersive again' ios/Te
   1. `setUserFullscreen(false)` 把 `explicitInline = true` 记住「用户要留在页内」，但只有再次点全屏
      或转回竖屏才会清掉它。之后横屏播放时 `applyImmersive()` 里
      `activePlayback && landscape() && !explicitInline` 永远为假，沉浸态再也进不来 —— 标题就挂在画面上。
+  3. 站点头栏 `.page-head` 和播放器不在同一个层叠上下文里（播放器是 `position:fixed;z-index:10000`，
+     但头栏照样画在上面），光靠 z-index 压不住；注入层的隐藏清单里当时只有播放器内部的 `.p-label`。
   2. 站点自带的「全屏」按钮优先走标准全屏 API（`player.requestFullscreen`），这条路不触发
      `data-ios-immersive`，注入层也没有 `fullscreenchange` 监听和 `:fullscreen` 样式，所以标题同样不被隐藏。
 - **修复**：
   - 新的 `play` 事件（换集/重新播放）清掉 `explicitInline`；`orientationchange` 转回横屏时也清掉。
+  - 沉浸态同时收起站点头栏：`.page-head` / `.topbar` / `.ph-back` / `.ph-title` 各一条 `display:none !important`，
+    并加进 `HIDE_IN_IMMERSIVE`，退出全屏原样恢复（否则回不到上一页）。
   - 新增 `fullscreenchange` / `webkitfullscreenchange` 监听，标准全屏期间按沉浸态处理（`applyImmersive()` 把
     `document.fullscreenElement` 计入沉浸判断）。
   - 追加 `#player:fullscreen .p-label` / `:-webkit-full-screen` 与工具条、底栏、弹幕输入的兜底样式
@@ -45,10 +51,11 @@ node --test --test-name-pattern='landscape playback goes immersive again' ios/Te
   - `landscape playback goes immersive again after a fullscreen round trip`
   - `rotating back to landscape during playback restores immersive mode`
   - `the standard fullscreen api hides the title and keeps immersion in sync`
+  - `immersive hides the site page header that carries the film title`（0.1.10 漏掉的那条：头栏必收必还）
 - **测试名**（模拟器，真 WKWebView）：
-  - `InjectedUITests.testLandscapePlaybackHidesTheTitleAndSurvivesAFullscreenRoundTrip`（横屏帧尺寸下真点两次全屏、再播一次，读 `getComputedStyle` 确认标题 `display:none`）
+  - `InjectedUITests.testLandscapePlaybackHidesTheTitleAndSurvivesAFullscreenRoundTrip`（横屏帧尺寸下真点两次全屏、再播一次，读 `getComputedStyle` 确认 `.p-label`、工具条和 `.page-head` 头栏都是 `display:none`）
   - `InjectedUITests.testStandardFullscreenRulesHideTheTitle`（`:fullscreen` 规则真的进了样式表：写错字符会被整条丢掉）
-- **修复版本**：0.1.10
+- **修复版本**：0.1.10（头栏那部分 0.1.11）
 - **验证边界**：三条都是注入层行为，可在 Node 夹具里完整验证；真机上仍需确认 1) iOS 16+ 的
   `requestGeometryUpdate` 之后 `resize/orientationchange` 的触发顺序，2) 刘海屏安全区下控制栏不被裁。
 
@@ -118,6 +125,24 @@ node --test --test-name-pattern='landscape playback goes immersive again' ios/Te
   证明不了系统分享面板里到底列出哪些播放器 App（取决于安装了哪些 App 及其声明的 UTI），
   也证明不了本机音频焦点确实交出去了。验收清单：装了 VLC/Infuse 的机器上点一次「外放」，
   应在系统播放器列表里看到它们；选中后手机不再外放出声；返回 App 后播放器控制栏仍可用。
+
+## REG-004 下载入口找不到（「弹幕」按钮换成「下载」）
+
+- **现象**：工具条那排是「显示设置 / 线路 / 弹幕 / 画中画 / 下一集」，看不到下载；而「外放」在 0.1.10 起
+  默认直接交给第三方播放器，下载只剩「长按外放 → 菜单里那一行」，用户找不到入口（原话：我都找不到在哪里下载了）。
+- **复现步骤**：进任意剧集播放页，扫一眼视频下方那排工具按钮；想下载时点「外放」——它直接弹系统播放器列表。
+- **根因**：0.1.10 为了「点一下就换播放器」把菜单收进了长按，下载作为菜单第三行被一起藏了；
+  工具条那排是站点模板渲染的，注入层只挂了控制栏，没有往工具条里加下载入口。
+- **修复**：按用户要求把「弹幕」那一格换成下载 —— 隐藏站点 `#dmBtn`（不删除节点），在同位置插入
+  `#ppToolDownload`：`下载本集` → `下载 43%` → `用播放器打开`（点一下就是交给播放器 App）。
+  未登录点它仍然只弹站点登录提示；下载中再点是取消（和菜单行为一致）。
+- **测试名**（Node 夹具）：
+  - `the toolbar download button takes the danmaku slot and drives the transfer`
+  - `the toolbar download button asks for login instead of transferring`
+- **测试名**（模拟器）：`InjectedUITests.testToolbarDownloadButtonReplacesTheDanmakuSlot`
+- **修复版本**：0.1.11
+- **验证边界**：按钮位置与状态文案已在模拟器真读 `getComputedStyle` 确认；真实传输进度仍依赖原生
+  `MediaDownloader`，靠真机看百分比是否跟着走。
 
 ## 模拟器验收记录
 
