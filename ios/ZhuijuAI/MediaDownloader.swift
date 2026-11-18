@@ -165,6 +165,8 @@ final class MediaDownloader: NSObject {
         onFinish: @escaping (Result<[String: Any], Failure>) -> Void
     ) {
         stop(silent: true)
+        /* 每次开始前以磁盘为准：进程可能刚被拉起，内存里的记录并不是最新的。 */
+        records = loadRecords()
         var flat: [String: String] = [:]
         for (key, value) in meta ?? [:] {
             if let text = value as? String { flat[key] = text }
@@ -202,6 +204,7 @@ final class MediaDownloader: NSObject {
 
     private static func stop(silent: Bool) {
         guard let id = activeId else { return }
+        if !records.contains(where: { $0.id == id }) { records = loadRecords() }
         activeId = nil
         activeTask?.cancel()
         activeTask = nil
@@ -313,6 +316,7 @@ final class MediaDownloader: NSObject {
     }
 
     private static func update(_ id: String, force: Bool = true, _ mutate: (inout Record) -> Void) {
+        if !records.contains(where: { $0.id == id }) { records = loadRecords() }
         guard let index = records.firstIndex(where: { $0.id == id }) else { return }
         mutate(&records[index])
         records[index].updatedAt = Date().timeIntervalSince1970

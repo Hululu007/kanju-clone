@@ -66,28 +66,45 @@ final class DownloadBackgroundTests: XCTestCase {
         XCTAssertEqual(record?["url"] as? String, sampleURL.absoluteString)
     }
 
-    func testCompletedDownloadIsRecordedAsDoneWithTheRealFile() {
+    /// 收尾链路：真实临时文件 + 真实的「移进沙盒 / 记大小 / 落盘 / 只回调一次」。
+    /// 不依赖网络，所以模拟器里也稳定；后台会话「锁屏继续传」那一半只能真机验收。
+    func testCompletedDownloadIsMovedIntoTheSandboxAndRecordedAsDone() throws {
+        let downloader = MediaDownloader()
         let done = expectation(description: "download finished")
         var failure: String?
         var calls = 0
-        downloader.start(id: "bg-2", url: sampleURL, name: "bg-2.mp4", onProgress: { _, _ in }, onFinish: { result in
+        var payload: [String: Any]?
+        downloader.start(id: "bg-2", url: URL(string: "https://media.invalid/19.mp4")!, name: "bg-2.mp4", onProgress: { _, _ in }, onFinish: { result in
             calls += 1
-            if case .failure(let error) = result { failure = error.message }
+            switch result {
+            case .success(let value): payload = value
+            case .failure(let error): failure = error.message
+            }
             done.fulfill()
         })
-        wait(for: [done], timeout: 60)
-        XCTAssertNil(failure, "本地测试服务器上的样例文件必须能下完：\(failure ?? "")")
+
+        let source = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("bg-2-source.mp4")
+        try Data(repeating: 7, count: 10).write(to: source)
+        let session = URLSession.shared
+        let task = session.downloadTask(with: sampleURL)
+        task.taskDescription = "bg-2"
+        downloader.urlSession(session, downloadTask: task, didWriteData: 10, totalBytesWritten: 10, totalBytesExpectedToWrite: 10)
+        downloader.urlSession(session, downloadTask: task, didFinishDownloadingTo: source)
+        downloader.urlSession(session, task: task, didCompleteWithError: nil)
+
+        wait(for: [done], timeout: 5)
+        XCTAssertNil(failure, "收尾链路不该失败：\(failure ?? "")")
+        XCTAssertEqual(calls, 1, "同一条任务的完成回调只能跑一次")
         let record = storedRecord(id: "bg-2")
         XCTAssertEqual(record?["status"] as? String, "done", "完成态要落盘，否则回到 App 看不到结果：\(storedRecords())")
-        let path = record?["path"] as? String ?? ""
+        let path = try XCTUnwrap(record?["path"] as? String)
         XCTAssertTrue(FileManager.default.fileExists(atPath: path), "完成的文件必须真的在沙盒里：\(path)")
+        XCTAssertEqual((record?["size"] as? NSNumber)?.int64Value, 10, "大小要按真实文件记")
+        XCTAssertEqual(payload?["path"] as? String, path)
 
-        /* 重复回调不能再交一次结果（后台会话可能把同一条任务交回来两次） */
-        let settled = expectation(description: "settled")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { settled.fulfill() }
-        wait(for: [settled], timeout: 5)
-        XCTAssertEqual(calls, 1, "同一条任务的完成回调只能跑一次")
-        XCTAssertEqual(storedRecord(id: "bg-2")?["status"] as? String, "done")
+        /* 交回网页一次就够：事件只投一次 */
+        XCTAssertEqual(downloader.eventsForPage().first?["event"] as? String, "done")
+        XCTAssertTrue(downloader.eventsForPage().isEmpty, "终态不能反复交给网页")
     }
 
     func testCancelledDownloadIsRecordedAsCancelledNotDone() {

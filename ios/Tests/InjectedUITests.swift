@@ -514,10 +514,12 @@ final class InjectedUITests: XCTestCase, WKNavigationDelegate {
         XCTAssertEqual(autoResult["hidden"] as? Bool, true, "播放中几秒不动，控制栏必须自己收起：\(autoText)")
         XCTAssertEqual(autoResult["bottomInPlayer"] as? Bool, true, "自动收起后画面上不能留任何遮罩：\(autoText)")
 
-        /* 退出全屏回到页内：控制栏要回来，否则连退出/换集都点不到 */
+        /* 退出全屏回到页内：控制栏要回来，否则连退出/换集都点不到。
+           控制栏有 0.18s 的淡入过渡：等它走完再读计算值，否则读到的是过渡起点。 */
+        _ = try await javaScript("document.getElementById('ppFull').click(); 'exited'")
+        try await Task.sleep(nanoseconds: 500_000_000)
         let exited = try await javaScript("""
         (function () {
-          document.getElementById('ppFull').click();
           var style = getComputedStyle(document.getElementById('ppCtrl'));
           return JSON.stringify({
             immersive: document.documentElement.hasAttribute('data-ios-immersive'),
