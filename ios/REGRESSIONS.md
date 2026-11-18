@@ -400,6 +400,44 @@ node --test --test-name-pattern='landscape playback goes immersive again' ios/Te
 - **验证边界**：模拟器能证明 `object-fit` 真落到 video 的计算样式、真 App 里三档各截一张；
   4:3 / 2.35:1 / 竖屏片源在真机上的观感与刘海安全区不被裁仍需肉眼验收。
 
+## REG-012 暂停后立刻继续，旧任务的续传数据会写进新任务
+
+- **现象**：下载中先暂停、马上点继续，队列看起来在跑，但下一次续传会拿错数据：
+  要么进度跳回旧任务的位置，要么直接失败；暂停后改成取消时，晚到的回调还会把记录改回
+  「暂停」并留下续传数据。
+- **复现步骤**：
+  1. 选一集开始下载（要真的跑起来、有已收字节）。
+  2. 点「暂停整部剧」，立刻点「继续下载」（中间不留间隔）。
+  3. 看设置里的下载列表：这条记录的 `resumeData` 属于已经被取消的旧任务，
+     `taskIdentifier` 已经是新任务。
+- **根因**（`ios/ZhuijuAI/MediaDownloader.swift`）：旧实现是
+  `task.cancel(byProducingResumeData:)` 的回调里直接
+  `update(id) { $0.resumeData = data.base64EncodedString() }`——
+  既不核对当前是否还是「暂停」状态，也不核对回调属于哪一条任务。用户连点时新任务
+  已经建好，旧回调后到，于是把旧任务的续传数据写进了新记录。
+- **修复**：
+  - 每条记录带 `generation`，每次真正 `downloadTask.resume()` 时 +1。
+  - 暂停时捕获当前 `generation`，回调统一切回主队列，交给 `storeResumeData`：
+    必须同时满足「状态还是 paused」且「generation 没变」才落盘，否则整条丢弃。
+  - 系统没给 resumeData（片源不支持 Range / 数据为空）时保持 paused、`resumeData` 为空，
+    继续时从 0 重下，进度如实归零，不伪造续传。
+- **测试名**（模拟器，真实后台 task + 进程外受控慢速源）：
+  - `DownloadQueueTests.testPauseThenImmediateResumeNeverWritesTheOldTasksResumeDataIntoTheNewTask`
+  - `DownloadQueueTests.testPauseAndResumeWithoutResumeDataStillRestartsFromZeroAndNeverStalls`
+  - `DownloadQueueTests.testRepeatedPauseAndResumeKeepsOneRecordPerEpisodeAndNeverExceedsTheLimit`
+  - `DownloadQueueTests.testCancelWhileThePauseCallbackIsStillPendingStaysCancelled`
+- **测试环境（0.1.14 第 2 轮修的）**：受控片源原来在测试宿主进程里用 `NWListener` 起，
+  iOS 14+ 的本地网络隐私会拦掉外部对 App 自身监听 socket 的入站连接——日志里就是
+  `nw_listener_socket_inbox_create_socket setsockopt SO_NECP_LISTENUUID failed` 加 20 秒
+  `received=0`，服务端连 GET 都没收到。现在改由 CI 在进程外启动
+  `ios/Tests/Fixtures/controlled_source.py`（支持 Range，先发 64KB 再每 0.5 秒吐 8KB；
+  `/norange-*.mp4` 不提供 Range），传输照旧由系统的 `nsurlsessiond` 后台会话执行。
+  迟到回调的顺序由 `#if DEBUG` 的 `MediaDownloader.testResumeDataCallbackDelay` 控制，
+  Release 不编译这段，产品规则没放宽。
+- **修复版本**：0.1.14（build 15）
+- **验证边界**：模拟器能证明状态机在真实传输上的行为；真机上长时间暂停、系统杀掉 App
+  后再续传仍要肉眼验收。
+
 ## 模拟器验收记录
 
 `InjectedUITests` 在 GitHub Actions 的 `macos-15` + iOS 模拟器上跑（`ios-unsigned.yml` 的

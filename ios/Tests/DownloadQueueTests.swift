@@ -342,20 +342,43 @@ extension DownloadQueueTests {
     /// `cancel(byProducingResumeData:)`，用户立刻点继续 → 新任务已经建好，
     /// 旧任务的回调随后才回来。旧实现会把旧任务的 resumeData 写进这条**新**记录，
     /// 下次续传就会拿着错的数据去接。修复后：回调必须核对状态 + 任务身份（generation）。
+    ///
+    /// 分两段，因为竞态断言只在前半段成立时才有意义：
+    /// 1. 先证明这个受控源真的能给出 resumeData（否则旧实现的 `guard let data` 直接早退，
+    ///    两种实现看起来一样，红绿证据就成了假的）；
+    /// 2. 再做「暂停后立刻继续」的竞态。
     func testPauseThenImmediateResumeNeverWritesTheOldTasksResumeDataIntoTheNewTask() throws {
         try requireControlledSource()
         defer { setPendingCallbackDelay(0) }
         let downloader = MediaDownloader()
         startRace(downloader, id: "race-stale", path: "stall-stale.mp4")
         waitForRealBytes("race-stale")
-        let firstTask = taskIdentifier("race-stale")
 
-        /* 用户连点：先暂停，立刻继续（旧任务的 cancel 回调被推迟，必然晚于新任务） */
-        setPendingCallbackDelay(1.0)
+        /* 第一段：真暂停一次，必须拿到真实 resumeData（这是这一段的关键前提） */
+        setPendingCallbackDelay(0)
         downloader.pause(showId: "race")
         XCTAssertEqual(status("race-stale"), "paused", "暂停要先落成 paused")
+        let gotResumeData = waitUntil(timeout: 25) {
+            (self.saved("race-stale")?["resumeData"] as? String)?.isEmpty == false
+        }
+        XCTAssertTrue(gotResumeData,
+                      "受控源没有产生真实 resumeData（后台会话没给续传数据），竞态断言无从谈起："
+                      + "\(String(describing: saved("race-stale")))")
+        guard gotResumeData else { return }
+
         downloader.resume(showId: "race")
-        XCTAssertTrue(waitUntil(timeout: 10) { self.status("race-stale") != "paused" },
+        XCTAssertTrue(waitUntil(timeout: 20) { self.status("race-stale") == "running" },
+                      "从 resumeData 继续之后任务没有跑起来：\(String(describing: saved("race-stale")))")
+        let resumedTask = taskIdentifier("race-stale")
+        XCTAssertGreaterThan(resumedTask, 0, "继续后必须有真实任务：\(String(describing: saved("race-stale")))")
+        XCTAssertTrue(waitUntil { self.received("race-stale") > 0 }, "继续后的任务没有收到字节")
+
+        /* 第二段：真正的竞态——暂停后立刻继续，旧任务的回调被推迟到新任务建好之后才回来 */
+        setPendingCallbackDelay(1.0)
+        downloader.pause(showId: "race")
+        XCTAssertEqual(status("race-stale"), "paused", "第二轮暂停要先落成 paused")
+        downloader.resume(showId: "race")
+        XCTAssertTrue(waitUntil(timeout: 15) { self.status("race-stale") != "paused" },
                       "继续之后不能还停在暂停：\(String(describing: saved("race-stale")))")
 
         /* 给旧任务的异步回调足够时间回来（它必须被丢弃） */
@@ -366,7 +389,7 @@ extension DownloadQueueTests {
         XCTAssertNotEqual(record?["status"] as? String, "paused", "队列不能停在暂停：\(String(describing: record))")
         let secondTask = taskIdentifier("race-stale")
         XCTAssertGreaterThan(secondTask, 0, "继续后必须有真实任务：\(String(describing: record))")
-        XCTAssertNotEqual(secondTask, firstTask, "继续后应该是一条新任务（旧任务已取消）")
+        XCTAssertNotEqual(secondTask, resumedTask, "继续后应该是一条新任务（旧任务已取消）")
         XCTAssertLessThanOrEqual(runningCount(), MediaDownloader.maxConcurrent, "并发不许超过上限")
         downloader.cancel(silent: true)
     }
