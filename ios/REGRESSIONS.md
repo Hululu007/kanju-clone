@@ -434,9 +434,19 @@ node --test --test-name-pattern='landscape playback goes immersive again' ios/Te
   `/norange-*.mp4` 不提供 Range），传输照旧由系统的 `nsurlsessiond` 后台会话执行。
   迟到回调的顺序由 `#if DEBUG` 的 `MediaDownloader.testResumeDataCallbackDelay` 控制，
   Release 不编译这段，产品规则没放宽。
+- **验证记录**（0.1.14 第 2 轮）：
+  - 红（旧 `storeResumeData`，测试不变）：[run44287326899](https://github.com/kenzhao11/kanju-clone/actions/runs/44287326899)
+    —— `testALateResumeDataPayloadFromAnOlderTaskIsAlwaysDiscarded` 两条断言红：
+    generation 3 的 resumeData 被写进 generation 4 的记录、取消后的记录还留着 resumeData。
+  - 绿（本修复）：[run44290938803](https://github.com/kenzhao11/kanju-clone/actions/runs/44290938803)
+    —— XCTest 62 条全绿、Node 89 项全绿；同一轮 UI 出包关卡另有两条待修（见下）。
+  - 受控源在 CI 里由 `ios/Tests/Fixtures/controlled_source.py` 提供，日志里有
+    `controlled-source health 200`，四条竞态测试都跑在真实后台传输上。
 - **修复版本**：0.1.14（build 15）
-- **验证边界**：模拟器能证明状态机在真实传输上的行为；真机上长时间暂停、系统杀掉 App
-  后再续传仍要肉眼验收。
+- **验证边界**：模拟器能证明状态机在真实传输上的行为；但模拟器里的后台会话**不保证**
+  第二次取消时给出 resumeData（实测 `testLastResumeDataBytes = -1`），所以「有数据的旧任务
+  晚到」这条路径由确定性状态机测试钉住，真实传输那条只断言「没被污染」。真机上长时间暂停、
+  系统杀掉 App 后再续传仍要肉眼验收。
 
 ## 模拟器验收记录
 
