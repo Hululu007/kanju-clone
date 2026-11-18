@@ -1,0 +1,10 @@
+{
+  "name": "阿噗影视",
+  "short_name": "阿噗影视",
+  "lang": "zh-CN",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#0b1f2b",
+  "theme_color": "#0b1f2b"
+}
