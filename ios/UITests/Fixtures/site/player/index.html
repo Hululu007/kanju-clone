@@ -30,8 +30,12 @@
     color: #9fb4bf; font-size: 12px; }
   .detail-info { padding: 8px 12px; }
   .detail-info h1 { margin: 0; font-size: 17px; }
-  .ep-grid { display: flex; flex-wrap: wrap; gap: 8px; padding: 10px 12px 24px; }
-  .ep { appearance: none; border: 1px solid rgba(255,255,255,.16); background: rgba(255,255,255,.05);
+  .ep-head { display: flex; align-items: center; gap: 10px; padding: 12px 12px 0; }
+  .ep-title { flex: 1; margin: 0; font-size: 15px; font-weight: 700; }
+  .ep-total { font-size: 12px; font-weight: 400; color: #9fb4bf; }
+  .cast-btn { appearance: none; border: 1px solid rgba(255,255,255,.18); background: rgba(255,255,255,.06);
+    color: #e8f1f5; font-size: 12px; font-weight: 600; padding: 8px 12px; border-radius: 9px; }
+  .ep-grid { display: flex; flex-wrap: wrap; gap: 8px; padding: 10px 12px 24px; }  .ep { appearance: none; border: 1px solid rgba(255,255,255,.16); background: rgba(255,255,255,.05);
     color: #e8f1f5; font-size: 12px; padding: 9px 12px; border-radius: 9px; }
   .ep.on { background: rgba(22,224,157,.2); color: #16e09d; border-color: rgba(22,224,157,.5); }
   .tabbar { position: fixed; left: 0; right: 0; bottom: 0; height: 52px; display: flex;
@@ -61,6 +65,11 @@
   <div class="line-bar" id="lineBar" hidden></div>
   <p class="pp-hint" id="playHint">点「开始播放测试片」播放这一集</p>
   <div class="detail-info"><h1>测试剧</h1></div>
+  <!-- 站点播放页里，选集区标题旁边就是那个投屏入口：真机上它在折叠线以上，很显眼 -->
+  <div class="ep-head">
+    <h2 class="ep-title">选集 <span class="ep-total">全 5 集</span></h2>
+    <button class="cast-btn" id="castBtn" type="button" data-action="cast" aria-label="投屏到电视">投屏</button>
+  </div>
   <div class="ep-grid" id="epGrid">
     <button class="ep on" type="button" data-ep="19">第19集</button>
     <button class="ep" type="button" data-ep="20">第20集</button>
