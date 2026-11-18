@@ -44,13 +44,22 @@ final class InjectedUITests: XCTestCase, WKNavigationDelegate {
     }
 
     /// 播放页 + 首页共用的最小骨架：注入层要挂的节点全都在，和站点模板同名同 class。
+    /// 外面那层 `.main` 和它的内联样式照抄站点的移动端布局（顶栏 60px + 从它下面开始的
+    /// 滚动容器）：真机上横屏全屏顶部那条 60px 深灰带就出在这里。
     private static let fixtureHTML = """
-    <html><head><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+    <html><head><meta name="viewport" content="width=device-width,initial-scale=1">
+    <style>
+      html, body { margin: 0; padding: 0; background: #07131b; }
+      .main { height: calc(100vh - 60px); margin-top: 60px; overflow-y: auto; overflow-x: hidden; -webkit-overflow-scrolling: touch; }
+      .page-head { position: fixed; top: 0; left: 0; right: 0; height: 60px; z-index: 40; background: linear-gradient(180deg, rgba(10,20,28,.92), rgba(10,20,28,.6)); }
+    </style>
+    </head>
     <body>
+    <div class="main">
       <button class="icon-btn" type="button" data-action="settings" aria-label="设置">设置</button>
       <header class="page-head">
         <a class="ph-back" href="/" aria-label="返回">返回</a>
-        <h1 class="ph-title">百日谎言</h1>
+        <h1 class="ph-title">测试剧</h1>
         <button class="ph-menu" type="button" aria-label="打开菜单">菜单</button>
       </header>
       <section class="player" id="player">
@@ -67,7 +76,8 @@ final class InjectedUITests: XCTestCase, WKNavigationDelegate {
       <div class="line-bar" id="lineBar" hidden></div>
       <p class="pp-hint" id="playHint">点播放即可观看</p>
       <nav class="tabbar"><button class="tab" type="button">首页</button></nav>
-      <button class="ep on" type="button" data-ep="18">第19集</button>
+      <div class="ep-grid" id="epGrid"><button class="ep on" type="button" data-ep="18">第19集</button></div>
+    </div>
     </body></html>
     """
 
@@ -418,7 +428,218 @@ final class InjectedUITests: XCTestCase, WKNavigationDelegate {
         XCTAssertEqual(result["menuOpenAfterOptOut"] as? Bool, true, "关掉默认后「外放」回到菜单：\(text)")
     }
 
+    // MARK: - REG-005 全屏只剩画面
+
+    /// 横屏全屏时画面上方那条 60px 深灰带（真机截图里完全挡住画面）。
+    /// 站点把滚动容器写成 `.main{margin-top:60px;height:calc(100vh - 60px)}`，
+    /// 注入层只把 `#player` 设成 fixed 时，WebKit 会拿这个滚动容器当参照，
+    /// 于是播放器少了顶部 60px，漏出页面背景。这里量的是真实几何值。
+    func testFullscreenCoversTheWholeScreenAndHidesItsControls() async throws {
+        let mounted = try await awaitValue("!!document.getElementById('ppFull') && !!document.getElementById('ppCtrl')")
+        XCTAssertTrue(mounted, "注入层没挂上控制栏，这条用例就失去了意义")
+        let raw = try await javaScript("""
+        (function () {
+          var video = document.getElementById('video');
+          var player = document.getElementById('player');
+          var main = document.querySelector('.main');
+          var full = document.getElementById('ppFull');
+          if (!full || !main) return 'missing:' + [!!full, !!main].join(',');
+          /* 全屏里“正在播放”是收起控制栏的前提，这里把暂停态钉住 */
+          window.__paused = false;
+          Object.defineProperty(video, 'paused', { configurable: true, get: function () { return window.__paused; } });
+          video.dispatchEvent(new Event('play', { bubbles: true }));
+          full.click();
+          var shot = function (tag) {
+            var p = player.getBoundingClientRect();
+            var m = main.getBoundingClientRect();
+            var top = document.elementFromPoint(window.innerWidth / 2, 8);
+            var bottom = document.elementFromPoint(window.innerWidth / 2, window.innerHeight - 8);
+            var bar = document.getElementById('ppCtrl');
+            var style = getComputedStyle(bar);
+            return {
+              tag: tag,
+              immersive: document.documentElement.hasAttribute('data-ios-immersive'),
+              player: [Math.round(p.left), Math.round(p.top), Math.round(p.width), Math.round(p.height)],
+              main: [Math.round(m.left), Math.round(m.top), Math.round(m.width), Math.round(m.height)],
+              topInPlayer: !!(top && (top === player || player.contains(top))),
+              topTag: top ? (top.id || top.tagName) : 'none',
+              bottomInPlayer: !!(bottom && (bottom === player || player.contains(bottom))),
+              barHidden: style.visibility === 'hidden' || Number(style.opacity) === 0
+            };
+          };
+          var log = [shot('fullscreen')];
+          video.click();
+          log.push(shot('tapped'));
+          video.click();
+          log.push(shot('tappedTwice'));
+          return JSON.stringify(log);
+        })();
+        """)
+        let text = try XCTUnwrap(raw as? String)
+        let shots = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(text.utf8)) as? [[String: Any]])
+        XCTAssertEqual(shots.count, 3, "三次测量的返回不对：\(text)")
+
+        let fullscreen = shots[0]
+        XCTAssertEqual(fullscreen["immersive"] as? Bool, true, "点全屏要进沉浸态：\(text)")
+        XCTAssertEqual(rect(fullscreen["player"]), [0, 0, 844, 390], "全屏时播放器必须铺满整块屏幕，顶部不能少 60px：\(text)")
+        XCTAssertEqual(rect(fullscreen["main"]), [0, 0, 844, 390], "注入层必须把站点那个从 60px 开始的滚动容器也铺满（它就是顶部深灰带的来源）：\(text)")
+        XCTAssertEqual(fullscreen["topInPlayer"] as? Bool, true, "屏幕最上面一行必须已经是视频，不能是页面背景/顶栏：\(text) top=\(fullscreen["topTag"] ?? "")")
+        XCTAssertEqual(fullscreen["barHidden"] as? Bool, true, "刚进全屏、正在播放时控制栏就该收起，不留遮罩：\(text)")
+
+        let tapped = shots[1]
+        XCTAssertEqual(tapped["barHidden"] as? Bool, false, "点一下屏幕要把控制栏叫出来：\(text)")
+        XCTAssertEqual(tapped["topInPlayer"] as? Bool, true, "叫出控制栏后画面顶部依然不能被遮住：\(text)")
+
+        let tappedTwice = shots[2]
+        XCTAssertEqual(tappedTwice["barHidden"] as? Bool, true, "再点一下要收起，不等计时器：\(text)")
+        XCTAssertEqual(tappedTwice["bottomInPlayer"] as? Bool, true, "收起后底下也不能留一条底栏或渐变：\(text)")
+
+        /* 点开控制栏后不再动手，几秒后它要自己消失 */
+        _ = try await javaScript("document.getElementById('video').click(); 'tapped'")
+        try await Task.sleep(nanoseconds: 3_600_000_000)
+        let auto = try await javaScript("""
+        (function () {
+          var bar = document.getElementById('ppCtrl');
+          var style = getComputedStyle(bar);
+          var bottom = document.elementFromPoint(window.innerWidth / 2, window.innerHeight - 8);
+          var player = document.getElementById('player');
+          return JSON.stringify({
+            hidden: style.visibility === 'hidden' || Number(style.opacity) === 0,
+            bottomInPlayer: !!(bottom && (bottom === player || player.contains(bottom)))
+          });
+        })();
+        """)
+        let autoText = try XCTUnwrap(auto as? String)
+        let autoResult = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(autoText.utf8)) as? [String: Any])
+        XCTAssertEqual(autoResult["hidden"] as? Bool, true, "播放中几秒不动，控制栏必须自己收起：\(autoText)")
+        XCTAssertEqual(autoResult["bottomInPlayer"] as? Bool, true, "自动收起后画面上不能留任何遮罩：\(autoText)")
+
+        /* 退出全屏回到页内：控制栏要回来，否则连退出/换集都点不到 */
+        let exited = try await javaScript("""
+        (function () {
+          document.getElementById('ppFull').click();
+          var style = getComputedStyle(document.getElementById('ppCtrl'));
+          return JSON.stringify({
+            immersive: document.documentElement.hasAttribute('data-ios-immersive'),
+            visible: !(style.visibility === 'hidden' || Number(style.opacity) === 0)
+          });
+        })();
+        """)
+        let exitText = try XCTUnwrap(exited as? String)
+        let exitResult = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(exitText.utf8)) as? [String: Any])
+        XCTAssertEqual(exitResult["immersive"] as? Bool, false, "退出后要回到页内布局：\(exitText)")
+        XCTAssertEqual(exitResult["visible"] as? Bool, true, "页内布局里控制栏必须在：\(exitText)")
+    }
+
+    // MARK: - REG-006 设置里的下载片库
+
+    /// 设置里要能看清「下载了哪些剧、每部下了哪几集、共几集、在下的到哪了」。
+    /// 总集数未知时只写「已下载 N 集」——不得编一个分母。
+    func testSettingsSheetListsDownloadedShowsAndTheRunningTask() async throws {
+        let raw = try await javaScript("""
+        (function () {
+          localStorage.setItem('kj-ios-downloads', JSON.stringify({ shows: [
+            { id: 'show-a', title: '百日谎言', cover: 'https://zhuiju.dpdns.org/posters/a.jpg', total: 12,
+              eps: [{ key: '18', label: '第19集', name: '追剧AI_第19集.mp4', path: '/tmp/a19.mp4', size: 1, at: 2 },
+                    { key: '19', label: '第20集', name: '追剧AI_第20集.mp4', path: '/tmp/a20.mp4', size: 1, at: 3 }] },
+            { id: 'movie-b', title: '某部电影', cover: '', total: 0,
+              eps: [{ key: '0', label: '正片', name: '追剧AI_正片.mp4', path: '/tmp/b.mp4', size: 2, at: 1 }] }
+          ] }));
+          window.__zhuijuDownload({ id: 'dl1', event: 'progress', received: 42, total: 100 });
+          document.querySelector('[data-action="settings"]').click();
+          var library = document.getElementById('iosDownloadLibrary');
+          var running = document.getElementById('iosDlRunning');
+          if (!library || !running) return 'missing-library';
+          var items = document.getElementById('iosDlShows').children;
+          var first = items[0];
+          var second = items[1];
+          var cover = first.querySelector('.ios-dl-cover');
+          var chips = first.querySelector('.ios-dl-eps').children;
+          var movieCover = second.querySelector('.ios-dl-cover');
+          return JSON.stringify({
+            visible: getComputedStyle(library).display !== 'none',
+            inSheet: document.getElementById('iosSettingsBody').contains(library),
+            count: items.length,
+            title: first.querySelector('.ios-dl-name').textContent,
+            cover: cover ? cover.getAttribute('src') : null,
+            coverAlt: cover ? cover.alt : null,
+            counter: first.querySelector('.ios-dl-count').textContent,
+            chips: [].map.call(chips, function (chip) { return chip.textContent; }),
+            movieCover: movieCover ? 'has' : 'none',
+            movieCounter: second.querySelector('.ios-dl-count').textContent,
+            runningVisible: getComputedStyle(running).display !== 'none',
+            runningText: running.textContent
+          });
+        })();
+        """)
+        let text = try XCTUnwrap(raw as? String)
+        let result = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any])
+        XCTAssertEqual(result["visible"] as? Bool, true, "设置面板里要能看到下载片库：\(text)")
+        XCTAssertEqual(result["inSheet"] as? Bool, true, "片库要在设置面板里：\(text)")
+        XCTAssertEqual(result["count"] as? Int, 2, "两部片子各一条：\(text)")
+        XCTAssertEqual(result["title"] as? String, "百日谎言")
+        XCTAssertEqual(result["cover"] as? String, "https://zhuiju.dpdns.org/posters/a.jpg", "片名旁边要有封面：\(text)")
+        XCTAssertEqual(result["coverAlt"] as? String, "百日谎言")
+        XCTAssertEqual(result["counter"] as? String, "已下载 2/12 集")
+        XCTAssertEqual(result["chips"] as? [String], ["第19集", "第20集"], "要列清楚下了哪几集：\(text)")
+        XCTAssertEqual(result["movieCover"] as? String, "none", "没有封面就不摆一张假图：\(text)")
+        XCTAssertEqual(result["movieCounter"] as? String, "已下载 1 集", "总集数未知时不许编分母：\(text)")
+        XCTAssertEqual(result["runningVisible"] as? Bool, true, "正在下载的那一集也要列在这里：\(text)")
+        let runningText = try XCTUnwrap(result["runningText"] as? String)
+        XCTAssertTrue(runningText.contains("42%"), "下载中的进度要实时显示：\(text)")
+
+        /* 下载完成：这一集要落到片库里，不需要用户手动记。
+           先收尾 setUp 里预置的那条任务，再走一次真实开始→完成链路。 */
+        let afterDone = try await javaScript("""
+        (function () {
+          window.__zhuijuDownload({ id: 'dl1', event: 'cancelled' });
+          document.getElementById('video').src = 'https://media.example/19.mp4';
+          var button = document.getElementById('ppToolDownload');
+          if (!button) return 'missing-toolbar';
+          button.click();
+          var started = JSON.parse(localStorage.getItem('kj-ios-download') || '{}');
+          return JSON.stringify({ id: started.id || '', busy: !!started.busy });
+        })();
+        """)
+        let startText = try XCTUnwrap(afterDone as? String)
+        let start = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(startText.utf8)) as? [String: Any])
+        let downloadId = try XCTUnwrap(start["id"] as? String, "点工具条上的下载要真发出一条任务：\(startText)")
+        XCTAssertEqual(start["busy"] as? Bool, true)
+
+        let finished = try await javaScript("""
+        (function () {
+          window.__zhuijuDownload({ id: '\(downloadId)', event: 'done', path: '/tmp/追剧AI_第19集.mp4', name: '追剧AI_第19集.mp4', size: 10485760 });
+          var saved = JSON.parse(localStorage.getItem('kj-ios-downloads') || '{}');
+          var shows = saved.shows || [];
+          var added = null;
+          for (var i = 0; i < shows.length; i++) { if (shows[i].title === '测试剧') added = shows[i]; }
+          var items = document.getElementById('iosDlShows').children;
+          var firstItem = items[0];
+          return JSON.stringify({
+            added: !!added,
+            addedTotal: added ? added.total : -1,
+            addedLabels: added ? [].map.call(added.eps, function (ep) { return ep.label; }) : [],
+            firstTitle: firstItem.querySelector('.ios-dl-name').textContent,
+            firstCounter: firstItem.querySelector('.ios-dl-count').textContent
+          });
+        })();
+        """)
+        let doneText = try XCTUnwrap(finished as? String)
+        let done = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(doneText.utf8)) as? [String: Any])
+        XCTAssertEqual(done["added"] as? Bool, true, "下载完成后这一集要自动进片库：\(doneText)")
+        XCTAssertEqual(done["addedTotal"] as? Int, 1, "选集按钮数就是已知总集数：\(doneText)")
+        XCTAssertEqual(done["addedLabels"] as? [String], ["第19集"])
+        XCTAssertEqual(done["firstTitle"] as? String, "测试剧", "刚下完的剧排在最前面：\(doneText)")
+        XCTAssertEqual(done["firstCounter"] as? String, "已下载 1/1 集")
+    }
+
     // MARK: - 桥接工具
+
+    /// JSONSerialization 给的矩形是 NSNumber 数组：拆成 [Int] 再比，避免桥接不稳。
+    private func rect(_ value: Any?) -> [Int]? {
+        guard let list = value as? [Any] else { return nil }
+        return list.compactMap { ($0 as? NSNumber)?.intValue }
+    }
 
     /// 等注入层发到 `iosPlayer` 通道的消息（原生回传是异步的，不能立刻断言）。
     private func awaitPlayerMessage(timeout: Double = 5) async throws -> [String: Any] {
