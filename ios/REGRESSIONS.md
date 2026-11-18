@@ -12,6 +12,14 @@ node --test ios/Tests/bootstrap.test.mjs
 node --test --test-name-pattern='landscape playback goes immersive again' ios/Tests/bootstrap.test.mjs
 ```
 
+两层验证：
+
+| 层 | 位置 | 能证明什么 |
+| --- | --- | --- |
+| Node 夹具 | `ios/Tests/bootstrap.test.mjs` | 逻辑分支、状态机、消息内容（假 DOM，跑得最快） |
+| 模拟器 WKWebView | `ios/Tests/InjectedUITests.swift`，CI `ios-unsigned.yml` | 真 DOM、真 CSS 计算值、真点击链路、真原生消息通道（不联网、不需签名、不需站点密码） |
+| 真机 | 见每条条目的「验证边界」 | 真实片源解码、后台音频、画中画、系统播放器列表、音频焦点 |
+
 ## REG-001 横屏全屏里影视标题不消失
 
 - **现象**：横屏全屏播放时，画面上方仍压着「片名 · 第N集」和整条页眉工具条；必须反复点两次全屏才偶尔消失。
@@ -33,10 +41,13 @@ node --test --test-name-pattern='landscape playback goes immersive again' ios/Te
     `document.fullscreenElement` 计入沉浸判断）。
   - 追加 `#player:fullscreen .p-label` / `:-webkit-full-screen` 与工具条、底栏、弹幕输入的兜底样式
     （两条分开写，不认识 `-webkit-` 别名内核不会整条丢弃）。
-- **测试名**：
+- **测试名**（Node 夹具）：
   - `landscape playback goes immersive again after a fullscreen round trip`
   - `rotating back to landscape during playback restores immersive mode`
   - `the standard fullscreen api hides the title and keeps immersion in sync`
+- **测试名**（模拟器，真 WKWebView）：
+  - `InjectedUITests.testLandscapePlaybackHidesTheTitleAndSurvivesAFullscreenRoundTrip`（横屏帧尺寸下真点两次全屏、再播一次，读 `getComputedStyle` 确认标题 `display:none`）
+  - `InjectedUITests.testStandardFullscreenRulesHideTheTitle`（`:fullscreen` 规则真的进了样式表：写错字符会被整条丢掉）
 - **修复版本**：0.1.10
 - **验证边界**：三条都是注入层行为，可在 Node 夹具里完整验证；真机上仍需确认 1) iOS 16+ 的
   `requestGeometryUpdate` 之后 `resize/orientationchange` 的触发顺序，2) 刘海屏安全区下控制栏不被裁。
@@ -62,12 +73,15 @@ node --test --test-name-pattern='landscape playback goes immersive again' ios/Te
     收起后回到播放器的「显示设置」，避免两份状态对不上。
   - 下载状态落 `localStorage['kj-ios-download']`（id / name / path / busy / percent / error），
     页面加载时恢复，原生回传的 `progress` / `done` / `failed` 事件按 id 继续接到新页面。
-- **测试名**：
+- **测试名**（Node 夹具）：
   - `the home page settings panel shows the download progress`
   - `a running download keeps reporting progress after going back home`
   - `the download block follows whichever settings panel is open`
   - `tapping the dimmed backdrop closes the settings panel`
   - `a burst of progress events never loses the finished state on disk`（写盘限流不能吞掉最后一次状态转变）
+- **测试名**（模拟器，真 WKWebView）：
+  - `InjectedUITests.testSettingsSheetShowsTheRunningDownload`（点击顶栏设置 → 面板可见、进度块在面板里、42% → 55% → 完成，且完成状态已落盘）
+  - `InjectedUITests.testSettingsSheetCanBeClosedAndReopened`
 - **修复版本**：0.1.10
 - **验证边界**：进度事件的端到端链路仍要求真机/模拟器里真跑 `MediaDownloader`（Node 夹具只能模拟回传）。
 
@@ -89,12 +103,16 @@ node --test --test-name-pattern='landscape playback goes immersive again' ios/Te
   - 默认值 `kj-ios-ext-player`（未设置时视为开启）：点「外放」= 直接交接，一步到位；
     长按「外放」仍可打开完整菜单（复制/下载/分享），设置面板里的 `#iosExtToggle` 可切回「先开菜单」。
   - `playExternal()` / `shareLink()` / `openLocal()` 交接前先 `video.pause()`，避免交接后手机自己还在放。
-- **测试名**：
+- **测试名**（Node 夹具）：
   - `the cast button hands the episode to a third-party player in one tap by default`
   - `a long press on the cast button still opens the full menu`
   - `the cast menu always starts with the third-party player row`
   - `HLS lines can still be played by an external player even though they cannot be downloaded`
   - `the settings panel can switch the default player back to the app`
+- **测试名**（模拟器，真 WKWebView）：
+  - `InjectedUITests.testCastButtonHandsTheLinkToTheSystemPlayerInOneTap`（点一下就发出 `share` 消息、且先调了 `pause`）
+  - `InjectedUITests.testCastMenuLeadsWithTheExternalPlayerRow`（长按才开菜单，第一行是第三方播放器）
+  - `InjectedUITests.testSettingsSheetCanTurnTheOneTapHandoffOff`
 - **修复版本**：0.1.10
 - **验证边界**：**必须真机验收**。模拟器和 Node 夹具只能证明「直链按 `share` 动作交给了原生层」，
   证明不了系统分享面板里到底列出哪些播放器 App（取决于安装了哪些 App 及其声明的 UTI），
