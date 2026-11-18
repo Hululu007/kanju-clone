@@ -35,11 +35,12 @@ final class DownloadQueueTests: XCTestCase {
         received: Int64 = 0,
         total: Int64 = 0,
         at: Double = 0,
-        path: String = ""
+        path: String = "",
+        url: String? = nil
     ) -> MediaDownloader.Record {
         var record = MediaDownloader.Record(
             id: id,
-            url: "https://media.example/\(id).mp4",
+            url: url ?? "https://media.example/\(id).mp4",
             name: "\(id).mp4",
             title: "测试剧",
             ep: "第\(epKey)集",
@@ -204,10 +205,15 @@ final class DownloadQueueTests: XCTestCase {
     // MARK: - 重启恢复
 
     func testQueuedEpisodesAreScheduledAgainAfterARelaunch() throws {
+        /* 起始记录指向受控慢速源：重启后队列要真的把任务交给系统，
+           而不是拿一个不可达的域名去赌「失败得够慢」。 */
         try write([
-            record("q1", epKey: "1", status: "queued", at: 1),
-            record("q2", epKey: "2", status: "queued", at: 2),
-            record("q3", epKey: "3", status: "queued", at: 3),
+            record("q1", epKey: "1", status: "queued", at: 1,
+                   url: ControlledRaceSource.url("stall-relaunch-1.mp4").absoluteString),
+            record("q2", epKey: "2", status: "queued", at: 2,
+                   url: ControlledRaceSource.url("stall-relaunch-2.mp4").absoluteString),
+            record("q3", epKey: "3", status: "queued", at: 3,
+                   url: ControlledRaceSource.url("stall-relaunch-3.mp4").absoluteString),
         ])
         let downloader = MediaDownloader()
         let settled = expectation(description: "reconciled")
@@ -238,94 +244,26 @@ final class DownloadQueueTests: XCTestCase {
     }
 }
 
-// MARK: - REG-012 暂停 / 继续的异步竞态（真实运行 task + 可控回调顺序）
+// MARK: - REG-012 暂停 / 继续的异步竞态（真实后台 task + 进程外受控慢速源）
 
-/// 受控"慢速"片源：先回 200/206 + 一小段字节，然后**故意不再发送**。
-/// 这样 URLSession 的任务会稳定停在 running 且有已收字节（暂停时系统能给出真实
-/// resumeData），测试可以自己决定 pause / resume 的先后，不受公网速度影响。
-/// 这不是产品代码，只在测试目标里用。
-final class StallingMediaServer {
-    private let listener: NWListener
-    private let queue = DispatchQueue(label: "kanju.tests.stalling-server")
-    private let lock = NSLock()
-    private var connections: [NWConnection] = []
-    private let supportsRange: Bool
-    private let totalBytes = 2_000_000
-    private let firstChunk = 40_000
-
-    init(supportsRange: Bool) throws {
-        self.supportsRange = supportsRange
-        self.listener = try NWListener(using: .tcp, on: .any)
+/// 竞态测试的片源：CI 里由 `ios/Tests/Fixtures/controlled_source.py` 在**进程外**启动。
+///
+/// 为什么不在测试进程里起 NWListener：iOS 14+ 的本地网络隐私会拦掉外部对 App 自身
+/// 监听 socket 的入站连接（失败日志里就是紧跟 listener 启动的
+/// `nw_listener_socket_inbox_create_socket setsockopt SO_NECP_LISTENUUID failed`
+/// 加上 20 秒 received=0；同一后台会话连进程外的 python 源是正常的）。
+/// 源进程只负责喂真实字节，传输仍然是系统的后台会话在做。
+enum ControlledRaceSource {
+    static let port: UInt16 = 8766
+    static func url(_ name: String) -> URL {
+        URL(string: "http://127.0.0.1:\(port)/\(name)")!
     }
-
-    func start() throws -> UInt16 {
-        let ready = DispatchSemaphore(value: 0)
-        listener.stateUpdateHandler = { state in
-            switch state {
-            case .ready, .failed: ready.signal()
-            default: break
-            }
-        }
-        listener.newConnectionHandler = { [weak self] connection in
-            guard let self = self else { return }
-            connection.start(queue: self.queue)
-            self.lock.lock()
-            self.connections.append(connection)
-            self.lock.unlock()
-            self.serve(connection)
-        }
-        listener.start(queue: queue)
-        guard ready.wait(timeout: .now() + 10) == .success, let port = listener.port else {
-            throw NSError(domain: "StallingMediaServer", code: 1, userInfo: [NSLocalizedDescriptionKey: "受控源没起来"])
-        }
-        return port.rawValue
-    }
-
-    func stop() {
-        listener.cancel()
-        lock.lock()
-        let all = connections
-        connections = []
-        lock.unlock()
-        for connection in all { connection.cancel() }
-    }
-
-    private func serve(_ connection: NWConnection) {
-        connection.receive(minimumIncompleteLength: 1, maximumLength: 8192) { [weak self] data, _, _, error in
-            guard let self = self, error == nil, let data = data,
-                  let request = String(data: data, encoding: .utf8) else { return }
-            let start = self.rangeStart(in: request)
-            var header = "HTTP/1.1 \(start > 0 ? "206 Partial Content" : "200 OK")\r\n"
-            header += "Content-Type: video/mp4\r\n"
-            header += "Content-Length: \(self.totalBytes - start)\r\n"
-            if self.supportsRange {
-                header += "Accept-Ranges: bytes\r\n"
-                if start > 0 {
-                    header += "Content-Range: bytes \(start)-\(self.totalBytes - 1)/\(self.totalBytes)\r\n"
-                }
-            }
-            header += "Connection: keep-alive\r\n\r\n"
-            var payload = Data(header.utf8)
-            payload.append(Data(repeating: 7, count: self.firstChunk))
-            connection.send(content: payload, completion: .contentProcessed { _ in
-                /* 有意不再发送：任务保持 running，等测试决定 pause / resume / cancel */
-            })
-        }
-    }
-
-    private func rangeStart(in request: String) -> Int {
-        guard supportsRange else { return 0 }
-        for line in request.split(separator: "\r\n") where line.lowercased().hasPrefix("range:") {
-            guard let value = line.split(separator: "=").last,
-                  let first = value.split(separator: "-").first,
-                  let start = Int(first) else { return 0 }
-            return start
-        }
-        return 0
-    }
+    static var healthURL: URL { url("health") }
 }
 
 extension DownloadQueueTests {
+    private struct SourceUnavailable: Error {}
+
     private func waitUntil(timeout: Double = 20, _ condition: () -> Bool) -> Bool {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
@@ -345,10 +283,44 @@ extension DownloadQueueTests {
         return list.filter { ($0["status"] as? String) == "running" }.count
     }
 
-    private func startRace(_ downloader: MediaDownloader, id: String, port: UInt16) {
+    private func status(_ id: String) -> String {
+        (saved(id)?["status"] as? String) ?? ""
+    }
+
+    private func taskIdentifier(_ id: String) -> Int {
+        (saved(id)?["taskIdentifier"] as? NSNumber)?.intValue ?? 0
+    }
+
+    /// 受控源必须真的在跑：拿不到就明确失败，不用 skip 蒙混过去。
+    private func requireControlledSource() throws {
+        let sem = DispatchSemaphore(value: 0)
+        var reachable = false
+        var detail = "no response"
+        var request = URLRequest(url: ControlledRaceSource.healthURL)
+        request.timeoutInterval = 15
+        URLSession.shared.dataTask(with: request) { _, response, error in
+            if let error = error { detail = String(describing: error) }
+            reachable = (response as? HTTPURLResponse)?.statusCode == 200
+            sem.signal()
+        }.resume()
+        _ = sem.wait(timeout: .now() + 20)
+        guard reachable else {
+            XCTFail("受控竞态源 \(ControlledRaceSource.healthURL) 不可达"
+                    + "（CI 由 ios/Tests/Fixtures/controlled_source.py --port 8766 提供）：\(detail)")
+            throw SourceUnavailable()
+        }
+    }
+
+    /// 只有测试构建才有的投递延迟钩子：确定性地把「旧任务的取消回调」推到
+    /// resume/cancel 之后才执行，用来复现真实用户连点时的顺序。
+    private func setPendingCallbackDelay(_ value: TimeInterval) {
+        MediaDownloader.testResumeDataCallbackDelay = value
+    }
+
+    private func startRace(_ downloader: MediaDownloader, id: String, path: String) {
         downloader.start(
             id: id,
-            url: URL(string: "http://127.0.0.1:\(port)/\(id).mp4")!,
+            url: ControlledRaceSource.url(path),
             name: "\(id).mp4",
             meta: ["showId": "race", "epKey": "1", "epLabel": "第1集", "title": "测试剧"],
             onProgress: { _, _ in },
@@ -356,33 +328,43 @@ extension DownloadQueueTests {
         )
     }
 
+    /// 等真实后台任务收到第一批真实字节（拿到 resumeData 的前提）。
+    private func waitForRealBytes(_ id: String, file: StaticString = #filePath, line: UInt = #line) {
+        XCTAssertTrue(waitUntil { self.received(id) > 0 },
+                      "受控源没有把任务推进到有数据的 running 状态：\(String(describing: saved(id)))",
+                      file: file, line: line)
+        XCTAssertTrue(waitUntil { self.taskIdentifier(id) > 0 },
+                      "任务没有真实 taskIdentifier：\(String(describing: saved(id)))",
+                      file: file, line: line)
+    }
+
     /// 审核指出的核心竞态：pause 刚把状态改成 paused 并交给
     /// `cancel(byProducingResumeData:)`，用户立刻点继续 → 新任务已经建好，
     /// 旧任务的回调随后才回来。旧实现会把旧任务的 resumeData 写进这条**新**记录，
     /// 下次续传就会拿着错的数据去接。修复后：回调必须核对状态 + 任务身份（generation）。
     func testPauseThenImmediateResumeNeverWritesTheOldTasksResumeDataIntoTheNewTask() throws {
-        let server = try StallingMediaServer(supportsRange: true)
-        let port = try server.start()
-        defer { server.stop() }
+        try requireControlledSource()
+        defer { setPendingCallbackDelay(0) }
         let downloader = MediaDownloader()
-        startRace(downloader, id: "race-stale", port: port)
-        XCTAssertTrue(waitUntil { self.received("race-stale") > 0 },
-                      "受控源没有把任务推进到有数据的 running 状态：\(String(describing: saved("race-stale")))")
-        let firstTask = (saved("race-stale")?["taskIdentifier"] as? NSNumber)?.intValue ?? 0
+        startRace(downloader, id: "race-stale", path: "stall-stale.mp4")
+        waitForRealBytes("race-stale")
+        let firstTask = taskIdentifier("race-stale")
 
-        /* 用户连点：先暂停，立刻继续（旧任务的 cancel 回调还没回来） */
+        /* 用户连点：先暂停，立刻继续（旧任务的 cancel 回调被推迟，必然晚于新任务） */
+        setPendingCallbackDelay(1.0)
         downloader.pause(showId: "race")
+        XCTAssertEqual(status("race-stale"), "paused", "暂停要先落成 paused")
         downloader.resume(showId: "race")
-        XCTAssertTrue(waitUntil(timeout: 10) { (self.saved("race-stale")?["status"] as? String) != "paused" },
+        XCTAssertTrue(waitUntil(timeout: 10) { self.status("race-stale") != "paused" },
                       "继续之后不能还停在暂停：\(String(describing: saved("race-stale")))")
 
         /* 给旧任务的异步回调足够时间回来（它必须被丢弃） */
-        Thread.sleep(forTimeInterval: 1.5)
+        Thread.sleep(forTimeInterval: 2.5)
         let record = saved("race-stale")
         XCTAssertNil(record?["resumeData"] as? String,
                      "旧任务的 resumeData 不能写进已经重新开始的新任务：\(String(describing: record))")
         XCTAssertNotEqual(record?["status"] as? String, "paused", "队列不能停在暂停：\(String(describing: record))")
-        let secondTask = (record?["taskIdentifier"] as? NSNumber)?.intValue ?? 0
+        let secondTask = taskIdentifier("race-stale")
         XCTAssertGreaterThan(secondTask, 0, "继续后必须有真实任务：\(String(describing: record))")
         XCTAssertNotEqual(secondTask, firstTask, "继续后应该是一条新任务（旧任务已取消）")
         XCTAssertLessThanOrEqual(runningCount(), MediaDownloader.maxConcurrent, "并发不许超过上限")
@@ -392,22 +374,24 @@ extension DownloadQueueTests {
     /// 片源不支持续传（拿不到 resumeData）：暂停 + 立即继续也必须能继续跑，
     /// 不许停在 paused，也不许写一个假的 resumeData 或假进度。
     func testPauseAndResumeWithoutResumeDataStillRestartsFromZeroAndNeverStalls() throws {
-        let server = try StallingMediaServer(supportsRange: false)
-        let port = try server.start()
-        defer { server.stop() }
+        try requireControlledSource()
         let downloader = MediaDownloader()
-        startRace(downloader, id: "race-nodata", port: port)
-        XCTAssertTrue(waitUntil { self.received("race-nodata") > 0 },
-                      "受控源没有把任务推进到 running：\(String(describing: saved("race-nodata")))")
+        startRace(downloader, id: "race-nodata", path: "norange-nodata.mp4")
+        waitForRealBytes("race-nodata")
+        let firstTask = taskIdentifier("race-nodata")
 
         downloader.pause(showId: "race")
-        XCTAssertEqual(saved("race-nodata")?["status"] as? String, "paused", "暂停要先落成 paused")
+        XCTAssertEqual(status("race-nodata"), "paused", "暂停要先落成 paused")
+        /* 系统给不出 resumeData：保持 paused、数据为空，绝不伪造 */
+        Thread.sleep(forTimeInterval: 1.5)
+        XCTAssertNil(saved("race-nodata")?["resumeData"] as? String, "不许伪造 resumeData")
+        XCTAssertEqual(status("race-nodata"), "paused", "没有 resumeData 时仍是暂停态：\(String(describing: saved("race-nodata")))")
+
         downloader.resume(showId: "race")
-        XCTAssertTrue(waitUntil(timeout: 10) {
-            let status = self.saved("race-nodata")?["status"] as? String
-            return status == "running" || status == "queued"
-        }, "没有 resumeData 也必须能继续，不能停在暂停：\(String(describing: saved("race-nodata")))")
-        Thread.sleep(forTimeInterval: 1.0)
+        XCTAssertTrue(waitUntil(timeout: 15) { self.status("race-nodata") != "paused" },
+                      "没有 resumeData 也必须能继续，不能停在暂停：\(String(describing: saved("race-nodata")))")
+        XCTAssertTrue(waitUntil(timeout: 15) { self.taskIdentifier("race-nodata") != firstTask },
+                      "继续后必须是新任务（从 0 重来）：\(String(describing: saved("race-nodata")))")
         XCTAssertNil(saved("race-nodata")?["resumeData"] as? String, "不许伪造 resumeData")
         XCTAssertLessThanOrEqual(runningCount(), MediaDownloader.maxConcurrent)
         downloader.cancel(silent: true)
@@ -415,46 +399,47 @@ extension DownloadQueueTests {
 
     /// 反复暂停 / 继续：同一条记录、不重复入队、不超并发、最终还能跑。
     func testRepeatedPauseAndResumeKeepsOneRecordPerEpisodeAndNeverExceedsTheLimit() throws {
-        let server = try StallingMediaServer(supportsRange: true)
-        let port = try server.start()
-        defer { server.stop() }
+        try requireControlledSource()
+        defer { setPendingCallbackDelay(0) }
         let downloader = MediaDownloader()
-        startRace(downloader, id: "race-repeat", port: port)
-        XCTAssertTrue(waitUntil { self.received("race-repeat") > 0 }, "受控源没有把任务推进到 running")
+        startRace(downloader, id: "race-repeat", path: "stall-repeat.mp4")
+        waitForRealBytes("race-repeat")
 
+        setPendingCallbackDelay(0.4)
         for round in 0..<3 {
             downloader.pause(showId: "race")
             downloader.resume(showId: "race")
-            Thread.sleep(forTimeInterval: 0.2)
+            Thread.sleep(forTimeInterval: 0.6)
             XCTAssertLessThanOrEqual(runningCount(), MediaDownloader.maxConcurrent,
                                      "第 \(round + 1) 轮暂停/继续后并发超限")
         }
-        Thread.sleep(forTimeInterval: 1.0)
+        Thread.sleep(forTimeInterval: 1.5)
         guard let data = UserDefaults.standard.data(forKey: MediaDownloader.tasksKey),
               let list = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
             return XCTFail("状态没有落盘")
         }
         XCTAssertEqual(list.filter { ($0["id"] as? String) == "race-repeat" }.count, 1,
                        "同一集不能被暂停/继续复制成多条记录：\(list)")
-        XCTAssertNotEqual(saved("race-repeat")?["status"] as? String, "paused", "最后一轮继续后不该停在暂停")
+        XCTAssertNotEqual(status("race-repeat"), "paused", "最后一轮继续后不该停在暂停")
         XCTAssertNil(saved("race-repeat")?["resumeData"] as? String, "反复操作不能留下旧 resumeData")
         downloader.cancel(silent: true)
     }
 
     /// 暂停后用户改成取消：晚到的 resumeData 回调不能再改状态、不能带完成路径。
     func testCancelWhileThePauseCallbackIsStillPendingStaysCancelled() throws {
-        let server = try StallingMediaServer(supportsRange: true)
-        let port = try server.start()
-        defer { server.stop() }
+        try requireControlledSource()
+        defer { setPendingCallbackDelay(0) }
         let downloader = MediaDownloader()
-        startRace(downloader, id: "race-cancel", port: port)
-        XCTAssertTrue(waitUntil { self.received("race-cancel") > 0 }, "受控源没有把任务推进到 running")
+        startRace(downloader, id: "race-cancel", path: "stall-cancel.mp4")
+        waitForRealBytes("race-cancel")
 
+        setPendingCallbackDelay(1.0)
         downloader.pause(showId: "race")
         downloader.cancel(showId: "race")
-        Thread.sleep(forTimeInterval: 1.5)
+        Thread.sleep(forTimeInterval: 2.5)
         let record = saved("race-cancel")
-        XCTAssertEqual(record?["status"] as? String, "cancelled", "取消后晚到的回调不能改回暂停/运行：\(String(describing: record))")
+        XCTAssertEqual(record?["status"] as? String, "cancelled",
+                       "取消后晚到的回调不能改回暂停/运行：\(String(describing: record))")
         XCTAssertNil(record?["resumeData"] as? String, "取消后不该留续传数据：\(String(describing: record))")
         XCTAssertEqual(record?["path"] as? String ?? "", "", "取消的任务不能带完成路径")
         XCTAssertLessThanOrEqual(runningCount(), MediaDownloader.maxConcurrent)

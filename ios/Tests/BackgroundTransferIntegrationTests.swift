@@ -161,6 +161,25 @@ final class BackgroundTransferIntegrationTests: XCTestCase {
         wait(for: [progressed, done], timeout: 180)
         XCTAssertTrue(sawProgress, "真实后台会话必须回报过进度：\(storedRecords())")
         XCTAssertEqual(seenBytes, Int64(expected.data.count), "最终收到的字节数要等于文件大小")
+        /* 终态落盘比 onFinish 回调略晚一拍（后台会话的 finish 回调由系统投递），
+           这里等到「落盘变 done」为止，而不是拿一个可能还没写下去的值断言——
+           但确实必须变成 done，超过 20 秒还是 running 就是真缺陷。 */
+        let doneStatus = waitForStoredStatus(id: "bg-progress", is: "done", timeout: 20)
+        XCTAssertTrue(doneStatus,
+                      "后台会话结束后状态必须落成 done，不能停在 \(String(describing: storedRecord(id: "bg-progress")?["status"]))：\(storedRecords())")
         XCTAssertEqual(storedRecord(id: "bg-progress")?["status"] as? String, "done")
+        let finishedPath = try XCTUnwrap(storedRecord(id: "bg-progress")?["path"] as? String)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: finishedPath), "完成的文件必须真的在沙盒里：\(finishedPath)")
+    }
+
+    /// 轮询落盘状态：真实后台会话的完成事件和落盘之间有一拍先后，
+    /// 断言前等到它真的到了，而不是把环境时序当成产品缺陷（也不放宽要求）。
+    private func waitForStoredStatus(id: String, is expected: String, timeout: Double) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if storedRecord(id: id)?["status"] as? String == expected { return true }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+        }
+        return storedRecord(id: id)?["status"] as? String == expected
     }
 }

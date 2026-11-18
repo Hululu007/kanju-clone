@@ -65,9 +65,26 @@ final class DisplaySmokeUITests: XCTestCase {
         RunLoop.current.run(until: Date().addingTimeInterval(0.4))
     }
 
+    /// 轮询任意满足条件的可访问性文案：用来把「真的进队列/真的落成完成」和
+    /// 页面上常驻的按钮文案区分开（审核意见：单集那条 assert 以前会匹配到「下载本集」本身）。
+    private func waitForLabel(_ app: XCUIApplication, timeout: TimeInterval,
+                              _ accept: (String) -> Bool) -> String? {
+        let web = app.webViews.firstMatch
+        guard web.waitForExistence(timeout: timeout) else { return nil }
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            let all = web.descendants(matching: .any)
+            for index in 0..<all.count {
+                let text = labels(of: all.element(boundBy: index))
+                if accept(text) { return text }
+            }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.4))
+        }
+        return nil
+    }
+
     private func requireWebElement(_ app: XCUIApplication, _ labels: [String], _ what: String,
-                                   timeout: TimeInterval = 30) throws -> XCUIElement {
-        guard let element = webElement(app, matching: labels, timeout: timeout) else {
+                                   timeout: TimeInterval = 30) throws -> XCUIElement {        guard let element = webElement(app, matching: labels, timeout: timeout) else {
             attachDiagnostics(app, name: "missing-" + what)
             XCTFail("页面上找不到「\(labels.joined(separator: " / "))」（\(what)）")
             throw XCTSkip("已在上面记为失败")
@@ -89,11 +106,24 @@ final class DisplaySmokeUITests: XCTestCase {
         )
         attachScreenshot("01-playing")
 
-        // 02 下载本集：工具条那一格是下载入口，点下去要进「下载 N%」
+        // 02 下载本集：工具条那一格永远是「下载本集」，所以**不能**拿它当入队证据。
+        // 收紧后：必须等「下载进度：」这一行真的离开「尚未下载/需登录」，出现在连接/百分比/已完成态。
         let download = try requireWebElement(app, ["下载本集"], "toolbar-download")
         download.tap()
-        let busy = webElement(app, matching: ["下载 0%", "下载 1%", "下载 ", "下载本集"], timeout: 20)
-        XCTAssertNotNil(busy, "点「下载本集」之后按钮没有进入下载态")
+        let enqueued: (String) -> Bool = { text in
+            guard text.contains("下载进度：") else { return false }
+            if text.contains("尚未下载") || text.contains("需登录") { return false }
+            if text.contains("中断") || text.contains("失败") || text.contains("不可下载") { return false }
+            return text.contains("%") || text.contains("正在连接") || text.contains("已完成")
+        }
+        let progressText = waitForLabel(app, timeout: 60, enqueued)
+        XCTAssertNotNil(progressText,
+                        "点「下载本集」之后没有真的入队（下载进度还停在未下载/需登录/失败）：\(app.debugDescription)")
+        // 指定剧集要能对上：库里的这一集（第19集）得出现
+        let episodeInQueue = waitForLabel(app, timeout: 30) { text in
+            text.contains("第19集") && (text.contains("正在下载") || text.contains("已下载") || text.contains("排队"))
+        }
+        XCTAssertNotNil(episodeInQueue, "下载状态里找不到这一集（第19集）的真进度：\(app.debugDescription)")
         attachScreenshot("02-download-episode")
 
         // 03 全屏（适应档）：进全屏后画面铺满、控制栏收起
@@ -125,14 +155,18 @@ final class DisplaySmokeUITests: XCTestCase {
         exit.tap()
         RunLoop.current.run(until: Date().addingTimeInterval(1.5))
 
-        // 06 设置里的下载列表：真下载记录（剧名 / 集号 / 已下载几集）
+        // 06 设置里的下载列表：必须是**这一条**真实记录（剧名 + 第19集 + 看完状态），
+        // 不能只靠「已下载」这种泛词蒙混（审核意见）。先断言成功，再截图。
         let settings = try requireWebElement(app, ["设置"], "settings-entry")
         settings.tap()
-        XCTAssertTrue(
-            webElement(app, matching: ["已下载", "测试剧", "下载进度"], timeout: 20) != nil,
-            "设置面板里没有下载列表"
-        )
-        RunLoop.current.run(until: Date().addingTimeInterval(0.6))
+        XCTAssertNotNil(waitForLabel(app, timeout: 30) { $0.contains("测试剧") },
+                        "设置面板里没有剧名（测试剧）：\(app.debugDescription)")
+        XCTAssertNotNil(waitForLabel(app, timeout: 30) { text in
+            text.contains("第19集") && (text.contains("已下载") || text.contains("正在下载") || text.contains("第19集") && text.contains("集"))
+        }, "设置面板里没有这一集的记录（第19集）：\(app.debugDescription)")
+        XCTAssertNotNil(waitForLabel(app, timeout: 30) { text in
+            text.contains("已下载 ") || text.contains("正在下载 ") || text.contains("下载进度：")
+        }, "设置面板里没有下载状态（已下载 / 正在下载 / 下载进度）：\(app.debugDescription)")
         attachScreenshot("06-settings-download-list")
     }
 

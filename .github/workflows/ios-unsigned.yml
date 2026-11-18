@@ -69,6 +69,14 @@ jobs:
           set -euo pipefail
           DEVICE=$(xcrun simctl list devices available -j | python3 -c 'import json,sys; d=json.load(sys.stdin); print(next(x["udid"] for group in d["devices"].values() for x in group if x["name"].startswith("iPhone")))')
           python3 -m http.server 8765 --bind 127.0.0.1 --directory Tests > fixture-server.log 2>&1 &
+          # 暂停/继续竞态用的受控慢速源（进程外：进程内 NWListener 会被 iOS 本地网络隐私
+          # 拦掉入站连接）。日志进 artifact，用来证明测试真的连上了、真的收到了字节。
+          python3 Tests/Fixtures/controlled_source.py --port 8766 > controlled-source.log 2>&1 &
+          for i in $(seq 1 40); do
+            if curl -sf -o /dev/null http://127.0.0.1:8766/health; then break; fi
+            sleep 0.5
+          done
+          curl -sS -o /dev/null -w 'controlled-source health %{http_code}\n' http://127.0.0.1:8766/health | tee -a controlled-source.log
           # 模拟器包按 Xcode 默认做 ad-hoc 签名（不要 CODE_SIGNING_ALLOWED=NO）：
           # 后台会话要连 nsurlsessiond 的 XPC 服务，未签名的测试宿主会被拒绝（4097）。
           xcodebuild -project ZhuijuAI.xcodeproj -scheme ZhuijuAI -destination "platform=iOS Simulator,id=$DEVICE" -derivedDataPath build CODE_SIGN_IDENTITY=- CODE_SIGNING_REQUIRED=NO INFOPLIST_FILE=FixtureInfo.plist build-for-testing | tee simulator-build.log
@@ -119,6 +127,11 @@ jobs:
         working-directory: ios
         run: |
           set -uo pipefail
+          # 上一步给 XCTest 起的 python3 -m http.server 8765 可能还占着端口：它把根目录
+          # 指向 ios/Tests，会把 UI 夹具页答成 404（run44272465791 的 red 就是这个：
+          # fixture page 404 → 页面没有「开始播放测试片」也找不到批量入口）。
+          lsof -ti tcp:8765 | xargs -r kill -9 || true
+          sleep 1
           mkdir -p UITests/Fixtures/site/media
           ffmpeg -y -hide_banner -loglevel error \
             -f lavfi -i testsrc2=size=640x480:rate=24 \
@@ -131,8 +144,13 @@ jobs:
             if curl -sf -o /dev/null http://127.0.0.1:8765/player/index.html; then break; fi
             sleep 0.5
           done
-          curl -sS -o /dev/null -w 'fixture page %{http_code}\n' http://127.0.0.1:8765/player/index.html
-          curl -sS -o /dev/null -w 'fixture media %{http_code} (%{size_download} bytes)\n' http://127.0.0.1:8765/media/fixture.mp4
+          page=$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:8765/player/index.html)
+          media=$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:8765/media/fixture.mp4)
+          echo "fixture page $page"
+          echo "fixture media $media"
+          # 夹具站没真起来就直接红：否则 UI 测试会拿一个 404 页去点，然后报一堆像产品 bug 的红
+          test "$page" = "200"
+          test "$media" = "200"
 
       # 这一条是真门禁：App 起不来、页面点不动、少一档画面模式都算失败。
       # 批量下载那一项在下载队列合入前会如实变红（没有 skip 掩护）。
@@ -163,11 +181,16 @@ jobs:
         run: |
           set -uo pipefail
           if [ -d ui-smoke.xcresult ]; then
+            # 空白/全黑检查要 Pillow；装不上就退化成人工看图（脚本里已写明）
+            python3 -m pip install --quiet pillow >> ui-screenshots-export.log 2>&1 || true
             python3 scripts/export-ui-screenshots.py \
-              --xcresult ui-smoke.xcresult --output ui-screenshots | tee ui-screenshots-export.log
-            echo "export-exit=${PIPESTATUS[0]}" | tee -a ui-screenshots-export.log
+              --xcresult ui-smoke.xcresult --output ui-screenshots | tee -a ui-screenshots-export.log
+            status=${PIPESTATUS[0]}
+            echo "export-exit=$status" | tee -a ui-screenshots-export.log
+            # 少一张必需图 / 有空白图 → 这一步本身必须红，不能只留一行字
+            exit "$status"
           else
-            echo 'no ui-smoke.xcresult: the UI smoke step did not get to run (that step already failed, so this one does not add a second red)' | tee ui-screenshots-export.log
+            echo 'no ui-smoke.xcresult: the UI smoke step did not get to run (that step already failed, so this one does not add a second red)' | tee -a ui-screenshots-export.log
           fi
 
       - name: Upload the UI smoke screenshots
@@ -195,6 +218,7 @@ jobs:
             ios/simulator-tests.log
             ios/simulator-tests-summary.log
             ios/fixture-server.log
+            ios/controlled-source.log
           retention-days: 7
 
       # Runs in its own step: a failing xcodebuild stops the script above (set -e),

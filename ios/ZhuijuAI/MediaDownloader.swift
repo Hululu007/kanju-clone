@@ -80,6 +80,13 @@ final class MediaDownloader: NSObject {
     /// 同一时刻最多跑几条：用户要的是「两集一起下」，不是把整部剧一起拉满。
     static let maxConcurrent = 2
 
+    #if DEBUG
+    /// **仅测试构建**：把暂停时 `cancel(byProducingResumeData:)` 的回调推迟投递，
+    /// 用来确定性地复现「用户已经继续/取消，旧任务的回调才回来」这个顺序。
+    /// Release 不编译这段，产品行为不受影响。
+    static var testResumeDataCallbackDelay: TimeInterval = 0
+    #endif
+
     /// 后台会话的标识：App 被重新拉起时系统就是用它把回调交回来的，不能改。
     static let backgroundIdentifier = "org.dpdns.zhuiju.ios.downloads"
     static let tasksKey = "kj-ios-download-tasks"
@@ -443,8 +450,18 @@ final class MediaDownloader: NSObject {
                 task.cancel(byProducingResumeData: { data in
                     /* 回调来自系统内部队列：回到主队列再改状态，和 pause/resume/pump 串行，
                        并且要核对「还是那条被暂停的任务」，否则宁可丢弃。 */
-                    DispatchQueue.main.async {
+                    let deliver = {
                         storeResumeData(id: id, generation: generation, data: data)
+                    }
+                    #if DEBUG
+                    let delay = testResumeDataCallbackDelay
+                    #else
+                    let delay: TimeInterval = 0
+                    #endif
+                    if delay > 0 {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: deliver)
+                    } else {
+                        DispatchQueue.main.async(execute: deliver)
                     }
                 })
             }

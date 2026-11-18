@@ -20,7 +20,9 @@ import subprocess
 import sys
 import tempfile
 
-# 出包关卡必须有的截图（少一张就算这一轮没通过）
+# 出包关卡必须有的截图（少一张就算这一轮没通过）。
+# 审核意见（0.1.14 第 2 轮）：07/08 的「重启后还记得档位」与 09 的批量入队
+# 之前不在强制清单里，等于可以静默缺；现在全部强制。
 REQUIRED = [
     "01-playing",
     "02-download-episode",
@@ -28,6 +30,9 @@ REQUIRED = [
     "04-fullscreen-cover",
     "05-fullscreen-fill",
     "06-settings-download-list",
+    "07-fit-cover-before-relaunch",
+    "08-fit-remembered-after-relaunch",
+    "09-batch-download",
 ]
 
 
@@ -103,7 +108,29 @@ def main():
     if missing:
         print("missing screenshot(s): %s" % ", ".join(missing), file=sys.stderr)
         return 1
-    return 0
+    # 图不能是空白/全黑：逐张核一下像素分布，蒙混的图不过关
+    try:
+        from PIL import Image  # noqa: F401  (有装就核，没装就交给人工看图)
+    except ImportError:
+        print("Pillow 未安装，像素级空白检查跳过（仍由人工逐张看原图）", file=sys.stderr)
+        return 0
+    verdict = 0
+    for name in names:
+        if not name.endswith(".png"):
+            continue
+        path = os.path.join(args.output, name)
+        try:
+            with Image.open(path) as image:
+                gray = image.convert("L").resize((64, 64))
+                pixels = list(gray.getdata())
+        except Exception as error:  # noqa: BLE001
+            print("无法读取 %s: %s" % (name, error), file=sys.stderr)
+            continue
+        span = max(pixels) - min(pixels)
+        if span < 12:
+            print("截图看起来是纯色/空白（亮度跨度 %d）：%s" % (span, name), file=sys.stderr)
+            verdict = 1
+    return verdict
 
 
 if __name__ == "__main__":
