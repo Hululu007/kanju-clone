@@ -485,9 +485,11 @@ final class MediaDownloader: NSObject {
     /// - 系统没给 resumeData（片源不支持 Range）：保持 paused 且 resumeData 为空，
     ///   继续时从 0 重下，进度如实归零，不伪造续传。
     private static func storeResumeData(id: String, generation: Int, data: Data?) {
+        /* 红证据分支：故意退回旧实现——不核对状态、不核对任务身份，谁回调回来都照写。
+           审核指出的缺陷就是这一行：用户已经继续/取消，旧任务的 resumeData 还会被写下去。 */
         records = loadRecords()
         guard let index = records.firstIndex(where: { $0.id == id }) else { return }
-        guard records[index].status == "paused", (records[index].generation ?? 0) == generation else { return }
+        _ = generation
         records[index].resumeData = (data?.isEmpty == false) ? data!.base64EncodedString() : nil
         records[index].updatedAt = Date().timeIntervalSince1970
         persist(force: true)
