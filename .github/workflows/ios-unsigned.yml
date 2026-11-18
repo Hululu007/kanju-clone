@@ -184,7 +184,8 @@ jobs:
             # 空白/全黑检查要 Pillow；装不上就退化成人工看图（脚本里已写明）
             python3 -m pip install --quiet pillow >> ui-screenshots-export.log 2>&1 || true
             python3 scripts/export-ui-screenshots.py \
-              --xcresult ui-smoke.xcresult --output ui-screenshots | tee -a ui-screenshots-export.log
+              --xcresult ui-smoke.xcresult --output ui-screenshots \
+              --run ${{ github.run_id }} --sha ${{ github.sha }} | tee -a ui-screenshots-export.log
             status=${PIPESTATUS[0]}
             echo "export-exit=$status" | tee -a ui-screenshots-export.log
             # 少一张必需图 / 有空白图 → 这一步本身必须红，不能只留一行字

@@ -6,9 +6,11 @@ XCUITest 只在 result bundle 里留附件；审核的人要的是能直接看�
 1. `xcrun xcresulttool export attachments` 把附件摊到一个临时目录；
 2. 按 manifest 里附件的名字重排成 `01-playing.png` 这种固定名（序号来自测试里给的
    `XCTAttachment.name`，例如 `01-playing`）；
-3. 写一份 `INDEX.txt`（文件名 → 附件名 → 所属测试），并检查必须有的那几张是否齐了。
+3. 写一份 `INDEX.txt`（文件名 → 附件名 → 功能 → 测试 → run/sha），并检查必须有的九张是否齐了。
 
 缺图直接以非零退出码结束：截图通道本身也要能被审，不能「导不出图还说通过」。
+失败时测试留下的 `diagnostic-*` 图/树也会一并导出，但**不计入**九张必需图，
+也不参与纯色检查（XCTest 自己的 Synthesized-Event 图可能是纯色，不能误伤）。
 """
 
 import argparse
@@ -21,8 +23,10 @@ import sys
 import tempfile
 
 # 出包关卡必须有的截图（少一张就算这一轮没通过）。
-# 审核意见（0.1.14 第 2 轮）：07/08 的「重启后还记得档位」与 09 的批量入队
-# 之前不在强制清单里，等于可以静默缺；现在全部强制。
+# Ken 明确要求的五项都在里面：播放 / 单集下载 / 批量下载 / 全屏三档 / 设置下载列表；
+# 07/08 另证模式持久化（杀进程重进仍记得）。当前矩阵与 Lead 交底里的编号略有不同：
+# 03 是「进入全屏 + 适应档」、09 是「批量」，而不是 03=批量 / 09=重进持久。
+# 编号沿用一个多月来各轮 run/审核目录已固定的名字，避免把旧证据的索引改串。
 REQUIRED = [
     "01-playing",
     "02-download-episode",
@@ -34,6 +38,55 @@ REQUIRED = [
     "08-fit-remembered-after-relaunch",
     "09-batch-download",
 ]
+
+# 每张最终图对应哪个功能、哪条断言、哪个测试函数。INDEX 里逐张写清楚。
+SCREEN_MAP = {
+    "01-playing": (
+        "播放：受控 4:3 真片源在真 App 里播放，时间轴从 0:00 走动",
+        "时间轴出现 / 0:06 且不为 0:00 /（不是常驻的「播放 / 暂停」aria-label）",
+        "DisplaySmokeUITests.testTheAppPlaysDownloadsAndShootsEveryFitMode",
+    ),
+    "02-download-episode": (
+        "单集下载：原位「下载本集」点了之后真的入队/完成",
+        "进度行离开 尚未下载/需登录/失败，出现百分比/正在连接/用其他播放器播放+已下载",
+        "DisplaySmokeUITests.testTheAppPlaysDownloadsAndShootsEveryFitMode",
+    ),
+    "03-fullscreen-adapt": (
+        "全屏 + 适应档：真点「全屏播放」，画面铺满且留边不裁",
+        "先等到真「退出全屏」出现，控制栏可见；档位标签为适应；object-fit=contain 由 FitModeTests 验",
+        "DisplaySmokeUITests.testTheAppPlaysDownloadsAndShootsEveryFitMode",
+    ),
+    "04-fullscreen-cover": (
+        "裁剪填满：等比放大裁边",
+        "点真「画面比例」后档位标签变裁剪；object-fit=cover 由 FitModeTests 验",
+        "DisplaySmokeUITests.testTheAppPlaysDownloadsAndShootsEveryFitMode",
+    ),
+    "05-fullscreen-fill": (
+        "拉伸填满：不等比铺满",
+        "再点后档位标签变拉伸；object-fit=fill 由 FitModeTests 验",
+        "DisplaySmokeUITests.testTheAppPlaysDownloadsAndShootsEveryFitMode",
+    ),
+    "06-settings-download-list": (
+        "设置里的下载列表：按剧名/封面/已下载集数/队列进度呈现",
+        "证据来自下载片库本身（正在下载 测试剧·第19集 或 已下载 N 集），不是页面选集列表",
+        "DisplaySmokeUITests.testTheAppPlaysDownloadsAndShootsEveryFitMode",
+    ),
+    "07-fit-cover-before-relaunch": (
+        "模式持久化：杀进程前选的是裁剪",
+        "档位标签变裁剪后才拍",
+        "DisplaySmokeUITests.testTheChosenFitModeSurvivesARelaunch",
+    ),
+    "08-fit-remembered-after-relaunch": (
+        "模式持久化：重进 App 后仍是裁剪",
+        "重进后档位标签仍为裁剪；localStorage kj-ios-fit 由 FitModeTests 验",
+        "DisplaySmokeUITests.testTheChosenFitModeSurvivesARelaunch",
+    ),
+    "09-batch-download": (
+        "批量下载：选集页一键全集真入队、按剧汇总",
+        "设置面板出现原生队列行「任务 x/y 集 · 进行中 n · 排队 n」且 total>=2、片库有测试剧与 >=2 集",
+        "BatchDownloadSmokeUITests.testTheEpisodePageOffersABatchDownloadEntryThatReallyQueues",
+    ),
+}
 
 
 def export_raw(xcresult, workdir):
@@ -65,10 +118,19 @@ def safe(name):
     return re.sub(r"[^0-9A-Za-z._-]+", "-", name).strip("-") or "shot"
 
 
+def matched_key(name):
+    for key in REQUIRED:
+        if name.startswith(key):
+            return key
+    return None
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--xcresult", required=True)
     parser.add_argument("--output", required=True)
+    parser.add_argument("--run", default="local", help="GitHub Actions run id，写进 INDEX")
+    parser.add_argument("--sha", default="local", help="被测 commit sha，写进 INDEX")
     args = parser.parse_args()
 
     os.makedirs(args.output, exist_ok=True)
@@ -93,10 +155,23 @@ def main():
                 counter += 1
             used.add(target_name)
             shutil.copyfile(source, os.path.join(args.output, target_name))
-            index_lines.append("%s\t%s\t%s" % (target_name, readable, test_id))
+            key = matched_key(target_name)
+            if key:
+                feature, assertion, test_name = SCREEN_MAP[key]
+            elif target_name.startswith("diagnostic-"):
+                feature = "失败现场诊断（不计入必需图）"
+                assertion = "断言失败时自动留图/树/方向"
+                test_name = test_id or "ui-smoke"
+            else:
+                feature = "XCTest 自动附件（不计入必需图）"
+                assertion = "-"
+                test_name = test_id or "ui-smoke"
+            index_lines.append("\t".join([target_name, readable, feature, assertion, test_name]))
 
         with open(os.path.join(args.output, "INDEX.txt"), "w", encoding="utf-8") as handle:
-            handle.write("file\tattachment\t test\n")
+            handle.write("# run=%s sha=%s\n" % (args.run, args.sha))
+            handle.write("# 九张必需图按断言成功后的最终截图计数；diagnostic-* 为失败诊断，不算通过\n")
+            handle.write("file\tattachment\tfeature\tassertion\ttest\n")
             handle.writelines(line + "\n" for line in index_lines)
 
     names = sorted(os.listdir(args.output))
@@ -108,7 +183,7 @@ def main():
     if missing:
         print("missing screenshot(s): %s" % ", ".join(missing), file=sys.stderr)
         return 1
-    # 图不能是空白/全黑：逐张核一下像素分布，蒙混的图不过关
+    # 图不能是空白/全黑：只核九张最终图，别把 XCTest 自动附件当有效图也别当失败证据。
     try:
         from PIL import Image  # noqa: F401  (有装就核，没装就交给人工看图)
     except ImportError:
@@ -116,7 +191,8 @@ def main():
         return 0
     verdict = 0
     for name in names:
-        if not name.endswith(".png"):
+        key = matched_key(name)
+        if not key or not name.endswith(".png"):
             continue
         path = os.path.join(args.output, name)
         try:
@@ -125,10 +201,11 @@ def main():
                 pixels = list(gray.getdata())
         except Exception as error:  # noqa: BLE001
             print("无法读取 %s: %s" % (name, error), file=sys.stderr)
+            verdict = 1
             continue
         span = max(pixels) - min(pixels)
         if span < 12:
-            print("截图看起来是纯色/空白（亮度跨度 %d）：%s" % (span, name), file=sys.stderr)
+            print("最终截图看起来是纯色/空白（亮度跨度 %d）：%s" % (span, name), file=sys.stderr)
             verdict = 1
     return verdict
 

@@ -10,6 +10,14 @@ import XCTest
 /// 没有账号、不连公网，但片源是真的 mp4 —— 截图里必须有画面，不接受空白。
 ///
 /// 起始地址通过 `KJ_TEST_HOME_URL` 传给 App（只在 Debug 构建里读，见 `KJTestLaunch.swift`）。
+///
+/// run 44292507284 的两条真问题（本文件已按证据修正）：
+/// 1. 片源只有 6 秒，点到全屏时视频已经播完；注入层在「暂停/结束」态会把控制栏常显，
+///    旧的 `revealControls` 又盲点画面中心，正好把控制栏**收起**——于是「退出全屏」「画面比例」
+///    全找不到（附件 missing-fit-button 的可访问性树里连 #ppCtrl 都没有）。
+///    现在播完 01 后先用**真的**「播放 / 暂停」按钮暂停：注入层的既有规则是暂停态保持控制栏常显，
+///    不再靠坐标猜开关；`ensureControlsVisible` 只在真的没有控件时才点一次并留诊断。
+/// 2. 先断言、后截图：任何一步失败都先留诊断截图 + 可访问性树，最终图只在断言成功后拍。
 @MainActor
 final class DisplaySmokeUITests: XCTestCase {
     private let fixtureBase = "http://127.0.0.1:8765"
@@ -31,45 +39,58 @@ final class DisplaySmokeUITests: XCTestCase {
         add(attachment)
     }
 
+    /// 失败现场：诊断图 + 可访问性树 + 当前方向。diagnostic-* 不是必需图，只用于定位。
     private func attachDiagnostics(_ app: XCUIApplication, name: String) {
-        let attachment = XCTAttachment(string: app.debugDescription)
-        attachment.name = name
-        attachment.lifetime = .keepAlways
-        add(attachment)
+        let shot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+        shot.name = "diagnostic-" + name
+        shot.lifetime = .keepAlways
+        add(shot)
+        let tree = XCTAttachment(string: app.debugDescription)
+        tree.name = "diagnostic-tree-" + name
+        tree.lifetime = .keepAlways
+        add(tree)
+        let orientation = XCTAttachment(string: "orientation=\(String(describing: XCUIDevice.shared.orientation))")
+        orientation.name = "diagnostic-orientation-" + name
+        orientation.lifetime = .keepAlways
+        add(orientation)
     }
 
-    /// 网页里的按钮：注入层挂的是 `<button>`，文字/aria-label 都会被读出来。
-    /// 找不到就先把可访问性树留下来，省得靠猜。
-    private func webElement(_ app: XCUIApplication, matching labels: [String], timeout: TimeInterval = 30) -> XCUIElement? {
-        let web = app.webViews.firstMatch
-        if !web.waitForExistence(timeout: timeout) { return nil }
-        let predicates = labels.flatMap { label in
-            [NSPredicate(format: "label == %@", label), NSPredicate(format: "label CONTAINS %@", label)]
+    private func fail(_ message: String, _ diagnostic: String, _ app: XCUIApplication) {
+        attachDiagnostics(app, name: diagnostic)
+        XCTFail(message)
+    }
+
+    /// 网页里的按钮：只按 **button role** 找（`.any` 会把文本节点/隐藏面板里的节点也算上，
+    /// 44292507284 的批量那一步就是这么点错的）。exact 用 aria-label 精确匹配，
+    /// dynamic 用 CONTAINS 匹配运行态文案（画面比例：适应/裁剪/拉伸）。
+    private func webButton(_ app: XCUIApplication, labels: [String], exact: Bool = false,
+                           timeout: TimeInterval = 15) -> XCUIElement? {
+        let buttons = app.buttons
+        let predicates = labels.map { label in
+            NSPredicate(format: exact ? "label == %@" : "label CONTAINS %@", label)
         }
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
             for predicate in predicates {
-                let candidate = web.descendants(matching: .any).matching(predicate).firstMatch
-                if candidate.exists {
-                    return candidate
-                }
+                let candidate = buttons.matching(predicate).firstMatch
+                if candidate.exists && candidate.isHittable { return candidate }
             }
-            RunLoop.current.run(until: Date().addingTimeInterval(0.4))
+            RunLoop.current.run(until: Date().addingTimeInterval(0.25))
         }
         return nil
     }
 
-    /// 沉浸态下控制栏会自己收起；点一下画面把它叫回来。
-    private func revealControls(_ app: XCUIApplication) {
-        app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.42)).tap()
-        RunLoop.current.run(until: Date().addingTimeInterval(0.4))
+    private func requireButton(_ app: XCUIApplication, labels: [String], exact: Bool = false,
+                               what: String, timeout: TimeInterval = 15) -> XCUIElement? {
+        guard let element = webButton(app, labels: labels, exact: exact, timeout: timeout) else {
+            fail("页面上找不到「\(labels.joined(separator: " / "))」（\(what)）", "missing-" + what, app)
+            return nil
+        }
+        return element
     }
 
-    /// 轮询任意满足条件的可访问性文案：用来把「真的进队列/真的落成完成」和
-    /// 页面上常驻的按钮文案区分开（审核意见：单集那条 assert 以前会匹配到「下载本集」本身）。
-    /// 把网页的可访问性树一次性拍成文本（不再逐条解析元素）。
-    /// 逐条 `element(boundBy:)` / `allElementsBoundByIndex` 在 DOM 变化时会抛
-    /// 「No matches found for Element at index N」——那是测试自己的脆弱，不是产品问题。
+    /// 一次性拍下网页可访问性树（逐条 `element(boundBy:)` 在 DOM 变化时会抛
+    /// 「No matches found for Element at index N」，那是探针自己的脆弱，不是产品问题）。
     private func labelTexts(_ app: XCUIApplication) -> [String] {
         let web = app.webViews.firstMatch
         guard web.exists, let snapshot = try? web.snapshot() else { return [] }
@@ -88,134 +109,199 @@ final class DisplaySmokeUITests: XCTestCase {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
             for text in labelTexts(app) where accept(text) { return text }
-            RunLoop.current.run(until: Date().addingTimeInterval(0.4))
+            RunLoop.current.run(until: Date().addingTimeInterval(0.3))
         }
         return nil
     }
 
-    private func requireWebElement(_ app: XCUIApplication, _ labels: [String], _ what: String,
-                                   timeout: TimeInterval = 30) throws -> XCUIElement {        guard let element = webElement(app, matching: labels, timeout: timeout) else {
-            attachDiagnostics(app, name: "missing-" + what)
-            XCTFail("页面上找不到「\(labels.joined(separator: " / "))」（\(what)）")
-            throw XCTSkip("已在上面记为失败")
+    /// 仅在真的找不到控制栏时才点一次画面（产品手势：点一下叫出/再点收起）。
+    /// 点完立刻验证，若第一次正好把它收起就再点一次；两次都失败就留诊断并判红。
+    private func ensureControlsVisible(_ app: XCUIApplication, timeout: TimeInterval = 12) -> Bool {
+        if webButton(app, labels: ["画面比例"], timeout: 2) != nil { return true }
+        for attempt in 1...2 {
+            app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.42)).tap()
+            if webButton(app, labels: ["画面比例"], timeout: timeout / 2) != nil { return true }
+            _ = attempt
         }
-        return element
+        fail("点了画面两次仍看不到控制栏（画面比例/退出全屏）", "missing-controls", app)
+        return false
+    }
+
+    private func waitForFit(_ app: XCUIApplication, _ label: String, timeout: TimeInterval = 10) -> XCUIElement? {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if let fit = webButton(app, labels: ["画面比例"], timeout: 1),
+               [fit.label, fit.value as? String ?? "", fit.identifier].joined(separator: " ").contains(label) {
+                return fit
+            }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.25))
+        }
+        return nil
     }
 
     // MARK: - 主链路：播放 → 下载本集 → 全屏三档 → 设置里的下载列表
 
-    func testTheAppPlaysDownloadsAndShootsEveryFitMode() throws {
+    func testTheAppPlaysDownloadsAndShootsEveryFitMode() {
         let app = launchApp()
 
         // 01 播放：点夹具页自己的播放按钮，视频真的开始播（控制栏变成「暂停」）
-        let play = try requireWebElement(app, ["开始播放测试片"], "fixture-play", timeout: 60)
-        play.tap()
-        XCTAssertTrue(
-            webElement(app, matching: ["暂停"], timeout: 30) != nil,
-            "点了播放之后视频没有真的开始（控制栏没有变成「暂停」）"
-        )
+        let play = requireButton(app, labels: ["开始播放测试片"], exact: true,
+                                 what: "fixture-play", timeout: 60)
+        guard play != nil else { return }
+        play!.tap()
+        // 「播放 / 暂停」是常驻 aria-label，不能当播放证据；看真时间轴从 0:00 走到 0:0N。
+        let playing = waitForLabel(app, timeout: 30) { text in
+            text.contains("/ 0:06") && !text.contains("0:00 /") && text.contains(":")
+        }
+        if playing == nil {
+            fail("点了播放之后视频没有真的开始（时间轴没有走动）", "playing-not-started", app)
+            return
+        }
         attachScreenshot("01-playing")
+
+        // 让 6 秒片源停在暂停态：注入层既有规则是「暂停时控制栏常显」，
+        // 这样进全屏后「画面比例 / 退出全屏」不需要靠坐标猜开关就能真点到。
+        if let pause = webButton(app, labels: ["播放 / 暂停"], exact: true, timeout: 10) {
+            pause.tap()
+            _ = webButton(app, labels: ["播放"], exact: true, timeout: 8)
+        }
 
         // 02 下载本集：工具条那一格永远是「下载本集」，所以**不能**拿它当入队证据。
         // 收紧后：必须等「下载进度：」这一行真的离开「尚未下载/需登录」，出现在连接/百分比/已完成态。
-        let download = try requireWebElement(app, ["下载本集"], "toolbar-download")
-        download.tap()
+        let download = requireButton(app, labels: ["下载本集"], exact: true, what: "toolbar-download")
+        guard download != nil else { return }
+        download!.tap()
         let enqueued: (String) -> Bool = { text in
-            // 常驻的「下载本集」永远在，不能拿它当入队证据
             if text.contains("下载本集") { return false }
             if text.contains("尚未下载") || text.contains("需登录") { return false }
             if text.contains("中断") || text.contains("失败") || text.contains("不可下载") { return false }
-            // 真在下载时：工具条那一格变成「下载 N%」，面板那行是「下载进度：N% / 正在连接」
             if text.contains("%") && (text.contains("下载 ") || text.contains("下载进度：")) { return true }
             if text.contains("下载进度：") && (text.contains("正在连接") || text.contains("已完成")) { return true }
-            // 受控片源只有 6 秒（几百 KB），后台会话可能在我们第一次轮询之前就下完了：
-            // 这时页面会把「用其他播放器播放」那一行放出来并标「已下载」——
-            // 它只在真的有完成文件时才存在，所以也是真实入队/完成的证据，不是常驻文案。
+            // 6 秒小片源可能比第一次轮询还快下完：这行只在真有完成文件时出现。
             return text.contains("用其他播放器播放") && text.contains("已下载")
         }
         let progressText = waitForLabel(app, timeout: 60, enqueued)
-        XCTAssertNotNil(progressText,
-                        "点「下载本集」之后没有真的入队（下载进度还停在未下载/需登录/失败）：\(app.debugDescription)")
+        guard let progress = progressText else {
+            fail("点「下载本集」之后没有真的入队（下载进度停在未下载/需登录/失败）", "single-not-enqueued", app)
+            return
+        }
         attachScreenshot("02-download-episode")
+        _ = progress
 
-        // 03 全屏（适应档）：进全屏后画面铺满、控制栏收起
-        let full = try requireWebElement(app, ["全屏"], "toolbar-fullscreen")
-        full.tap()
-        RunLoop.current.run(until: Date().addingTimeInterval(2.5))
-        revealControls(app)
+        // 03 全屏（适应档）：按真的「全屏播放」按钮，轮询真的「退出全屏」出现；
+        // 不能用归一化坐标盲点，也不能直接调 requestFullscreen 绕过产品手势。
+        let full = requireButton(app, labels: ["全屏播放", "全屏"], exact: true, what: "toolbar-fullscreen")
+        guard full != nil else { return }
+        full!.tap()
+        let exitButton = webButton(app, labels: ["退出全屏"], exact: true, timeout: 30)
+        guard let exiting = exitButton else {
+            fail("没有进入全屏（找不到「退出全屏」）", "not-fullscreen", app)
+            return
+        }
+        guard ensureControlsVisible(app) else { return }
+        // 断言已经成功，这张才是最终的 03。
         attachScreenshot("03-fullscreen-adapt")
-        XCTAssertTrue(webElement(app, matching: ["退出全屏"], timeout: 10) != nil, "没有进入全屏（找不到「退出全屏」）")
 
-        // 04 裁剪：点「画面比例」那一格，档位切成裁剪，再截一张
-        let fit = try requireWebElement(app, ["画面比例"], "fit-button")
-        XCTAssertTrue(labels(of: fit).contains("适应"), "进全屏后画面档位不是「适应」：\(labels(of: fit))")
-        fit.tap()
-        RunLoop.current.run(until: Date().addingTimeInterval(0.8))
-        revealControls(app)
+        // 04 裁剪：档位按钮是「画面比例：X，点击切换」这一格。
+        let fit = requireButton(app, labels: ["画面比例"], what: "fit-button")
+        guard fit != nil else { return }
+        let startLabel = [fit!.label, fit!.value as? String ?? "", fit!.identifier].joined(separator: " ")
+        if !startLabel.contains("适应") {
+            fail("进全屏后画面档位不是「适应」：\(startLabel)", "fit-not-contain", app)
+            return
+        }
+        // 计算样式 object-fit=contain 由 FitModeTests 真 WKWebView 断言；这里点真按钮看显示结果。
+        fit!.tap()
+        let coverFit = waitForFit(app, "裁剪")
+        guard let cover = coverFit else {
+            fail("点画面比例后没有切到「裁剪」", "fit-not-cover", app)
+            return
+        }
+        _ = cover
         attachScreenshot("04-fullscreen-cover")
 
         // 05 拉伸
-        let fitCover = try requireWebElement(app, ["画面比例"], "fit-button-cover", timeout: 15)
-        XCTAssertTrue(labels(of: fitCover).contains("裁剪"), "第二次点没有切到裁剪：\(labels(of: fitCover))")
-        fitCover.tap()
-        RunLoop.current.run(until: Date().addingTimeInterval(0.8))
-        revealControls(app)
+        cover.tap()
+        let fillFit = waitForFit(app, "拉伸")
+        guard let fill = fillFit else {
+            fail("第二次点画面比例后没有切到「拉伸」", "fit-not-fill", app)
+            return
+        }
+        _ = fill
         attachScreenshot("05-fullscreen-fill")
 
         // 退出全屏，回到竖屏
-        let exit = try requireWebElement(app, ["退出全屏"], "exit-fullscreen")
-        exit.tap()
-        RunLoop.current.run(until: Date().addingTimeInterval(1.5))
+        let exit = requireButton(app, labels: ["退出全屏"], exact: true, what: "exit-fullscreen")
+        guard exit != nil else { return }
+        exit!.tap()
+        _ = webButton(app, labels: ["全屏播放"], exact: true, timeout: 15)
 
-        // 06 设置里的下载列表：必须是**这一条**真实记录（剧名 + 第19集 + 看完状态），
-        // 不能只靠「已下载」这种泛词蒙混（审核意见）。先断言成功，再截图。
-        let settings = try requireWebElement(app, ["设置"], "settings-entry")
-        settings.tap()
-        XCTAssertNotNil(waitForLabel(app, timeout: 30) { $0.contains("测试剧") },
-                        "设置面板里没有剧名（测试剧）：\(app.debugDescription)")
-        /* 剧集 + 状态必须来自下载片库本身（页面自己的选集列表里也有「第19集」，不能算）。
-           片库只会在两种文案里带上这一集：
-             - 「正在下载 测试剧 · 第19集 · N%」（#iosDlRunning）
-             - 下载完之后的集数行「已下载 1 集」+ 集标签「第19集」
-           所以这里要求「正在下载 + 测试剧 + 第19集」在**同一条**文案里出现，或者出现集数行。 */
+        // 06 设置里的下载列表：必须是**这一条**真实记录（剧名 + 第19集 + 状态），
+        // 先断言下载片库本身，再截图；页面自己的选集列表里也有「第19集」，不能算。
+        let settings = requireButton(app, labels: ["设置"], exact: true, what: "settings-entry")
+        guard settings != nil else { return }
+        settings!.tap()
         let libraryEvidence = waitForLabel(app, timeout: 45) { text in
             if text.contains("正在下载") && text.contains("测试剧") && text.contains("第19集") { return true }
             return text.contains("已下载 ") && text.contains(" 集")
         }
-        XCTAssertNotNil(libraryEvidence,
-                        "设置里的下载片库没有这一条真实记录（测试剧 · 第19集 · 已下载 N 集）：\(app.debugDescription)")
+        guard let evidence = libraryEvidence else {
+            fail("设置里的下载片库没有这一条真实记录（测试剧 · 第19集 · 已下载 N 集）", "library-missing", app)
+            return
+        }
         attachScreenshot("06-settings-download-list")
+        _ = evidence
     }
 
     // MARK: - 记住上次选择：杀进程重进仍然是裁剪
 
-    func testTheChosenFitModeSurvivesARelaunch() throws {
+    func testTheChosenFitModeSurvivesARelaunch() {
         var app = launchApp()
-        let play = try requireWebElement(app, ["开始播放测试片"], "fixture-play", timeout: 60)
-        play.tap()
-        XCTAssertTrue(webElement(app, matching: ["暂停"], timeout: 30) != nil, "视频没有开始播放")
+        let play = requireButton(app, labels: ["开始播放测试片"], exact: true,
+                                 what: "fixture-play", timeout: 60)
+        guard play != nil else { return }
+        play!.tap()
+        if waitForLabel(app, timeout: 30, { $0.contains("/ 0:06") && !$0.contains("0:00 /") }) == nil {
+            fail("视频没有开始播放", "relaunch-playing", app)
+            return
+        }
+        // 同样先暂停，避免 6 秒片源播完把控制栏状态翻到另一面。
+        if let pause = webButton(app, labels: ["播放 / 暂停"], exact: true, timeout: 10) { pause.tap() }
 
-        let full = try requireWebElement(app, ["全屏"], "toolbar-fullscreen")
-        full.tap()
-        RunLoop.current.run(until: Date().addingTimeInterval(2.5))
-        revealControls(app)
-        let fit = try requireWebElement(app, ["画面比例"], "fit-button")
-        fit.tap()   // 适应 → 裁剪
-        RunLoop.current.run(until: Date().addingTimeInterval(0.8))
-        let coverLabel = webElement(app, matching: ["画面比例"], timeout: 10).map { labels(of: $0) } ?? ""
-        XCTAssertTrue(coverLabel.contains("裁剪"), "切到裁剪失败：\(coverLabel)")
+        let full = requireButton(app, labels: ["全屏播放", "全屏"], exact: true,
+                                 what: "toolbar-fullscreen", timeout: 15)
+        guard full != nil else { return }
+        full!.tap()
+        if webButton(app, labels: ["退出全屏"], exact: true, timeout: 30) == nil {
+            fail("重进用例没进入全屏", "relaunch-fullscreen", app)
+            return
+        }
+        guard ensureControlsVisible(app) else { return }
+        let fit = requireButton(app, labels: ["画面比例"], what: "fit-button")
+        guard fit != nil else { return }
+        fit!.tap()   // 适应 → 裁剪
+        let coverFit = waitForFit(app, "裁剪")
+        guard let coverLabel = coverFit else {
+            fail("切到裁剪失败", "relaunch-cover", app)
+            return
+        }
         attachScreenshot("07-fit-cover-before-relaunch")
+        _ = coverLabel
 
         app.terminate()
         app = launchApp()
-        XCTAssertTrue(app.webViews.firstMatch.waitForExistence(timeout: 60), "重进之后页面没加载")
-        let remembered = try requireWebElement(app, ["画面比例"], "fit-button-after-relaunch", timeout: 60)
-        XCTAssertTrue(labels(of: remembered).contains("裁剪"),
-                      "重进 App 之后忘了上次选的画面档位：\(labels(of: remembered))")
+        if !app.webViews.firstMatch.waitForExistence(timeout: 60) {
+            fail("重进之后页面没加载", "relaunch-page", app)
+            return
+        }
+        let remembered = requireButton(app, labels: ["画面比例"], what: "fit-button-after-relaunch", timeout: 60)
+        guard let rememberedFit = remembered else { return }
+        let label = [rememberedFit.label, rememberedFit.value as? String ?? "", rememberedFit.identifier]
+            .joined(separator: " ")
+        if !label.contains("裁剪") {
+            fail("重进 App 之后忘了上次选的画面档位：\(label)", "relaunch-not-remembered", app)
+            return
+        }
         attachScreenshot("08-fit-remembered-after-relaunch")
-    }
-
-    private func labels(of element: XCUIElement) -> String {
-        [element.label, element.value as? String ?? "", element.identifier].joined(separator: " | ")
     }
 }
