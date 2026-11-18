@@ -165,6 +165,14 @@
   document.addEventListener('click', function (event) {
     var target = event.target.closest ? event.target : event.target.parentElement;
     if (!target) return;
+    /* 站点的设置按钮只会弹「设置面板即将上线」：换成注入层的设置面板，
+       下载进度和播放方式在首页也看得到。 */
+    if (settingsTriggerHit(event.target)) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      openSettingsSheet();
+      return;
+    }
     if (handleCtrlClick(event)) return;
     if (target.closest('[data-ep], [data-play], [data-line], #nextEpBtn')) invalidate();
     if (target.closest('#pipBtn')) {
@@ -216,6 +224,14 @@
       'html[data-ios-immersive] #settingsPanel,html[data-ios-immersive] #lineBar{display:none!important}',
       'html[data-ios-immersive] .tabbar{display:none!important;visibility:hidden!important;pointer-events:none!important}',
       'html[data-ios-immersive] .p-label{display:none!important}',
+      /* 站点的「全屏」按钮优先走标准全屏 API（player.requestFullscreen），
+         这条路不经过 data-ios-immersive，片名标题和工具条会留在画面上。
+         用 :fullscreen 兜住：无论谁开的全屏，标题都不许压在视频上。
+         两条分开写：不认识 -webkit- 别名的内核不会把整条规则一起丢掉。 */
+      '#player:fullscreen .p-label{display:none!important}',
+      '#player:-webkit-full-screen .p-label{display:none!important}',
+      '#player:fullscreen .pp-toolbar,#player:fullscreen .tabbar,#player:fullscreen .dm-input{display:none!important}',
+      '#player:-webkit-full-screen .pp-toolbar,#player:-webkit-full-screen .tabbar,#player:-webkit-full-screen .dm-input{display:none!important}',
       /* 全屏里可能残留的其他浮层入口（弹幕输入、画中画、下一集、提示行等）一并收起 */
       'html[data-ios-immersive] .pp-toolbar,html[data-ios-immersive] .dm-input,html[data-ios-immersive] #dmInputWrap,html[data-ios-immersive] .pp-hint,html[data-ios-immersive] #playHint{display:none!important}',
       /* 跳过片头/片尾和挂件上移，避免和底部控制栏叠在一起 */
@@ -254,6 +270,14 @@
       '#ppCtrl #ppRate{background:rgba(255,255,255,.16)}',
       '#ppCtrl #ppFull{background:rgba(22,224,157,.92);color:#04241a}',
       '#iosDownloadStatus{margin:12px 0;padding:12px;border:1px solid rgba(255,255,255,.14);border-radius:10px;background:rgba(0,0,0,.12);color:inherit;font-size:13px}',
+      /* 首页没有站点面板（只有一句「设置面板即将上线」），注入层自带一个：
+         下载进度和播放方式都在里面，任何页面都能打开。 */
+      '#iosSettingsSheet{position:fixed;left:0;right:0;top:0;bottom:0;z-index:12000;display:flex;align-items:flex-end;background:rgba(4,8,11,.62)}',
+      '#iosSettingsSheet[hidden]{display:none!important}',
+      '#iosSettingsCard{width:100%;max-height:76vh;overflow:auto;padding:16px 16px calc(20px + env(safe-area-inset-bottom,0px));background:#0c1216;color:#f4f7f8;border-radius:16px 16px 0 0;font-size:13px;line-height:1.4}',
+      '#iosSettingsHead{display:flex;align-items:center;justify-content:space-between;gap:12px;font-size:15px;font-weight:700;margin-bottom:10px}',
+      '#iosSettingsClose{border:0;background:rgba(255,255,255,.14);color:#fff;border-radius:9px;padding:10px 14px;font-size:13px;min-height:40px}',
+      '#iosExtToggle{display:block;width:100%;margin:12px 0 0;padding:13px 14px;border:0;border-radius:10px;background:#16e09d;color:#04241a;font-weight:700;font-size:13px;text-align:left;min-height:44px}',
       '#iosDownloadTrack{height:6px;margin-top:9px;overflow:hidden;border-radius:4px;background:rgba(127,127,127,.3)}',
       '#iosDownloadFill{width:0;height:100%;border-radius:inherit;background:#16e09d;transition:width .15s linear}',
       '#iosOpenDownloaded{margin-top:10px;padding:8px 12px;border-radius:8px;background:#16e09d;color:#04241a;font-weight:700}',
@@ -270,7 +294,8 @@
       '#ppCastMenu .pc-menu-row small{color:rgba(255,255,255,.62);font-weight:400;font-size:11px}',
       '#ppCastMenu .pc-menu-row[hidden]{display:none!important}',
       '#ppCastMenu .pc-menu-row.busy small{color:#16e09d}',
-      '#iosToast{position:fixed;left:50%;bottom:calc(96px + env(safe-area-inset-bottom,0px));transform:translateX(-50%);max-width:82vw;padding:10px 14px;border-radius:12px;background:rgba(8,12,15,.94);color:#fff;font-size:13px;line-height:1.35;z-index:11000;opacity:0;pointer-events:none;transition:opacity .18s ease;text-align:center}',
+      /* 提示的 z-index 要高于设置面板（12000）：面板里切「播放方式」时要看得到反馈 */
+      '#iosToast{position:fixed;left:50%;bottom:calc(96px + env(safe-area-inset-bottom,0px));transform:translateX(-50%);max-width:82vw;padding:10px 14px;border-radius:12px;background:rgba(8,12,15,.94);color:#fff;font-size:13px;line-height:1.35;z-index:13000;opacity:0;pointer-events:none;transition:opacity .18s ease;text-align:center}',
       '#iosToast[data-show]{opacity:1}',
       '.brand .brand-mark{width:30px;height:30px;background-image:var(--brand-logo);background-size:cover;background-position:center;border-radius:9px;overflow:hidden;filter:none}',
       '.brand .brand-mark>svg{display:none}',
@@ -432,7 +457,10 @@
   function applyImmersive() {
     var root = document.documentElement;
     if (!root || typeof root.setAttribute !== 'function') return;
-    var immersive = userFullscreen || (activePlayback && landscape() && !explicitInline);
+    /* 标准全屏（站点的全屏按钮）也要算沉浸态：此时页面被系统铺满，
+       注入层必须同步收起标题/工具条，并为退出全屏保留恢复状态。 */
+    var nativeFullscreen = !!(document && document.fullscreenElement);
+    var immersive = nativeFullscreen || userFullscreen || (activePlayback && landscape() && !explicitInline);
     if (immersive) root.setAttribute('data-ios-immersive', '');
     else root.removeAttribute('data-ios-immersive');
     if (immersive) {
@@ -457,6 +485,9 @@
   function setUserFullscreen(on) {
     var wasPlaying = activePlayback;
     userFullscreen = !!on;
+    /* 退出全屏后不要被「横屏播放自动沉浸」当场拉回去；
+       这个标记只挡当下这一次重算，新的播放/再次转屏会清掉它，
+       否则横屏播放会永远留在页内布局，片名标题一直压在画面上。 */
     explicitInline = !userFullscreen;
     // 进场时补一个播放态，退出时清掉，避免刚退出又被「横屏播放自动沉浸」拉回去
     if (userFullscreen) activePlayback = true;
@@ -488,13 +519,130 @@
      全屏正好落在进度条右端，和倍速挨着。 */
   var ctrlMounted = false;
   var downloadPanelMounted = false;
+  var downloadBox = null;
+  var settingsSheet = null;
 
-  function mountDownloadPanel() {
-    if (downloadPanelMounted) return true;
-    var panel = document.getElementById('settingsPanel');
-    if (!panel || typeof panel.appendChild !== 'function') return false;
+  /* 下载状态跨页面保留：原生下载在 WKWebView 外面跑，换页只换网页。
+     进度落 localStorage，回到首页也看得到；原生回传的事件在新页面继续接。 */
+  var DOWNLOAD_STORE = 'kj-ios-download';
+  var EXT_PLAYER_PREF = 'kj-ios-ext-player';
+
+  function readStore(key) {
+    try { return localStorage.getItem(key); } catch (error) { return null; }
+  }
+
+  function writeStore(key, value) {
+    try { localStorage.setItem(key, value); } catch (error) { /* 隐私模式 */ }
+  }
+
+  /* 进度事件一秒能来好几次，而 localStorage 是同步写：限流，但状态转变（开始/完成/失败）
+     必须立刻落地，否则换页回来看到的是上一次的旧进度。 */
+  var lastSaveAt = 0;
+  function saveDownload(force) {
+    var now = Date.now();
+    if (!force && now - lastSaveAt < 500) return;
+    lastSaveAt = now;
+    var phase = downloadState.busy ? 'running' : (downloadState.path ? 'done' : (downloadState.error ? 'failed' : 'idle'));
+    writeStore(DOWNLOAD_STORE, JSON.stringify({
+      id: downloadState.id, name: downloadState.name, path: downloadState.path,
+      busy: !!downloadState.busy, percent: downloadState.percent || 0,
+      error: downloadState.error || '', state: phase,
+    }));
+  }
+
+  function restoreDownload() {
+    var raw = readStore(DOWNLOAD_STORE);
+    if (!raw) return;
+    var saved = null;
+    try { saved = JSON.parse(raw); } catch (error) { return; }
+    if (!saved || typeof saved !== 'object') return;
+    /* 上次留下的「正在下载」要保留：原生层还在传，进度事件会接着送到新页面。 */
+    downloadState = {
+      id: saved.id || '',
+      name: saved.name || '',
+      path: saved.path || '',
+      busy: !!saved.busy && !saved.path,
+      percent: Number(saved.percent) || 0,
+      error: saved.state === 'failed' ? (saved.error || '下载中断') : '',
+    };
+  }
+
+  /* ---------- 设置面板：任何页面都能打开，首页也有 ---------- */
+  function ensureSettingsSheet() {
+    if (settingsSheet) return settingsSheet;
+    if (!document.body || typeof document.body.appendChild !== 'function') return null;
+    var sheet = document.createElement('div');
+    sheet.id = 'iosSettingsSheet';
+    sheet.className = 'ios-settings-sheet';
+    sheet.hidden = true;
+    if (typeof sheet.setAttribute === 'function') sheet.setAttribute('hidden', '');
+    var card = document.createElement('div');
+    card.id = 'iosSettingsCard';
+    var head = document.createElement('div');
+    head.id = 'iosSettingsHead';
+    var title = document.createElement('span');
+    title.textContent = '设置';
+    head.appendChild(title);
+    var close = document.createElement('button');
+    close.id = 'iosSettingsClose';
+    close.type = 'button';
+    close.textContent = '关闭';
+    head.appendChild(close);
+    card.appendChild(head);
+    var content = document.createElement('div');
+    content.id = 'iosSettingsBody';
+    card.appendChild(content);
+    var toggle = document.createElement('button');
+    toggle.id = 'iosExtToggle';
+    toggle.type = 'button';
+    card.appendChild(toggle);
+    sheet.appendChild(card);
+    document.body.appendChild(sheet);
+    settingsSheet = sheet;
+    syncExtToggle();
+    return sheet;
+  }
+
+  function openSettingsSheet() {
+    var sheet = ensureSettingsSheet();
+    if (!sheet) return false;
+    sheet.hidden = false;
+    if (typeof sheet.removeAttribute === 'function') sheet.removeAttribute('hidden');
+    sheet.className = 'ios-settings-sheet on';
+    /* 面板打开后再搬进度块：它要出现在用户眼前这一块里，
+       而不是留在被面板盖住的播放器设置里。 */
+    mountDownloadPanel();
+    syncDownloadRow();
+    return true;
+  }
+
+  function closeSettingsSheet() {
+    if (!settingsSheet) return;
+    settingsSheet.hidden = true;
+    if (typeof settingsSheet.setAttribute === 'function') settingsSheet.setAttribute('hidden', '');
+    settingsSheet.className = 'ios-settings-sheet';
+    /* 面板收起后进度块回到能看见的地方（播放器设置面板，没有就留在面板里） */
+    mountDownloadPanel();
+  }
+
+  /* 站点的设置按钮只会弹「即将上线」：拦下来换成我们自己的面板 */
+  function settingsTriggerHit(node) {
+    var list = document.querySelectorAll ? document.querySelectorAll('[data-action="settings"]') : [];
+    for (var index = 0; index < list.length; index++) {
+      var cursor = node;
+      while (cursor) {
+        if (cursor === list[index]) return list[index];
+        cursor = cursor.parentNode;
+      }
+    }
+    return null;
+  }
+
+  function downloadBoxElement() {
+    if (downloadBox) return downloadBox;
     var box = document.createElement('div');
     box.id = 'iosDownloadStatus';
+    box.className = 'ios-download-status';
     box.setAttribute('aria-live', 'polite');
     var label = document.createElement('div');
     label.id = 'iosDownloadLabel';
@@ -513,7 +661,27 @@
     open.hidden = true;
     if (typeof open.setAttribute === 'function') open.setAttribute('hidden', '');
     box.appendChild(open);
-    panel.appendChild(box);
+    downloadBox = box;
+    return box;
+  }
+
+  /* 进度块只有一个，跟着用户看的那一面走：
+     设置面板开着就放进面板，否则放回播放器页的「显示设置」。
+     这样不会出现两份状态对不上，也不需要在页面里用重复 id。 */
+  function downloadRoot() {
+    if (settingsSheet && settingsSheet.hidden === false) {
+      var body = document.getElementById('iosSettingsBody');
+      if (body) return body;
+    }
+    return document.getElementById('settingsPanel') || document.getElementById('iosSettingsBody');
+  }
+
+  /* 播放器页塞进站点自己的「显示设置」面板；首页没有那个面板，塞进注入层的设置面板。 */
+  function mountDownloadPanel() {
+    var container = downloadRoot();
+    if (!container || typeof container.appendChild !== 'function') return false;
+    var box = downloadBoxElement();
+    if (box.parentNode !== container) container.appendChild(box);
     downloadPanelMounted = true;
     return true;
   }
@@ -612,6 +780,8 @@
     var castMenu = document.createElement('div');
     castMenu.id = 'ppCastMenu';
     castMenu.className = 'pc-cast-menu';
+    /* 第三方播放器排在第一行：这是用户默认想走的那条路（不需要先下载）。 */
+    castMenu.appendChild(castRow('ppPlayExternal', '用第三方播放器播放', '当前线路'));
     castMenu.appendChild(castRow('ppShareLink', '分享播放地址', '系统面板'));
     castMenu.appendChild(castRow('ppCopyLink', '复制播放地址', '手动粘贴'));
     castMenu.appendChild(castRow('ppDownload', '下载本集', '需登录'));
@@ -899,6 +1069,7 @@
       if (typeof downloadOpen.removeAttribute === 'function' && downloadState.path) downloadOpen.removeAttribute('hidden');
       else if (typeof downloadOpen.setAttribute === 'function') downloadOpen.setAttribute('hidden', '');
     }
+    saveDownload();
   }
 
   function downloadProgressNote() {
@@ -923,11 +1094,63 @@
     return true;
   }
 
+  /* 交接前先停掉网页里的播放：不停的话 App 会继续用手机外放出声，
+     用户听到的还是这一台手机在放，以为根本没交接出去。 */
+  function stopInAppPlayback() {
+    var video = document.getElementById('video');
+    if (!video || typeof video.pause !== 'function') return;
+    if (video.paused === false) {
+      try { video.pause(); } catch (error) { /* 已经停了 */ }
+    }
+  }
+
+  /* 第三方播放器：默认路径。一次点击把当前线路的 https 直链交给系统播放器列表，
+     不需要先下载（HLS 线路也能交给 VLC 这类播放器）。 */
+  function playExternal() {
+    var url = mediaUrl();
+    closeCastMenu();
+    if (!url) { announce(mediaReason()); return false; }
+    stopInAppPlayback();
+    writeStore(EXT_PLAYER_PREF, '1');
+    syncExtToggle();
+    var title = document.title || '追剧AI';
+    var bridge = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.iosPlayer;
+    if (bridge) {
+      postNative({ action: 'share', url: url, title: title });
+      announce('已交给系统播放器列表：选一个播放器接着看，App 内已暂停');
+      return true;
+    }
+    var nav = typeof navigator === 'undefined' ? null : navigator;
+    if (nav && typeof nav.share === 'function') {
+      try { nav.share({ title: title, url: url }); } catch (error) { /* 用户取消 */ }
+      announce('已打开系统分享，选一个播放器接着看');
+      return true;
+    }
+    copyLink();
+    return true;
+  }
+
+  function extPlayerDefault() {
+    return readStore(EXT_PLAYER_PREF) !== '0';
+  }
+
+  function setExtPlayerDefault(on) {
+    writeStore(EXT_PLAYER_PREF, on ? '1' : '0');
+    syncExtToggle();
+    announce(on ? '以后点「外放」直接用第三方播放器' : '以后点「外放」先打开菜单');
+  }
+
+  function syncExtToggle() {
+    var toggle = document.getElementById('iosExtToggle');
+    if (toggle) toggle.textContent = '播放方式：' + (extPlayerDefault() ? '第三方播放器' : 'App 内播放');
+  }
+
   /* 分享直链：应用内原生分享面板 -> navigator.share -> AirPlay 选择器 */
   function shareLink() {
     var url = mediaUrl();
     closeCastMenu();
     if (!url) { announce(mediaReason()); return; }
+    stopInAppPlayback();
     var title = document.title || '追剧AI';
     var bridge = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.iosPlayer;
     if (bridge) {
@@ -1002,6 +1225,7 @@
     var name = downloadName();
     downloadState = { id: 'dl' + Date.now(), name: name, path: '', busy: true, percent: 0 };
     syncDownloadRow();
+    saveDownload(true);
     postNative({ action: 'download', id: downloadState.id, url: url, name: name, signedIn: true });
     announce('开始下载 ' + name);
   }
@@ -1017,6 +1241,9 @@
       announce('这一集还没下载完');
       return;
     }
+    stopInAppPlayback();
+    closeCastMenu();
+    closeSettingsSheet();
     postNative({ action: 'openLocal', path: downloadState.path, name: downloadState.name });
     announce('正在打开系统应用列表');
   }
@@ -1028,6 +1255,7 @@
 
   /* 原生层回传：同一个 id 才认，避免换集之后旧任务改乱新状态 */
   window.__zhuijuDownload = function (payload) {
+    /* 换页后本地状态是从 localStorage 恢复的，id 对得上就接着更新 */
     if (!payload || !downloadState.id || payload.id !== downloadState.id) return;
     var event = payload.event;
     if (event === 'progress') {
@@ -1043,6 +1271,7 @@
       downloadState.percent = 100;
       downloadState.path = payload.path || '';
       syncDownloadRow();
+      saveDownload(true);
       announce('已下载 ' + (payload.name || downloadState.name) + '（' + megabyte(payload.size) + '），点「用其他播放器播放」选择 App');
       return;
     }
@@ -1051,6 +1280,7 @@
     downloadState.error = event === 'cancelled' ? '已取消' : (payload.reason || '下载失败');
     downloadState.path = '';
     syncDownloadRow();
+    saveDownload(true);
     if (event === 'cancelled') announce('已取消下载');
     else announce('下载失败：' + (payload.reason || '网络不给力，稍后再试'));
   };
@@ -1062,6 +1292,31 @@
       event.preventDefault();
       event.stopImmediatePropagation();
       openLocal();
+      return true;
+    }
+    /* 点面板外面的深色底也能关，不必非得找「关闭」按钮 */
+    if (hit(target, 'iosSettingsSheet') && !hit(target, 'iosSettingsCard')) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      closeSettingsSheet();
+      return true;
+    }
+    if (hit(target, 'iosSettingsClose')) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      closeSettingsSheet();
+      return true;
+    }
+    if (hit(target, 'iosExtToggle')) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      setExtPlayerDefault(!extPlayerDefault());
+      return true;
+    }
+    if (hit(target, 'ppPlayExternal')) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      playExternal();
       return true;
     }
     if (hit(target, 'ppPlay')) {
@@ -1079,6 +1334,14 @@
     if (hit(target, 'ppCast')) {
       event.preventDefault();
       event.stopImmediatePropagation();
+      /* 默认就把这一集交给第三方播放器：用户要的是「点一下就换播放器」，
+         不是每次都先进菜单；长按「外放」或关掉这个默认值就回到菜单。 */
+      if (extPlayerDefault() && mediaUrl()) {
+        /* 长按刚把菜单打开，这一次点击不应该又把它交接出去 */
+        if (castLongPress) { castLongPress = false; return true; }
+        playExternal();
+        return true;
+      }
       if (!toggleCastMenu()) shareLink();
       return true;
     }
@@ -1153,6 +1416,9 @@
     if (event.target.id !== 'video') return;
     document.documentElement.setAttribute('data-ios-playing', '');
     activePlayback = true;
+    /* 新的一次播放就是新的会话：把「退出全屏后留在页内」的标记清掉，
+       否则横屏播放时标题栏/工具条再也不会自动收起。 */
+    explicitInline = false;
     applyImmersive();
   }, true);
   ['ended', 'emptied', 'error'].forEach(function (name) {
@@ -1173,6 +1439,14 @@
       setUserFullscreen(name === 'webkitbeginfullscreen');
     }, true);
   });
+  /* 站点自己的「全屏」优先走标准全屏 API：这条路不经过「原生全屏」事件，
+     必须跟着 fullscreenchange 同步沉浸态，才能把片名标题和工具条收起来。 */
+  document.addEventListener('fullscreenchange', function () {
+    applyImmersive();
+  }, true);
+  document.addEventListener('webkitfullscreenchange', function () {
+    applyImmersive();
+  }, true);
   document.addEventListener('keydown', function (event) {
     if (event.key === 'Escape' && userFullscreen) setUserFullscreen(false);
   }, true);
@@ -1356,6 +1630,36 @@
     scheduleAccountSync();
   }
 
+  /* 长按「外放」：临时打开菜单（复制/下载/分享）；默认值是第三方播放器时
+     单点会直接交接，菜单只能靠这一下拿到。 */
+  var castPress = null;
+  var castLongPress = false;
+  document.addEventListener('touchstart', function (event) {
+    if (!event.target) return;
+    var cast = hit(event.target, 'ppCast');
+    if (!cast || !extPlayerDefault() || !mediaUrl()) return;
+    castPress = setTimeout(function () {
+      castPress = null;
+      castLongPress = true;
+      toggleCastMenu();
+    }, 650);
+  }, true);
+  ['touchend', 'touchcancel', 'touchmove'].forEach(function (name) {
+    document.addEventListener(name, function () {
+      if (!castPress) return;
+      clearTimeout(castPress);
+      castPress = null;
+    }, true);
+  });
+
+  /* 下载状态先恢复：换页/重启后原生下载还在跑，进度条要接着显示 */
+  restoreDownload();
+  if (downloadState.id || downloadState.busy || downloadState.path) {
+    ensureSettingsSheet();
+    mountDownloadPanel();
+    syncDownloadRow();
+  }
+
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', prepareLayout, { once: true });
   } else {
@@ -1364,5 +1668,13 @@
   /* 站点是 SPA：换集或重渲染可能整块换掉 #player，几次补挂 */
   [0, 400, 1200, 2600].forEach(function (delay) {
     setTimeout(mountCtrlBar, delay);
+  });
+  /* 首页/播放页的站点渲染是异步的：面板和状态晚一步再补一次 */
+  [0, 600, 1600].forEach(function (delay) {
+    setTimeout(function () {
+      mountDownloadPanel();
+      syncExtToggle();
+      syncDownloadRow();
+    }, delay);
   });
 }());

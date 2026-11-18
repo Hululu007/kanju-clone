@@ -16,7 +16,18 @@ function node(tag = 'div') {
     /* 真实 DOM 里 style.display 默认是空串，不是 undefined */
     style: { display: '' },
     dataset: {},
-    appendChild(child) { child.parentNode = element; element.children.push(child); return child; },
+    /* 真实 DOM 的 appendChild 会把节点从原来的父节点上摘下来（移动而不是复制）：
+       注入层靠这个把进度块在两个面板之间搬来搬去，夹具必须照做。 */
+    appendChild(child) {
+      if (child.parentNode && child.parentNode.children) {
+        const siblings = child.parentNode.children;
+        const at = siblings.indexOf(child);
+        if (at >= 0) siblings.splice(at, 1);
+      }
+      child.parentNode = element;
+      element.children.push(child);
+      return child;
+    },
     insertBefore(child, reference) {
       const index = element.children.indexOf(reference);
       child.parentNode = element;
@@ -52,7 +63,10 @@ function node(tag = 'div') {
   return element;
 }
 
-function fixture({ origin = 'https://zhuiju.dpdns.org', storageThrows = false, landscape = false, keyword = '', search = '?id=fixture', episodes = [], playRejects = false, maxRate = 0, bridge = true, signedIn = false, noSelectedEpisode = false } = {}) {
+/* 夹具默认把「默认用第三方播放器」关掉（seed 成 '0'）：按钮/菜单类用例关心的是菜单本身，
+   每次都先点两下很啰嗦。新用例要验「默认就是第三方播放器」时传 externalPlayerDefault: true，
+   此时不写这条偏好，和真机上第一次安装的默认值一致。 */
+function fixture({ origin = 'https://zhuiju.dpdns.org', storageThrows = false, landscape = false, keyword = '', search = '?id=fixture', episodes = [], playRejects = false, maxRate = 0, bridge = true, signedIn = false, noSelectedEpisode = false, homePage = false, externalPlayerDefault = false, seed = {} } = {}) {
   const shared = [];
   const listeners = {};
   const replies = [];
@@ -133,11 +147,6 @@ function fixture({ origin = 'https://zhuiju.dpdns.org', storageThrows = false, l
   const settingsPanel = node('div');
   settingsPanel.id = 'settingsPanel';
   settingsPanel.hidden = false;
-  const downloadLabel = node('div'); downloadLabel.id = 'iosDownloadLabel';
-  const downloadFill = node('div'); downloadFill.id = 'iosDownloadFill';
-  downloadFill.style.width = '0%';
-  const downloadOpen = node('button'); downloadOpen.id = 'iosOpenDownloaded'; downloadOpen.hidden = true;
-  settingsPanel.appendChild(downloadLabel); settingsPanel.appendChild(downloadFill); settingsPanel.appendChild(downloadOpen);
   const tabbar = node('nav'); tabbar.className = 'tabbar';
   const lineBar = node('div');
   lineBar.id = 'lineBar';
@@ -197,6 +206,9 @@ function fixture({ origin = 'https://zhuiju.dpdns.org', storageThrows = false, l
   });
   tabRow.querySelectorAll = (selector) => (selector === '.pp-tab' ? tabButtons : []);
   const body = node('body');
+  /* 顶栏设置入口：首页用它打开设置面板（站点自己只会弹「即将上线」） */
+  const settingsTrigger = node('button');
+  settingsTrigger.dataset = { action: 'settings' };
   const idIndex = new Map();
   body.appendChild = (child) => {
     child.parentNode = body;
@@ -213,19 +225,17 @@ function fixture({ origin = 'https://zhuiju.dpdns.org', storageThrows = false, l
     },
     getElementById(id) {
       if (idIndex.has(id)) return idIndex.get(id);
-      if (id === 'video') return video;
-      if (id === 'playTools') return toolbar;
+      /* 首页没有播放器和播放器设置面板：注入层必须在没有任何站点面板时也自带一块 */
+      if (id === 'video') return homePage ? null : video;
+      if (id === 'playTools') return homePage ? null : toolbar;
       if (id === 'q') return searchInput;
       if (id === 'playHint') return hint;
       if (id === 'epMore') return epMore;
-      if (id === 'settingsPanel') return settingsPanel;
-      if (id === 'iosDownloadLabel') return downloadLabel;
-      if (id === 'iosDownloadFill') return downloadFill;
-      if (id === 'iosOpenDownloaded') return downloadOpen;
+      if (id === 'settingsPanel') return homePage ? null : settingsPanel;
       if (id === 'lineBar') return lineBar;
       if (id === 'epGrid') return epGrid;
       if (id === 'days') return days;
-      if (id === 'player') return player;
+      if (id === 'player') return homePage ? null : player;
       if (id === 'ppCtrl') return player.children.find((child) => child.id === 'ppCtrl') || null;
       const walk = (element) => {
         for (const child of element.children || []) {
@@ -237,13 +247,16 @@ function fixture({ origin = 'https://zhuiju.dpdns.org', storageThrows = false, l
         }
         return null;
       };
-      return walk(toolbar) || walk(player) || walk(settingsPanel);
+      return walk(toolbar) || walk(player) || walk(settingsPanel) || walk(body);
     },
+    /* 站点的标准全屏 API 路径：document.fullscreenElement 为真时页面进入原生全屏 */
+    fullscreenElement: null,
     createElement(tag) { return node(tag); },
     querySelector(selector) {
       if (selector === '.ep.on') return noSelectedEpisode ? null : selected;
       if (selector === '[data-action="login"]') return loginTrigger;
       if (selector === '.pp-tabs') return tabRow;
+      if (selector === '[data-action="settings"]') return settingsTrigger;
       return null;
     },
     querySelectorAll(selector) {
@@ -262,6 +275,7 @@ function fixture({ origin = 'https://zhuiju.dpdns.org', storageThrows = false, l
       if (selector === '#player .p-label') return [];
       if (selector === '.pp-toolbar' || selector === '.dm-input' || selector === '#dmInputWrap') return [];
       if (selector === '.pp-hint' || selector === '#playHint') return [hint];
+      if (selector === '[data-action="settings"]') return [settingsTrigger];
       return [];
     },
     documentElement: {
@@ -269,11 +283,12 @@ function fixture({ origin = 'https://zhuiju.dpdns.org', storageThrows = false, l
       removeAttribute(name) { delete attributes[name]; },
       hasAttribute(name) { return !!attributes[name]; },
     } };
+  let isLandscape = landscape;
   const window = { location: { origin, protocol: 'https:', hostname: new URL(origin).hostname,
     href: origin + '/player/?id=fixture', pathname: '/player/', search, replace(value) { redirects.push(value); } },
     innerWidth: landscape ? 844 : 390,
     innerHeight: landscape ? 390 : 844,
-    matchMedia(query) { return { matches: landscape && /landscape/.test(query) }; },
+    matchMedia(query) { return { matches: isLandscape && /landscape/.test(query) }; },
     addEventListener(name, listener) { (listeners[name] ||= []).push(listener); },
     webkit: bridge ? { messageHandlers: { iosPlayer: { postMessage(body) { messages.push(body); } } } } : {},
     HTMLMediaElement: { prototype: mediaProto },
@@ -292,7 +307,11 @@ function fixture({ origin = 'https://zhuiju.dpdns.org', storageThrows = false, l
     share(payload) { shared.push(payload); return Promise.resolve(); },
     clipboard: { writeText(value) { shared.push({ copied: value }); return Promise.resolve(); } },
   };
-  const storage = { 'kj-speed': '2' };
+  const storage = { 'kj-speed': '2', ...seed };
+  /* 夹具默认走「外放=菜单」这条老路径，见文件头的说明 */
+  if (!externalPlayerDefault && !Object.prototype.hasOwnProperty.call(storage, 'kj-ios-ext-player')) {
+    storage['kj-ios-ext-player'] = '0';
+  }
   if (signedIn) {
     storage['kj-auth-token'] = 'test-token';
     storage['kj-auth-user'] = JSON.stringify({ id: 7, username: 'kenzhao11' });
@@ -307,8 +326,19 @@ function fixture({ origin = 'https://zhuiju.dpdns.org', storageThrows = false, l
   vm.runInContext(source, context);
   return { window, document, replies, calls, redirects, selected, video, messages, attributes, head, toolbar, searchInput, shared, player,
     hint, epButtons, epGrid, epMore, mediaProto, days, dayButtons, observers, loginTrigger, storage,
-    settingsPanel, lineBar, tabRow, tabButtons, clicked, sbName, sbSub, acctName, tabbar,
-    downloadLabel, downloadFill, downloadOpen,
+    settingsPanel, lineBar, tabRow, tabButtons, clicked, sbName, sbSub, acctName, tabbar, settingsTrigger,
+    /* 下载进度控件由注入层自己建（0.1.9 之后不再依赖站点预设的节点），
+       所以按 id 现取，不让夹具自己造一份同名节点。 */
+    get downloadLabel() { return document.getElementById('iosDownloadLabel'); },
+    get downloadFill() { return document.getElementById('iosDownloadFill'); },
+    get downloadOpen() { return document.getElementById('iosOpenDownloaded'); },
+    /* 转屏：真机上 matchMedia 和 innerWidth 会同时跟着变 */
+    setLandscape(next) {
+      isLandscape = !!next;
+      window.innerWidth = isLandscape ? 844 : 390;
+      window.innerHeight = isLandscape ? 390 : 844;
+    },
+    sheet() { return document.getElementById('iosSettingsSheet'); },
     /* 悬浮提示：注入层只写 #iosToast，不再改写文档流里的 #playHint */
     toastText() {
       const box = document.getElementById('iosToast');
@@ -580,6 +610,53 @@ test('explicit exit wins over automatic landscape immersion', () => {
   assert.equal(state.messages.at(-1).action, 'inline');
 });
 
+/* 0.1.9 回归：退出全屏留下「显式留在页内」的标记，下一次播放/再次横屏都拿不回来，
+   于是横屏播放时片名标题和整页页眉一直压在上面，用户只能反复点全屏才对。 */
+test('landscape playback goes immersive again after a fullscreen round trip', () => {
+  const state = fixture({ landscape: true }); state.ready();
+  const button = state.document.getElementById('ppFull');
+  state.emit('play', { target: state.video });
+  state.click(button);
+  state.click(button);
+  assert.equal(state.attributes['data-ios-immersive'], undefined, '刚退出全屏时不抢回去');
+
+  /* 用户接着再点播放（换集或重新播放），横屏里标题必须继续收起 */
+  state.emit('pause', { target: state.video });
+  state.emit('play', { target: state.video });
+  assert.equal(state.attributes['data-ios-immersive'], true,
+    '再次播放时横屏必须重新进入沉浸态，标题栏不能留在画面上');
+});
+
+test('rotating back to landscape during playback restores immersive mode', () => {
+  const state = fixture({ landscape: true }); state.ready();
+  const button = state.document.getElementById('ppFull');
+  state.emit('play', { target: state.video });
+  state.click(button);
+  state.click(button);
+  assert.equal(state.attributes['data-ios-immersive'], undefined);
+
+  state.setLandscape(false);
+  state.emit('orientationchange', {});
+  state.setLandscape(true);
+  state.emit('orientationchange', {});
+  assert.equal(state.attributes['data-ios-immersive'], true, '转回横屏播放时标题栏要重新收起');
+});
+
+/* 站点的自带控制栏优先用标准全屏 API（player.requestFullscreen），这条路不经过
+   data-ios-immersive，所以标题只能靠 :fullscreen 规则和 fullscreenchange 兜住。 */
+test('the standard fullscreen api hides the title and keeps immersion in sync', () => {
+  const state = fixture(); state.ready();
+  const css = state.head.children.find((child) => child.id === 'iosShellStyle').textContent;
+  assert.match(css, /:fullscreen[^{]*\.p-label\{display:none!important\}/, '标准全屏里也要收起片名标题');
+
+  state.document.fullscreenElement = state.player;
+  state.emit('fullscreenchange', {});
+  assert.equal(state.attributes['data-ios-immersive'], true, '进了标准全屏就要同步沉浸态，隐藏标题和工具条');
+  state.document.fullscreenElement = null;
+  state.emit('fullscreenchange', {});
+  assert.equal(state.attributes['data-ios-immersive'], undefined, '退出标准全屏要恢复页内布局');
+});
+
 test('search request carries the keyword typed into the search box', async () => {
   const state = fixture({ keyword: '火影' });
   await state.window.fetch('https://kanju-api.kenzhao123.workers.dev/api/list?sort=heat&limit=6&page=1');
@@ -811,7 +888,8 @@ test('cast menu lists share, copy and download, and hides the player row until a
   const state = fixture(); state.ready();
   const menu = state.document.getElementById('ppCastMenu');
   assert.deepEqual(menu.children.map((row) => row.id),
-    ['ppShareLink', 'ppCopyLink', 'ppDownload', 'ppDownloadProgress', 'ppOpenLocal']);
+    ['ppPlayExternal', 'ppShareLink', 'ppCopyLink', 'ppDownload', 'ppDownloadProgress', 'ppOpenLocal'],
+    '第三方播放器排第一行，后面才是分享/复制/下载');
   assert.equal(state.document.getElementById('ppOpenLocal').hidden, true, '还没下载就没有「用其他播放器打开」');
   assert.equal(state.document.getElementById('ppCast').textContent, '外放');
 
@@ -969,4 +1047,165 @@ test('a signed-in sidebar never also says it is a guest account', async () => {
   assert.equal(mine.acctName.textContent, 'kenzhao11', '成长卡片不能还写着游客账号');
   assert.doesNotMatch(mine.acctName.textContent, /游客/);
   assert.match(mine.sbSub.textContent, /已登录/);
+});
+
+/* ---------- 0.1.9 回归：下载进度要看得到（首页设置面板） ---------- */
+
+/* 站点首页顶栏只有一个设置图标，点开只弹「设置面板即将上线」；
+   下载进度原先只塞进播放页的 #settingsPanel，一离开播放页就什么都看不到。 */
+test('the home page settings panel shows the download progress', () => {
+  const state = fixture({ homePage: true }); state.ready();
+  const trigger = state.document.querySelector('[data-action="settings"]');
+  assert.ok(trigger, '首页必须有设置入口');
+  assert.equal(state.sheet(), null, '还没点之前不该有面板盖在页面');
+
+  state.click(trigger);
+  const sheet = state.sheet();
+  assert.ok(sheet, '首页也要有能打开的设置面板');
+  assert.equal(sheet.hidden, false, '点了设置就要打开');
+  assert.ok(sheet.className.includes('on'));
+  assert.match(state.document.getElementById('iosDownloadLabel').textContent, /下载进度/);
+
+  state.click(state.document.getElementById('iosSettingsClose'));
+  assert.equal(sheet.hidden, true, '关闭按钮要能收起面板');
+});
+
+/* 下载在原生层跑，换页不会停；进度必须先落到 localStorage，再在新页面接上，
+   否则从播放页回首页时进度条永远是「尚未下载」。 */
+test('a running download keeps reporting progress after going back home', () => {
+  const state = fixture({
+    homePage: true,
+    seed: { 'kj-ios-download': JSON.stringify({ id: 'dl9', name: '追剧AI_第3集.mp4', busy: true, percent: 42, state: 'running' }) },
+  });
+  state.ready();
+  assert.match(state.document.getElementById('iosDownloadLabel').textContent, /42%/);
+  assert.equal(state.document.getElementById('iosDownloadFill').style.width, '42%');
+
+  state.window.__zhuijuDownload({ event: 'progress', id: 'dl9', received: 60, total: 100 });
+  assert.match(state.document.getElementById('iosDownloadLabel').textContent, /60%/);
+  assert.equal(state.document.getElementById('iosDownloadFill').style.width, '60%');
+  assert.match(JSON.parse(state.storage['kj-ios-download']).percent ? '60' : 'x', /60/);
+
+  state.window.__zhuijuDownload({ event: 'done', id: 'dl9', path: '/tmp/追剧AI_第3集.mp4', name: '追剧AI_第3集.mp4', size: 104857600 });
+  assert.equal(state.document.getElementById('iosOpenDownloaded').hidden, false, '下完就要能交给播放器 App');
+  assert.equal(JSON.parse(state.storage['kj-ios-download']).state, 'done');
+
+  state.click(state.document.getElementById('iosOpenDownloaded'));
+  assert.equal(state.messages.at(-1).action, 'openLocal');
+  assert.equal(state.messages.at(-1).path, '/tmp/追剧AI_第3集.mp4');
+});
+
+/* ---------- 0.1.9 回归：默认用第三方播放器 ---------- */
+
+/* 用户的原话是「默认用第三方播放器播放，不要都卡在外放那里」：
+   点「外放」就该直接把这一集交给系统播放器列表，而不是再进一层菜单。 */
+test('the cast button hands the episode to a third-party player in one tap by default', () => {
+  const state = fixture({ externalPlayerDefault: true }); state.ready();
+  state.emit('play', { target: state.video });
+  state.click(state.document.getElementById('ppCast'));
+
+  const message = state.messages.at(-1);
+  assert.equal(message.action, 'share', '一次点击就把直链交给系统播放器列表');
+  assert.equal(message.url, 'https://media.example/19.mp4');
+  assert.equal(state.video.paused, true, '交接后 App 内必须暂停，不能继续在外放出声');
+  assert.equal(state.storage['kj-ios-ext-player'], '1', '用过一次要记住这个默认');
+  assert.match(state.toastText(), /播放器/);
+});
+
+test('a long press on the cast button still opens the full menu', () => {
+  const state = fixture({ externalPlayerDefault: true }); state.ready();
+  state.emit('play', { target: state.video });
+  const cast = state.document.getElementById('ppCast');
+  state.touch('touchstart', cast, 300, 700);
+  /* 长按计时器到点后打开菜单，暂停的播放不能被当成「已经交接」 */
+  return new Promise((resolve) => setTimeout(resolve, 760)).then(() => {
+    assert.match(state.document.getElementById('ppCastMenu').className, /on/);
+    assert.equal(state.messages.length, 0, '长按只是打开菜单，不要偷偷交接');
+  });
+});
+
+test('the cast menu always starts with the third-party player row', () => {
+  const state = fixture({ signedIn: true }); state.ready();
+  const menu = state.document.getElementById('ppCastMenu');
+  assert.deepEqual(menu.children.map((row) => row.id),
+    ['ppPlayExternal', 'ppShareLink', 'ppCopyLink', 'ppDownload', 'ppDownloadProgress', 'ppOpenLocal'],
+    '第三方播放器要排在第一行：这是用户默认想走的那条路');
+  assert.equal(state.document.getElementById('ppOpenLocal').hidden, true);
+
+  state.click(state.document.getElementById('ppPlayExternal'));
+  const message = state.messages.at(-1);
+  assert.equal(message.action, 'share');
+  assert.equal(message.url, 'https://media.example/19.mp4');
+});
+
+test('HLS lines can still be played by an external player even though they cannot be downloaded', () => {
+  const state = fixture({ signedIn: true }); state.ready();
+  state.video.currentSrc = 'https://media.example/19.m3u8';
+  state.click(state.document.getElementById('ppPlayExternal'));
+  assert.equal(state.messages.at(-1).action, 'share', '第三方播放器认得 HLS');
+  assert.equal(state.messages.at(-1).url, 'https://media.example/19.m3u8');
+});
+
+test('the settings panel can switch the default player back to the app', () => {
+  const state = fixture({ externalPlayerDefault: true }); state.ready();
+  state.click(state.settingsTrigger);
+  assert.equal(state.document.getElementById('iosExtToggle').textContent, '播放方式：第三方播放器');
+  state.click(state.document.getElementById('iosExtToggle'));
+  assert.equal(state.storage['kj-ios-ext-player'], '0');
+  assert.equal(state.document.getElementById('iosExtToggle').textContent, '播放方式：App 内播放');
+
+  state.emit('play', { target: state.video });
+  state.click(state.document.getElementById('ppCast'));
+  assert.match(state.document.getElementById('ppCastMenu').className, /on/, '关掉默认后「外放」回到菜单');
+  assert.equal(state.messages.length, 0);
+});
+
+/* 进度块只有一个，必须跟着用户眼前那一面走：设置面板开着就在面板里，
+   收起后回到播放器的「显示设置」，不能出现两份对不上的状态。 */
+test('the download block follows whichever settings panel is open', () => {
+  const state = fixture({ signedIn: true }); state.ready();
+  state.click(state.document.getElementById('ppDownload'));
+  const { id } = state.messages.at(-1);
+  state.window.__zhuijuDownload({ id, event: 'progress', received: 30, total: 100 });
+  assert.ok(state.settingsPanel.children.includes(state.document.getElementById('iosDownloadStatus')),
+    '平时进度块在播放器的「显示设置」里');
+
+  state.click(state.settingsTrigger);
+  const body = state.document.getElementById('iosSettingsBody');
+  const box = state.document.getElementById('iosDownloadStatus');
+  assert.ok(body.children.includes(box), '面板打开时进度块要在面板里');
+  assert.equal(state.document.getElementById('iosDownloadLabel').textContent, '下载进度：30%');
+  assert.equal(state.document.getElementById('iosDownloadFill').style.width, '30%');
+
+  state.click(state.document.getElementById('iosSettingsClose'));
+  assert.equal(body.children.includes(box), false, '面板收起后不该还占着面板的 DOM');
+  assert.ok(state.settingsPanel.children.includes(box), '收起后进度块回到播放器设置里');
+});
+
+test('tapping the dimmed backdrop closes the settings panel', () => {
+  const state = fixture({ homePage: true }); state.ready();
+  state.click(state.settingsTrigger);
+  const sheet = state.sheet();
+  assert.equal(sheet.hidden, false);
+  state.click(sheet);
+  assert.equal(sheet.hidden, true, '点深色底要能关掉面板');
+});
+
+/* 进度事件一秒能来很多次，写 localStorage 必须限流；但「完成」这一次状态转变
+   无论如何都要落地，否则换页回来还是上一次的旧进度。 */
+test('a burst of progress events never loses the finished state on disk', () => {
+  const state = fixture({ signedIn: true }); state.ready();
+  state.click(state.document.getElementById('ppDownload'));
+  const { id } = state.messages.at(-1);
+  for (const percent of [5, 17, 33, 48, 66, 84]) {
+    state.window.__zhuijuDownload({ id, event: 'progress', received: percent, total: 100 });
+  }
+  assert.equal(state.document.getElementById('iosDownloadLabel').textContent, '下载进度：84%',
+    '界面必须是最新一次进度，不能被限流拖住');
+
+  state.window.__zhuijuDownload({ id, event: 'done', path: '/tmp/追剧AI_第19集.mp4', name: '追剧AI_第19集.mp4', size: 10485760 });
+  const saved = JSON.parse(state.storage['kj-ios-download']);
+  assert.equal(saved.state, 'done');
+  assert.equal(saved.percent, 100);
+  assert.equal(saved.path, '/tmp/追剧AI_第19集.mp4');
 });
