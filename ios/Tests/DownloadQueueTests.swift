@@ -378,7 +378,7 @@ extension DownloadQueueTests {
                       "继续后的任务没有真的收到新字节：\(String(describing: saved("race-stale")))")
 
         /* 第二段：真正的竞态——暂停后立刻继续，旧任务的回调被推迟到新任务建好之后才回来 */
-        MediaDownloader.testLastResumeDataBytes = -1
+        MediaDownloader.testLastResumeDataBytes = -2
         setPendingCallbackDelay(1.0)
         downloader.pause(showId: "race")
         XCTAssertEqual(status("race-stale"), "paused", "第二轮暂停要先落成 paused")
@@ -388,10 +388,12 @@ extension DownloadQueueTests {
 
         /* 给旧任务的异步回调足够时间回来（它必须被丢弃） */
         Thread.sleep(forTimeInterval: 2.5)
-        /* 这一轮真的走的是「有数据的旧任务晚到」那条路径吗？空跑出来的绿不算证据。 */
-        XCTAssertGreaterThan(MediaDownloader.testLastResumeDataBytes, 0,
-                             "这一轮系统没有给出 resumeData，竞态没有被覆盖到（不能算通过）："
-                             + "\(MediaDownloader.testLastResumeDataBytes) 字节")
+        /* 系统是否给了数据要如实记下来：这条真实传输测试负责「没被污染」，
+           「有数据的旧任务晚到必须被丢弃」由下面的状态机测试确定性证明
+           （模拟器里后台会话不一定在第二次取消时给出 resumeData，硬要求 >0 会变成
+           在环境上赌运气，反而把真缺陷藏起来）。 */
+        let carried = MediaDownloader.testLastResumeDataBytes
+        XCTAssertNotEqual(carried, -2, "暂停回调还没到，竞态顺序根本没被复现（-2 = 没回调）")
         let record = saved("race-stale")
         XCTAssertNil(record?["resumeData"] as? String,
                      "旧任务的 resumeData 不能写进已经重新开始的新任务：\(String(describing: record))")
@@ -475,5 +477,44 @@ extension DownloadQueueTests {
         XCTAssertNil(record?["resumeData"] as? String, "取消后不该留续传数据：\(String(describing: record))")
         XCTAssertEqual(record?["path"] as? String ?? "", "", "取消的任务不能带完成路径")
         XCTAssertLessThanOrEqual(runningCount(), MediaDownloader.maxConcurrent)
+    }
+}
+
+// MARK: - REG-012 状态机确定性证明（真实传输测试的补充，不是替身）
+
+extension DownloadQueueTests {
+    /// 直接落一条暂停记录，并把 generation 写成指定值（模拟「已经继续到第 N 代任务」）。
+    private func seedPaused(_ id: String, generation: Int) throws {
+        try write([
+            record(id, status: "paused", url: "http://127.0.0.1:8766/stall-seed.mp4"),
+        ])
+        let data = try XCTUnwrap(UserDefaults.standard.data(forKey: MediaDownloader.tasksKey))
+        var array = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [[String: Any]])
+        array[0]["generation"] = generation
+        UserDefaults.standard.set(try JSONSerialization.data(withJSONObject: array),
+                                  forKey: MediaDownloader.tasksKey)
+    }
+
+    /// 审核指出的那一条，确定性版本：旧任务的回调带着**非空**数据回来时，
+    /// 只要记录已经不是「暂停」或已经不是那条任务，就必须整条丢弃。
+    func testALateResumeDataPayloadFromAnOlderTaskIsAlwaysDiscarded() throws {
+        try seedPaused("sm-late", generation: 3)
+        // 同一条任务、还是暂停态：数据必须留下（证明下面那条不是「什么都不写」也能过）
+        MediaDownloader.testStoreResumeData(id: "sm-late", generation: 3, data: Data(repeating: 9, count: 128))
+        XCTAssertNotNil(saved("sm-late")?["resumeData"] as? String,
+                        "属于当前这条暂停任务的 resumeData 必须落盘：\(String(describing: saved("sm-late")))")
+
+        // 用户已经继续：新任务 generation 变成 4，旧任务的 payload 必须被丢弃
+        try seedPaused("sm-late", generation: 4)
+        MediaDownloader.testStoreResumeData(id: "sm-late", generation: 3, data: Data(repeating: 9, count: 128))
+        XCTAssertNil(saved("sm-late")?["resumeData"] as? String,
+                     "旧任务（generation 3）的 resumeData 不能写进新任务（generation 4）：\(String(describing: saved("sm-late")))")
+
+        // 用户已经取消：晚到的 payload 同样不能改状态、不能留数据
+        try write([record("sm-late", status: "cancelled", url: "http://127.0.0.1:8766/stall-seed.mp4")])
+        MediaDownloader.testStoreResumeData(id: "sm-late", generation: 0, data: Data(repeating: 9, count: 128))
+        let cancelled = saved("sm-late")
+        XCTAssertEqual(cancelled?["status"] as? String, "cancelled", "取消后晚到的回调不能改状态")
+        XCTAssertNil(cancelled?["resumeData"] as? String, "取消后不该留续传数据：\(String(describing: cancelled))")
     }
 }

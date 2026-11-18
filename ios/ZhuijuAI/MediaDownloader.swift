@@ -88,6 +88,11 @@ final class MediaDownloader: NSObject {
     /// **仅测试构建**：系统这次回调到底给了多少字节的 resumeData（-1 = 没给）。
     /// 测试靠它证明「竞态这一轮真的走的是有数据的旧任务」，不然绿了也可能是空跑。
     static var testLastResumeDataBytes: Int = -1
+    /// **仅测试构建**：把真实那条落盘函数暴露给状态机测试用（不是伪下载、不伪装 delegate，
+    /// 只是让测试能给这个真实函数喂一条「属于旧任务的 payload」）。
+    static func testStoreResumeData(id: String, generation: Int, data: Data?) {
+        storeResumeData(id: id, generation: generation, data: data)
+    }
     #endif
 
     /// 后台会话的标识：App 被重新拉起时系统就是用它把回调交回来的，不能改。
