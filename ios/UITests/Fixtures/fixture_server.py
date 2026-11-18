@@ -63,12 +63,15 @@ class FixtureHandler(BaseHTTPRequestHandler):
                 "idx": int(re.sub(r"\D", "", ep) or 0),
                 "line": line,
                 "verified": True,
+                "kind": "mp4",
+                "episodeNumber": int(re.sub(r"\D", "", ep) or 0),
                 "type": "mp4",
                 "data": {
                     "url": media, "media": media, "src": media,
                     "show": show, "showId": show, "ep": ep,
                     "idx": int(re.sub(r"\D", "", ep) or 0), "line": line,
-                    "verified": True, "type": "mp4",
+                    "verified": True, "kind": "mp4",
+                    "episodeNumber": int(re.sub(r"\D", "", ep) or 0), "type": "mp4",
                 },
             })
 
