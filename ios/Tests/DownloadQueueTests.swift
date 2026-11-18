@@ -386,14 +386,16 @@ extension DownloadQueueTests {
         XCTAssertTrue(waitUntil(timeout: 15) { self.status("race-stale") != "paused" },
                       "继续之后不能还停在暂停：\(String(describing: saved("race-stale")))")
 
-        /* 给旧任务的异步回调足够时间回来（它必须被丢弃） */
-        Thread.sleep(forTimeInterval: 2.5)
+        /* 先等系统这次回调真的回来（活跃的慢速任务上它可能比两秒还慢），
+           再等过 seam 的 1.0 秒延迟窗口，然后才断言「旧数据没有被写进新任务」。 */
+        let callbackArrived = waitUntil(timeout: 30) { MediaDownloader.testLastResumeDataBytes != -2 }
+        XCTAssertTrue(callbackArrived, "暂停回调一直没回来（-2），竞态顺序没有被复现")
+        Thread.sleep(forTimeInterval: 1.5)
         /* 系统是否给了数据要如实记下来：这条真实传输测试负责「没被污染」，
            「有数据的旧任务晚到必须被丢弃」由下面的状态机测试确定性证明
            （模拟器里后台会话不一定在第二次取消时给出 resumeData，硬要求 >0 会变成
            在环境上赌运气，反而把真缺陷藏起来）。 */
         let carried = MediaDownloader.testLastResumeDataBytes
-        XCTAssertNotEqual(carried, -2, "暂停回调还没到，竞态顺序根本没被复现（-2 = 没回调）")
         let record = saved("race-stale")
         XCTAssertNil(record?["resumeData"] as? String,
                      "旧任务的 resumeData 不能写进已经重新开始的新任务：\(String(describing: record))")
