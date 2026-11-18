@@ -515,9 +515,13 @@ final class InjectedUITests: XCTestCase, WKNavigationDelegate {
         XCTAssertEqual(autoResult["bottomInPlayer"] as? Bool, true, "自动收起后画面上不能留任何遮罩：\(autoText)")
 
         /* 退出全屏回到页内：控制栏要回来，否则连退出/换集都点不到。
-           控制栏有 0.18s 的淡入过渡：等它走完再读计算值，否则读到的是过渡起点。 */
+           真机退出全屏会锁回竖屏（横屏+播放中会自动进沉浸，这是 0.1.9 起的设计），
+           模拟器里把网页帧转回竖屏来复现这一步；控制栏还有 0.18s 淡入，等它走完再读。 */
         _ = try await javaScript("document.getElementById('ppFull').click(); 'exited'")
-        try await Task.sleep(nanoseconds: 500_000_000)
+        window.frame = CGRect(x: 0, y: 0, width: 390, height: 844)
+        webView.frame = CGRect(x: 0, y: 0, width: 390, height: 844)
+        window.rootViewController?.view.layoutIfNeeded()
+        try await Task.sleep(nanoseconds: 800_000_000)
         let exited = try await javaScript("""
         (function () {
           var style = getComputedStyle(document.getElementById('ppCtrl'));
