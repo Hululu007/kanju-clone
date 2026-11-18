@@ -494,9 +494,11 @@ node --test --test-name-pattern='landscape playback goes immersive again' ios/Te
 
 | 运行 | 代码 | 结果 |
 | --- | --- | --- |
-| [44310127444](https://github.com/kenzhao11/kanju-clone/actions/runs/44310127444) | 只加了 `LibraryDoneTests`（修复前） | **红**：`已下载 1/1 集` ≠ `已下载 5/5 集`，集号只有 `第19集` |
+| [44310127444](https://github.com/kenzhao11/kanju-clone/actions/runs/44310127444) | 只加了 `LibraryDoneTests`（修复前） | **红**：`已下载 1/1 集` ≠ `已下载 5/5 集`，5 个批量集号一个都没进片库 |
 | 44300418982 的图 09（`dbb3581`） | 修复前的出包关卡 | 现场就是队列 `任务 5/5 集 · 总进度 100% · 全部完成` + 片库 `已下载 0/5 集` + `下载进度：尚未下载` |
-| 44310316242 | 修复提交 | **红，但不是代码**：`The job was not acquired by Runner of type hosted`（macOS 队列容量），重跑 |
+| [44310316242](https://github.com/kenzhao11/kanju-clone/actions/runs/44310316242) / [44318702236](https://github.com/kenzhao11/kanju-clone/actions/runs/44318702236) | 修复提交 | **红，但不是代码**：`The job was not acquired by Runner of type hosted`（macOS 队列容量），改 workflow_dispatch 重跑 |
+| [44324188770](https://github.com/kenzhao11/kanju-clone/actions/runs/44324188770) | 修复 + 加严的出包关卡 | 出包关卡与 9 张图**全过**（图 09 已显示 5/5），但两条 XCTest 红：`DownloadQueueUITests` 看不到任务数（同剧两 id），`LibraryDoneTests` 算出 6/5（别的用例遗留的 第19集）|
+| [44330227019](https://github.com/kenzhao11/kanju-clone/actions/runs/44330227019) | 本分支最终（`2f75521`） | **全绿**：模拟器 **63 条** + Node **91 项** + UI 冒烟 **3 条** + Release 包编译通过；9 张图导出 `export-exit=0`；IPA sha256 `ca804e77f231092fb832eacc1e8869f3a0e65aa6dbc4c08fd050c7d4b9d32a87` |
 - **修复版本**：0.1.14（build 15）
 - **验证边界**：断言的是网页片库与原生完成事件的绑定；真实片源下载与后台传输由
   `BackgroundTransferIntegrationTests` 覆盖，真机锁屏/通知仍属真机项。
