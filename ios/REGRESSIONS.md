@@ -217,12 +217,14 @@ node --test --test-name-pattern='landscape playback goes immersive again' ios/Te
   - 进程被回收后重新拉起：`getAllTasks` 对账，任务已经不在了就如实标「下载被系统中断」，
     绝不标完成。取消/失败也不会写成完成。
 - **支持范围**：MP4 / M4V / MOV / MKV / TS 的 https 直链可下；HLS（`.m3u8`）仍然如实拒绝、不会标完成。
-- **后台传输由谁执行**：`URLSessionConfiguration.background` 的任务由系统的
-  `com.apple.nsurlsessiond` 执行。headless CI 的模拟器里这个 XPC 服务偶尔没有就绪，
-  后台会话会立刻以 `NSCocoaErrorDomain 4097`（connection to service named
-  com.apple.nsurlsessiond）失败 —— **不是 localhost 不可达**（同一地址前台请求正常）。
-  工作流现在会先 kickstart 该服务并打印 `launchctl print`，测试里也用前台预检把
-  「环境没起来」和「传输真的错了」分开。
+- **后台传输由谁执行 / 之前为什么测不出来**：`URLSessionConfiguration.background` 的任务由系统的
+  `com.apple.nsurlsessiond` 执行。第一次跑集成测试时后台会话立刻以
+  `NSCocoaErrorDomain 4097`（connection to service named com.apple.nsurlsessiond）失败，
+  看起来像 localhost 不通，其实不是：同一地址的前台请求正常，`launchctl print` 里守护进程
+  `state = running`。真正的原因是模拟器测试宿主**没有签名**（CI 一直用
+  `CODE_SIGNING_ALLOWED=NO`），nsurlsessiond 的 XPC 连接按代码签名拒了它。
+  现在模拟器构建按 Xcode 默认做 ad-hoc 签名（`CODE_SIGN_IDENTITY=-`，设备 Release 包仍然不签名），
+  工作流还会 `codesign -dv` 留档；测试里用前台预检把「受控源不可达」单独报出来。
 - **测试名**（模拟器 XCTest，**真实后台会话**，系统触发 delegate）：
   - `BackgroundTransferIntegrationTests.testBackgroundSessionTransfersTheControlledFileAndRecordsItConsistently`
     （从 CI 的受控 http 源下载 `sample.mp4`：校验任务 id 来自系统、媒体元数据保留、文件大小与
@@ -258,6 +260,8 @@ node --test --test-name-pattern='landscape playback goes immersive again' ios/Te
 | [44221519568](https://github.com/kenzhao11/kanju-clone/actions/runs/44221519568) | 本分支（0.1.11） | 模拟器 26 条全绿 + Node 76 项全绿 + Release 包编译通过 |
 | [44233858043](https://github.com/kenzhao11/kanju-clone/actions/runs/44233858043) | **只含新测试**的 0.1.12 分支（修复前） | 模拟器 32 条里 **16 条红**：`main=[0,60,844,330]`、`barHidden=false`、`missing-library`、后台任务没有落盘、AppDelegate 不接后台会话 |
 | [44236687669](https://github.com/kenzhao11/kanju-clone/actions/runs/44236687669) | 本分支（0.1.12 / build 13） | 模拟器 **37 条全绿** + Node **81 项全绿** + Release 包编译通过；`ZhuijuAI-unsigned.ipa` sha256 `0704361af0cb12020d132de893de666fe861569cefd8d55059ccc6df2bd96604` |
+| [44238897789](https://github.com/kenzhao11/kanju-clone/actions/runs/44238897789) | 加上真后台传输集成测试（未签名宿主） | **红**：后台会话 XPC 4097，传输根本没开始（前台预检通过，说明不是本地网络） |
+| [44241110324](https://github.com/kenzhao11/kanju-clone/actions/runs/44241110324) | 本分支第 1 轮整改（ad-hoc 签名的模拟器宿主） | 模拟器 **39 条全绿**（含两条真后台会话传输）+ Node **81 项全绿** + Release 包编译通过；IPA sha256 `caa9e64009be9fa16e238d27008e77b568789257dee320200309d35dd44171a5` |
 
 0.1.9 那次的具体失败（可直接对照现象）：
 
