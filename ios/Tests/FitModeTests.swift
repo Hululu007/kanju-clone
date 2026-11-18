@@ -59,8 +59,10 @@ final class FitModeTests: XCTestCase, WKNavigationDelegate {
         window = nil
     }
 
-    /// 载入夹具页并注入包里的真 AppBootstrap.js。`rememberedFit` 用来模拟「上次选的那一档」。
-    private func mountPage(rememberedFit: String?) async throws {
+    /// 载入夹具页并注入包里的真 AppBootstrap.js。`rememberedFit` 用来模拟「上次选的那一档」；
+    /// `resetPreference` 默认清掉共享 localStorage 里的选择 —— 同一宿主里数据存储是跨用例共享的，
+    /// 不清就会按执行顺序互相带状态（红绿取决于谁先跑）。
+    private func mountPage(rememberedFit: String?, resetPreference: Bool = true) async throws {
         webView?.stopLoading()
         let configuration = WKWebViewConfiguration()
         configuration.allowsInlineMediaPlayback = true
@@ -77,6 +79,9 @@ final class FitModeTests: XCTestCase, WKNavigationDelegate {
         webView.loadHTMLString(Self.fixtureHTML, baseURL: URL(string: "https://zhuiju.dpdns.org/player/?id=fixture"))
         await fulfillment(of: [try XCTUnwrap(loaded)], timeout: 60)
 
+        if resetPreference {
+            _ = try await javaScript("try { localStorage.removeItem('kj-ios-fit'); } catch (error) {}")
+        }
         if let rememberedFit {
             _ = try await javaScript("localStorage.setItem('kj-ios-fit', '\(rememberedFit)');")
         }
@@ -239,7 +244,7 @@ final class FitModeTests: XCTestCase, WKNavigationDelegate {
         XCTAssertEqual(fitAfterEpisode, "cover", "换集后 video 仍然是裁剪")
 
         /* 再挂一次页面（等价于退出重进 App）：localStorage 里的选择要跟过来 */
-        try await mountPage(rememberedFit: nil)
+        try await mountPage(rememberedFit: nil, resetPreference: false)
         let mountedAgain = try await awaitValue("!!document.getElementById('ppFit')", timeout: 8)
         XCTAssertTrue(mountedAgain)
         let fitAfterRelaunch = try await objectFit()
