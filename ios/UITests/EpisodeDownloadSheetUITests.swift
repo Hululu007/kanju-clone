@@ -61,18 +61,41 @@ final class EpisodeDownloadSheetUITests: XCTestCase {
         return fail(app, what, "页面上找不到「\(text)」（\(what)）")
     }
 
+    /// 选集旁那个下载入口。**不能**只按「下载」子串找：工具条上那一格叫「下载本集」，
+    /// 会先被匹配到（点它就变成单集下载，列表当然不会展开）。
+    private func downloadEntry(_ web: XCUIElement, timeout: TimeInterval = 30) -> XCUIElement? {
+        let predicate = NSPredicate(
+            format: "label == %@ OR label CONTAINS %@ OR label CONTAINS %@",
+            "下载", "展开可下载的集数", "收起可下载集数"
+        )
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            let candidate = web.descendants(matching: .any).matching(predicate).firstMatch
+            if candidate.exists { return candidate }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.3))
+        }
+        return nil
+    }
+
     // MARK: - 入口：投屏换成了下载
 
     func testTheCastEntryNextToTheEpisodesIsADownloadButtonThatExpandsInPlace() throws {
         let app = launchApp()
         let web = web(app)
 
-        // 站点的投屏入口必须已经不可见（不是删掉节点，是让位）
-        XCTAssertNil(element(web, containing: "投屏", timeout: 5),
-                     "选集旁仍然能看到「投屏」入口，它应该让位给下载按钮")
+        // 站点的投屏入口必须已经不可见（不是删掉节点，是让位）。
+        // 注意别把自己的控制栏算进去：那一格「外放」的无障碍名里也有「投屏」两个字，
+        // 它是 App 内既有的第三方播放器入口，和站点那个投屏按钮是两回事。
+        let siteCast = web.descendants(matching: .any)
+            .matching(NSPredicate(format: "label == %@ OR label == %@", "投屏到电视", "投屏"))
+            .firstMatch
+        XCTAssertFalse(siteCast.exists, "选集旁仍然能看到站点那个「投屏」入口，它应该让位给下载按钮")
 
         // 选集旁现在是下载按钮
-        let entry = requireElement(app, web, "下载", "download-entry")
+        guard let entry = downloadEntry(web) else {
+            _ = fail(app, "download-entry", "选集旁没有下载入口（工具条那格「下载本集」不算）")
+            return
+        }
         attach(app, "010-download-entry")
         XCTAssertTrue(entry.isHittable, "下载按钮存在但点不到")
 
@@ -103,13 +126,18 @@ final class EpisodeDownloadSheetUITests: XCTestCase {
         let app = launchApp()
         let web = web(app)
 
-        let entry = requireElement(app, web, "下载", "download-entry")
+        guard let entry = downloadEntry(web) else {
+            _ = fail(app, "download-entry", "选集旁没有下载入口（工具条那格「下载本集」不算）")
+            return
+        }
         entry.tap()
         RunLoop.current.run(until: Date().addingTimeInterval(0.8))
         _ = requireElement(app, web, "共 5 集", "sheet-total", timeout: 15)
 
-        // 单选：点第 20 集那一条
-        let row20 = requireElement(app, web, "第20集", "sheet-row-20", timeout: 10)
+        // 单选：点第 20 集那一条。
+        // 用「第20集 + 状态」定位，而不是光「第20集」——选集网格里也有同名按钮，
+        // 点那个是切集，不是选中下载。
+        let row20 = requireElement(app, web, "第20集 未下载", "sheet-row-20", timeout: 10)
         row20.tap()
         RunLoop.current.run(until: Date().addingTimeInterval(0.4))
         XCTAssertNotNil(element(web, containing: "已选 1 集", timeout: 10),
