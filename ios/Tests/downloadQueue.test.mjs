@@ -569,3 +569,37 @@ test('every finished batch episode lands in the settings library, and replay sta
   assert.equal(replay.querySelector('.ios-dl-count').textContent, '已下载 3/3 集');
   assert.equal(replay.querySelector('.ios-dl-eps').children.length, 3, '重送不能多出集记录');
 });
+
+/* 片库里已经有一部「测试剧」（id 退回成剧名），真 showId 来自队列快照时，
+   同一部剧不能变成两条、队列进度也不能挂丢。上一轮 CI 的 DownloadQueueUITests
+   就是因此看不到「任务 x/y 集」和暂停/取消。 */
+test('a show already in the library by title keeps its queue progress when the real showId arrives', () => {
+  const state = fixture({
+    signedIn: true,
+    episodes: [0, 1, 2],
+    seed: {
+      'kj-ios-downloads': JSON.stringify({
+        shows: [{
+          id: '测试剧', title: '测试剧', cover: '', total: 3,
+          eps: [{ key: '18', label: '第19集', path: '/tmp/19.mp4', size: 1, at: 1 }],
+        }],
+      }),
+    },
+  });
+  state.ready();
+  state.click(state.settingsTrigger);
+  state.window.__zhuijuDownloads('snapshot', [
+    { id: 'a', showId: 'fixture', epKey: '0', epLabel: '第1集', title: '测试剧', status: 'running', received: 1, total: 10, path: '', size: 0, name: 'a.mp4' },
+    { id: 'b', showId: 'fixture', epKey: '1', epLabel: '第2集', title: '测试剧', status: 'running', received: 0, total: 10, path: '', size: 0, name: 'b.mp4' },
+    { id: 'c', showId: 'fixture', epKey: '2', epLabel: '第3集', title: '测试剧', status: 'queued', received: 0, total: 10, path: '', size: 0, name: 'c.mp4' },
+  ]);
+
+  const list = state.document.getElementById('iosDlShows');
+  assert.equal(list.children.length, 1, '同一部剧只能有一条：' + list.children.length);
+  const queue = list.children[0].querySelector('.ios-dl-queue');
+  assert.ok(queue, '队列进度要挂到已有的片库条目上');
+  assert.match(queue.textContent, /任务 0\/3 集/, queue.textContent);
+  assert.equal(list.children[0].querySelector('.ios-dl-count').textContent, '已下载 1/3 集',
+    '已有的 第19集 不能被队列合并弄丢');
+  assert.ok(list.children[0].querySelector('.ios-dl-actions'), '还要能暂停整部剧');
+});

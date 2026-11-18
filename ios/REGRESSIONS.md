@@ -473,6 +473,9 @@ node --test --test-name-pattern='landscape playback goes immersive again' ios/Te
     改成本集真实落盘结果，不再出现「队列 5/5、片库 5/5、脚下写着尚未下载」。
   - `recordDownloaded()` 按 `showId + epKey` 去重；同集同 path 同 size 的重复回传直接跳过，
     换页/重启/重复 backfill 都幂等，不会重复通知或重复写盘。
+  - 片库列表合成时「标题相同也算同一部」并收下队列里的真 `showId`：过去只按 id 比，
+    同一部剧会成两条、`queueSummary(show.id)` 找不到任务（run 44324188770 的
+    `DownloadQueueUITests` 因此看不到任务数与暂停/取消）。
   - 单集老路径（无 showId/epKey 的 done）仍走 `pendingMeta`，REG-009 不回退。
 - **测试名**（模拟器，真 WKWebView + 原生真实 done 事件）：
   `LibraryDoneTests.testAllFiveFinishedBatchEpisodesAppearInTheDownloadLibrary`
@@ -481,7 +484,9 @@ node --test --test-name-pattern='landscape playback goes immersive again' ios/Te
   断言仍是 5/5、不多出集）
 - **沙盒夹具**：`downloadQueue.test.mjs` 的
   `every finished batch episode lands in the settings library, and replay stays idempotent`
-  （同一批 done → 片库 3/3 + 逐集可见 + 重送幂等；不修真就红）
+  （同一批 done → 片库 3/3 + 逐集可见 + 重送幂等；不修真就红）与
+  `a show already in the library by title keeps its queue progress when the real showId arrives`
+  （片库里已有同名剧、队列带真 showId 时不能变成两条，任务数与暂停/取消不能丢）
 - **真实模拟器出包关卡**：`BatchDownloadSmokeUITests`（第 09 张图）现在要求真队列跑到
   「全部完成」、片库「已下载 5/5 集」、第19~23集逐集可见、单集进度行不再是「尚未下载」。
   旧断言只要求「片库 >= 2 条集记录」，队列 5/5 而片库 0/5 也能过（run 44300418982 的图 09 就是现场）。

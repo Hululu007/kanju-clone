@@ -84,6 +84,11 @@ final class LibraryDoneTests: XCTestCase, WKNavigationDelegate {
           } catch (error) { return 'blocked:' + (error && error.name); }
 
           localStorage.setItem('kj-auth-token', 'fixture-token');
+          /* 同一个 App 容器里别的用例会留下片库/队列记录：这一条只验证「这一批 5 集」，
+             不清掉别人留下的 第19集，片库就会算出 6/5 这种假红。 */
+          ['kj-ios-download', 'kj-ios-downloads', 'kj-ios-batch', 'kj-ios-queue'].forEach(function (key) {
+            localStorage.removeItem(key);
+          });
           window.fetch = function (input) {
             var address = typeof input === 'string' ? input : (input && input.url) || '';
             var query = address.indexOf('?') >= 0 ? address.slice(address.indexOf('?') + 1) : '';

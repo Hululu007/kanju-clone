@@ -954,6 +954,20 @@
 
     var list = document.getElementById('iosDlShows');
     if (!list) return false;
+    /* 同一部剧可能带两种 id 进来：站点媒体 id（showId），和没有 ?id 时可以退回的剧名。
+       只按 id 比，同一部剧会在片库里出现两条，队列（按 showId 汇总）也挂不到第一条上：
+       复审的模拟器现场就是「剧名在、任务数/暂停取消全没了」。所以标题相同也算同一部，
+       并把队列里的真 showId 接下来，下面 queueSummary(show.id) 才找得到任务。 */
+    function sameShow(show, id, title) {
+      if (id && String(show.id) === String(id)) return true;
+      var want = String(title || '').trim();
+      return !!want && String(show.title || '').trim() === want;
+    }
+    function adoptId(show, id) {
+      if (!id || String(show.id) === String(id)) return;
+      for (var j = 0; j < shows.length; j++) if (String(shows[j].id) === String(id)) return;
+      show.id = String(id);
+    }
     var shows = readLibrary().shows;
     /* 排队中的剧也要出现在这里：还没下完一集时，也要能暂停/继续/取消整部剧 */
     var batches = readBatchShows();
@@ -962,7 +976,11 @@
       if (!batch || !batch.id) continue;
       if (!queueSummary(batch.id).total) continue;
       var known = false;
-      for (var k = 0; k < shows.length; k++) if (String(shows[k].id) === String(batch.id)) known = true;
+      for (var k = 0; k < shows.length; k++) {
+        if (!sameShow(shows[k], batch.id, batch.title)) continue;
+        known = true;
+        adoptId(shows[k], batch.id);
+      }
       if (known) continue;
       shows.push({ id: String(batch.id), title: String(batch.title || ''), cover: String(batch.cover || ''), total: Number(batch.total) || 0, eps: [] });
     }
@@ -972,7 +990,11 @@
       var taskShow = String(task.showId || '');
       if (!taskShow) continue;
       var listed = false;
-      for (var s3 = 0; s3 < shows.length; s3++) if (String(shows[s3].id) === taskShow) listed = true;
+      for (var s3 = 0; s3 < shows.length; s3++) {
+        if (!sameShow(shows[s3], taskShow, task.title)) continue;
+        listed = true;
+        adoptId(shows[s3], taskShow);
+      }
       if (listed) continue;
       shows.push({ id: taskShow, title: String(task.title || ''), cover: '', total: 0, eps: [] });
     }
