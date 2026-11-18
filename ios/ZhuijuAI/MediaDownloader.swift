@@ -72,6 +72,9 @@ final class MediaDownloader: NSObject {
         var showId: String? = nil
         var epKey: String? = nil
         var resumeData: String? = nil
+        /// 每启动一次任务 +1：暂停回调靠它确认「这个 resumeData 属于我现在看的这条任务」，
+        /// 避免用户立即继续、新任务已经建好之后，旧任务的回调把数据写进新记录。
+        var generation: Int? = nil
     }
 
     /// 同一时刻最多跑几条：用户要的是「两集一起下」，不是把整部剧一起拉满。
@@ -417,6 +420,7 @@ final class MediaDownloader: NSObject {
             current.taskIdentifier = downloadTask.taskIdentifier
             current.resumeData = nil
             current.reason = ""
+            current.generation = (current.generation ?? 0) + 1
         }
         downloadTask.resume()
     }
@@ -435,9 +439,13 @@ final class MediaDownloader: NSObject {
             update(id) { $0.status = "paused"; $0.reason = "已暂停" }
             changed = true
             if let task = tasks.removeValue(forKey: id) {
+                let generation = record(id)?.generation ?? 0
                 task.cancel(byProducingResumeData: { data in
-                    guard let data, !data.isEmpty else { return }
-                    update(id) { $0.resumeData = data.base64EncodedString() }
+                    /* 回调来自系统内部队列：回到主队列再改状态，和 pause/resume/pump 串行，
+                       并且要核对「还是那条被暂停的任务」，否则宁可丢弃。 */
+                    DispatchQueue.main.async {
+                        storeResumeData(id: id, generation: generation, data: data)
+                    }
                 })
             }
         }
@@ -453,6 +461,20 @@ final class MediaDownloader: NSObject {
             changed = true
         }
         if changed { persist(force: true); pump(); emitStateEvents() }
+    }
+
+    /// 暂停回调落 resumeData：必须同时满足「还是暂停态」和「还是那条任务（generation 一致）」。
+    /// - 用户已经点了继续/取消：新任务已经建好或状态已变 → 丢弃旧数据，绝不污染新任务；
+    /// - 系统没给 resumeData（片源不支持 Range）：保持 paused 且 resumeData 为空，
+    ///   继续时从 0 重下，进度如实归零，不伪造续传。
+    private static func storeResumeData(id: String, generation: Int, data: Data?) {
+        records = loadRecords()
+        guard let index = records.firstIndex(where: { $0.id == id }) else { return }
+        guard records[index].status == "paused", (records[index].generation ?? 0) == generation else { return }
+        records[index].resumeData = (data?.isEmpty == false) ? data!.base64EncodedString() : nil
+        records[index].updatedAt = Date().timeIntervalSince1970
+        persist(force: true)
+        emitStateEvents()
     }
 
     /// 取消一部剧：停任务、标状态。已下载的文件保留。
