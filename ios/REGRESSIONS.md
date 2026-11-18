@@ -469,13 +469,29 @@ node --test --test-name-pattern='landscape playback goes immersive again' ios/Te
   - 网页：所有 `done`（包括 id 与当前单集不匹配的批量任务）只要带真实 `path`，就经
     `metaFromDone()` 从事件字段 → 「一键全集」记住的剧信息 → 队列快照补齐元数据，
     再调用同一个 `recordDownloaded()` 写片库；没有 path 一律不记，绝不伪造完成文件。
+  - 若这条 `done` 正好是**当前这一集**（按 `epKey` / 集标签比对），同时把单集进度行
+    改成本集真实落盘结果，不再出现「队列 5/5、片库 5/5、脚下写着尚未下载」。
   - `recordDownloaded()` 按 `showId + epKey` 去重；同集同 path 同 size 的重复回传直接跳过，
     换页/重启/重复 backfill 都幂等，不会重复通知或重复写盘。
   - 单集老路径（无 showId/epKey 的 done）仍走 `pendingMeta`，REG-009 不回退。
 - **测试名**（模拟器，真 WKWebView + 原生真实 done 事件）：
   `LibraryDoneTests.testAllFiveFinishedBatchEpisodesAppearInTheDownloadLibrary`
   （真点一键全集 → 写 5 条真实落盘记录 → 用 `MediaDownloader.eventsForPage()` 生成的 done 事件
-  交给网页 → 断言设置面板「已下载 5/5 集」、剧名与 5 个集号齐全）
+  交给网页 → 断言设置面板「已下载 5/5 集」、剧名与 5 个集号齐全；再把同一批 done 重送一遍，
+  断言仍是 5/5、不多出集）
+- **沙盒夹具**：`downloadQueue.test.mjs` 的
+  `every finished batch episode lands in the settings library, and replay stays idempotent`
+  （同一批 done → 片库 3/3 + 逐集可见 + 重送幂等；不修真就红）
+- **真实模拟器出包关卡**：`BatchDownloadSmokeUITests`（第 09 张图）现在要求真队列跑到
+  「全部完成」、片库「已下载 5/5 集」、第19~23集逐集可见、单集进度行不再是「尚未下载」。
+  旧断言只要求「片库 >= 2 条集记录」，队列 5/5 而片库 0/5 也能过（run 44300418982 的图 09 就是现场）。
+- **红/绿证据**（都在 `fix/ios-0.1.14-final` 上，没改 main）：
+
+| 运行 | 代码 | 结果 |
+| --- | --- | --- |
+| [44310127444](https://github.com/kenzhao11/kanju-clone/actions/runs/44310127444) | 只加了 `LibraryDoneTests`（修复前） | **红**：`已下载 1/1 集` ≠ `已下载 5/5 集`，集号只有 `第19集` |
+| 44300418982 的图 09（`dbb3581`） | 修复前的出包关卡 | 现场就是队列 `任务 5/5 集 · 总进度 100% · 全部完成` + 片库 `已下载 0/5 集` + `下载进度：尚未下载` |
+| 44310316242 | 修复提交 | **红，但不是代码**：`The job was not acquired by Runner of type hosted`（macOS 队列容量），重跑 |
 - **修复版本**：0.1.14（build 15）
 - **验证边界**：断言的是网页片库与原生完成事件的绑定；真实片源下载与后台传输由
   `BackgroundTransferIntegrationTests` 覆盖，真机锁屏/通知仍属真机项。

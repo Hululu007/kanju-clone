@@ -2220,6 +2220,20 @@
     };
   }
 
+  /* 这条 done 是不是刚刚下完的「当前这一集」：批量任务的 id 和单集任务不同，
+     只能靠集号（epKey / 集标签）比对，绝不按「队列里还有别的集」猜。 */
+  function isCurrentEp(payload) {
+    var list = epNodes();
+    if (!list || !list.length) return false;
+    var node = list[currentEpIndex()];
+    var key = epKeyOf(node);
+    var label = epLabelOf(node);
+    var doneKey = payload.epKey === undefined || payload.epKey === null ? '' : String(payload.epKey);
+    var doneLabel = String(payload.ep || '').replace(/\s+/g, '');
+    if (doneKey && key) return doneKey === String(key);
+    return !!doneLabel && !!label && doneLabel === label;
+  }
+
   /* 原生层回传：同一个 id 才认，避免换集之后旧任务改乱新状态 */
   window.__zhuijuDownload = function (payload) {
     if (!payload) return;
@@ -2231,6 +2245,23 @@
     }
     /* 单集进度条只对当前这一集响应；其它任务照常入库，不改本集状态 */
     if (!downloadState.id || payload.id !== downloadState.id) {
+      /* 批量把这一集下完，脚下那行不能还写着「尚未下载」：
+         文件是真的、就是这一集，按当前集的真实落盘结果更新这一行。 */
+      if (event === 'done' && payload.path && !downloadState.busy && !downloadState.path && isCurrentEp(payload)) {
+        var doneMeta = metaFromDone(payload);
+        downloadState.id = String(payload.id || '');
+        downloadState.name = String(payload.name || '');
+        downloadState.show = doneMeta.title;
+        downloadState.ep = doneMeta.epLabel;
+        downloadState.path = String(payload.path || '');
+        downloadState.busy = false;
+        downloadState.percent = 100;
+        downloadState.error = '';
+        pendingMeta = doneMeta;
+        syncDownloadRow();
+        saveDownload(true);
+        return;
+      }
       if (event === 'done') syncDownloadRow();
       return;
     }

@@ -530,3 +530,42 @@ test('a failed episode never lets the show look complete and an unknown length h
   assert.match(text, /已收 2\.0 MB/, '总长度未知时只报实收字节');
   assert.ok(!/%/.test(text), `不知道总长度就不许造百分比：${text}`);
 });
+
+/* 复审阻塞（REG-013）：批量 3 集全部 done，队列 3/3、100%，片库却还是「已下载 0/3 集」。
+   这里直接用原生真实下发的那几条 done（带 path / showId / epKey / 剧名 / 总集数），
+   断言片库按剧写成 3/3、逐集可见，并且重送同一批 done 幂等。 */
+test('every finished batch episode lands in the settings library, and replay stays idempotent', async () => {
+  const state = fixture({ signedIn: true, episodes: [0, 1, 2] });
+  state.ready();
+  state.replies.push(batchReply('fixture', 0), batchReply('fixture', 1), batchReply('fixture', 2));
+
+  state.click(state.document.getElementById('iosBatchAll'));
+  await settle();
+  const message = state.messages.at(-1);
+  assert.equal(message.action, 'downloadBatch');
+  state.click(state.settingsTrigger);
+
+  const done = (item) => ({
+    event: 'done', id: item.id, path: '/tmp/' + item.epKey + '.mp4', name: item.name, size: 2048,
+    showId: 'fixture', epKey: item.epKey, ep: item.epLabel,
+    title: '测试剧', epLabel: item.epLabel, cover: '', showTotal: '3',
+  });
+  for (const item of message.items) state.window.__zhuijuDownload(done(item));
+
+  const libraryItem = state.document.getElementById('iosDlShows').children[0];
+  assert.ok(libraryItem, '3 集下完，片库里一部剧都没有');
+  assert.equal(libraryItem.querySelector('.ios-dl-name').textContent, '测试剧', '片库要用真实剧名');
+  assert.equal(libraryItem.querySelector('.ios-dl-count').textContent, '已下载 3/3 集',
+    '完成 3 集就得写进片库：' + libraryItem.querySelector('.ios-dl-count').textContent);
+  assert.deepEqual(libraryItem.querySelector('.ios-dl-eps').children.map((chip) => chip.textContent),
+    ['第1集', '第2集', '第3集'], '每一集都要能单独点开');
+  /* 当前这一集就是批量里刚下完的那一集：单集进度行不能还写「尚未下载」 */
+  assert.equal(state.document.getElementById('iosDownloadLabel').textContent,
+    '下载进度：已完成 · 点下方选择播放器', '批量下完的当前集，单集进度行也要显示已完成');
+
+  /* 换页/重启/重复 backfill 会把同一批 done 再送一遍：不能重复计数，也不能多出集 */
+  for (const item of message.items) state.window.__zhuijuDownload(done(item));
+  const replay = state.document.getElementById('iosDlShows').children[0];
+  assert.equal(replay.querySelector('.ios-dl-count').textContent, '已下载 3/3 集');
+  assert.equal(replay.querySelector('.ios-dl-eps').children.length, 3, '重送不能多出集记录');
+});

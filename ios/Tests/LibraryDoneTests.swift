@@ -181,6 +181,32 @@ final class LibraryDoneTests: XCTestCase, WKNavigationDelegate {
         XCTAssertEqual(ui["count"] as? String, "已下载 5/5 集", "5 集完成必须写进片库：\(text)")
         XCTAssertEqual(ui["episodes"] as? [String], ["第1集", "第2集", "第3集", "第4集", "第5集"],
                        "5 个集号都要能点开：\(text)")
+        /* 当前这一集（第1集）就是批量里刚下完的那一集：脚下那行不能还写「尚未下载」 */
+        XCTAssertEqual(ui["progress"] as? String, "下载进度：已完成 · 点下方选择播放器",
+                       "批量下完的当前集，单集进度行必须显示已完成：\(text)")
+
+        /* 幂等：原生换页/重启会把同一批 done 再送一遍，片库不能重复计数或重复提示 */
+        for event in events {
+            let json = try JSONSerialization.data(withJSONObject: event)
+            let payload = try XCTUnwrap(String(data: json, encoding: .utf8))
+            _ = try await javaScript("window.__zhuijuDownload && window.__zhuijuDownload(\(payload)); true;")
+        }
+        let again = try await javaScript("""
+        (function () {
+          var item = document.getElementById('iosDlShows').children[0];
+          if (!item) return 'missing-show';
+          var chips = item.querySelector('.ios-dl-eps');
+          return JSON.stringify({
+            count: item.querySelector('.ios-dl-count').textContent,
+            episodes: chips ? Array.prototype.map.call(chips.children, function (c) { return c.textContent; }) : []
+          });
+        })();
+        """)
+        let replayText = try XCTUnwrap(again as? String, "重送之后片库不在了：\(String(describing: again))")
+        let replay = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(replayText.utf8)) as? [String: Any])
+        XCTAssertEqual(replay["count"] as? String, "已下载 5/5 集", "重送同一批 done 不得重复计数：\(replay)")
+        XCTAssertEqual(replay["episodes"] as? [String], ["第1集", "第2集", "第3集", "第4集", "第5集"],
+                       "重送同一批 done 不得多出集：\(replay)")
     }
 
     private func awaitFirstBatchMessage(timeout: Double = 10) async -> [String: Any] {

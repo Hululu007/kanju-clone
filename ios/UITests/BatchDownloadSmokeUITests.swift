@@ -70,15 +70,30 @@ final class BatchDownloadSmokeUITests: XCTestCase {
 
     /// 一次性拍下网页可访问性树（逐条 element(boundBy:) 在 DOM 变化时会抛索引错）。
     private func labelTexts(_ app: XCUIApplication) -> [String] {
+        var texts: [String] = []
+        for node in webLabels(app) {
+            texts.append([node.label, node.value as? String ?? "", node.identifier].joined(separator: " | "))
+        }
+        return texts
+    }
+
+    /// 只要节点的可读文案：用来按「同一个标签出现几次」区分页面选集按钮和片库集标签。
+    private func webLabels(_ app: XCUIApplication) -> [XCUIElementSnapshot] {
         let web = app.webViews.firstMatch
         guard web.exists, let snapshot = try? web.snapshot() else { return [] }
-        var texts: [String] = []
+        var nodes: [XCUIElementSnapshot] = []
         func walk(_ node: XCUIElementSnapshot) {
-            texts.append([node.label, node.value as? String ?? "", node.identifier].joined(separator: " | "))
+            nodes.append(node)
             for child in node.children { walk(child) }
         }
         walk(snapshot)
-        return texts
+        return nodes
+    }
+
+    /// 这个文案在网页可访问性树里出现在几个节点上（页面选集按钮一个、片库集标签一个）。
+    /// 用包含匹配：片库的集标签可能被合成成一行，但不论哪一种，页面那边只会算一个。
+    private func labelOccurrences(_ app: XCUIApplication, _ text: String) -> Int {
+        webLabels(app).filter { $0.label.contains(text) }.count
     }
 
     private func waitForLabel(_ app: XCUIApplication, timeout: TimeInterval,
@@ -90,6 +105,12 @@ final class BatchDownloadSmokeUITests: XCTestCase {
             RunLoop.current.run(until: Date().addingTimeInterval(0.3))
         }
         return nil
+    }
+
+    /// 真队列跑到这一部剧全部完成（不是「点了就完」）。
+    private static func queueComplete(_ text: String) -> Bool {
+        guard queueLine(text) else { return false }
+        return text.contains("全部完成")
     }
 
     /// 「任务 0/5 集 · 进行中 2 · 排队 3」这种由真实队列生成的行。
@@ -142,16 +163,44 @@ final class BatchDownloadSmokeUITests: XCTestCase {
             fail("队列行不是批量（少于 2 集）：\(queue)", "batch-not-multiple", app)
             return
         }
-        // 片库里必须真的按剧出现（不是页面自己的选集按钮），并且至少两集记录。
-        let texts = labelTexts(app)
-        guard texts.contains(where: { $0.contains("测试剧") }) else {
-            fail("下载片库里没有这一部剧（测试剧）", "batch-show-missing", app)
+        // 复审阻塞点：光「入队」不算完成。真等到这部 5 集全部下完（原生队列自己的 done 事件），
+        // 片库才应该写 5/5。以前这里只要求「>= 2 条集记录」，队列 5/5 而片库 0/5 也能算过。
+        guard let finished = waitForLabel(app, timeout: 300, Self.queueComplete) else {
+            fail("批量下载没在 5 分钟内全部完成，片库没法核对：\(labelTexts(app))",
+                 "batch-not-finished", app)
             return
         }
-        let episodeChips = Set(texts.filter { $0.contains("第") && $0.contains("集") }
-            .map { $0.trimmingCharacters(in: .whitespaces) })
-        guard episodeChips.count >= 2 else {
-            fail("下载片库里少于 2 条集记录：\(episodeChips)", "batch-episodes-missing", app)
+        guard let doneTotal = Self.queueTotal(finished), doneTotal == total, doneTotal >= 2 else {
+            fail("队列完成行与集数对不上：\(finished)", "batch-total-mismatch", app)
+            return
+        }
+        // 片库那一行只由下载记录算出来（「已下载 N/共 M 集」），是这一项的真证据。
+        let wanted = "已下载 \(doneTotal)/\(doneTotal) 集"
+        guard waitForLabel(app, timeout: 60, { $0.contains(wanted) }) != nil else {
+            fail("队列 \(doneTotal)/\(doneTotal) 集全部完成，下载片库还是没记成 \(wanted)：\(labelTexts(app))",
+                 "library-not-reconciled", app)
+            return
+        }
+        if labelTexts(app).contains(where: { $0.contains("已下载 0/") }) {
+            fail("片库里还残留「已下载 0/…」：\(labelTexts(app))", "library-stuck-zero", app)
+            return
+        }
+        // 逐集可见：夹具站 19~23 共 5 集，「第N集」在页面选集里本来就出现一次，
+        // 片库里再多出一枚集标签才算真的逐集可见（只有页面按钮时计数为 1）。
+        var missing: [String] = []
+        for number in 19...(18 + doneTotal) {
+            let label = "第\(number)集"
+            if labelOccurrences(app, label) < 2 { missing.append(label) }
+        }
+        if !missing.isEmpty {
+            fail("片库里没有逐集可见：\(missing) 只出现了页面选集那一次：\(labelTexts(app))",
+                 "library-episodes-missing", app)
+            return
+        }
+        // 当前这一集就是刚批量下完的第一集：脚下那行必须离开「尚未下载」。
+        if labelTexts(app).contains(where: { $0.contains("下载进度：尚未下载") }) {
+            fail("批量已经全部完成，单集进度行还是「尚未下载」：\(labelTexts(app))",
+                 "single-row-not-downloaded", app)
             return
         }
 
