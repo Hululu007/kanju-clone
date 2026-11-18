@@ -1453,3 +1453,14 @@ test('the toolbar download button never turns into the player entry', () => {
   assert.equal(state.messages.at(-1).path, undefined);
   assert.equal(button.textContent, '下载 0%');
 });
+
+/* ---------- REG-009 文件名/列表/通知用真实剧名 ---------- */
+
+test('the download file is named after the show, not the app', () => {
+  const state = fixture({ signedIn: true, episodes: ['18'] });
+  state.ready();
+  state.click(state.document.getElementById('ppToolDownload'));
+  const message = state.messages.at(-1);
+  assert.equal(message.name, '测试剧 第19集.mp4');
+  assert.ok(!/追剧AI/.test(message.name), '文件名里不能再用 App 名冒充剧名');
+});

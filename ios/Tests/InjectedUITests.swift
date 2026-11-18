@@ -641,6 +641,34 @@ final class InjectedUITests: XCTestCase, WKNavigationDelegate {
         XCTAssertEqual(done["firstCounter"] as? String, "已下载 1/1 集")
     }
 
+    // MARK: - REG-009 下载文件/锁屏信息用的是 App 名，不是剧名
+
+    /// 真机上文件、下载列表、通知里都是「追剧AI 第19集」，看不出是哪部剧。
+    func testDownloadedFileAndNowPlayingUseTheShowTitle() async throws {
+        _ = try await awaitValue("!!document.getElementById('ppToolDownload')")
+        let raw = try await javaScript("""
+        (function () {
+          document.getElementById('video').src = 'https://media.example/19.mp4';
+          document.getElementById('ppToolDownload').click();
+          var session = navigator.mediaSession || null;
+          return JSON.stringify({
+            showTitle: (document.querySelector('.ph-title') || {}).textContent || '',
+            mediaSessionTitle: session && session.metadata ? session.metadata.title : '',
+            mediaSessionArtist: session && session.metadata ? session.metadata.artist : ''
+          });
+        })();
+        """)
+        let text = try XCTUnwrap(raw as? String)
+        let result = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any])
+        XCTAssertEqual(result["showTitle"] as? String, "测试剧")
+        let message = try await awaitPlayerMessage()
+        XCTAssertEqual(message["name"] as? String, "测试剧 第19集.mp4",
+                       "文件名要用真实剧名，不能用 App 名冒充：\(message)")
+        XCTAssertEqual(result["mediaSessionTitle"] as? String, "测试剧",
+                       "锁屏读的是真实媒体会话元数据，不是 DOM 标题：\(text)")
+        XCTAssertEqual(result["mediaSessionArtist"] as? String, "第19集")
+    }
+
     // MARK: - REG-008 工具条上的下载入口被换成了「用播放器打开」
 
     /// 真机原话：下载完一集之后，工具条那一格变成「用播放器打开」，下一次想下载就找不到入口了。

@@ -4,6 +4,12 @@ import XCTest
 /// 下载落盘前的两道纯逻辑：文件名清洗与目录。
 /// 真机才能验证的部分（进度、取消、写盘）不在这里冒充验证过。
 final class DownloadTests: XCTestCase {
+    func testFileNamePrefersTheCallersNameOverTheUrlSegment() {
+        XCTAssertEqual(MediaDownloader.fileName(from: "https://media.example/19.mp4", fallback: "测试剧 第19集.mp4"),
+                       "测试剧 第19集.mp4", "站点链接的最后一段常常只是 19.mp4，不能拿它顶掉剧名")
+        XCTAssertEqual(MediaDownloader.fileName(from: "https://media.example/19.mp4", fallback: ""), "19.mp4")
+    }
+
     func testFileNameKeepsTheEpisodeNameFromTheUrl() {
         let name = MediaDownloader.fileName(
             from: "https://media.example/19.mp4?token=abc",
