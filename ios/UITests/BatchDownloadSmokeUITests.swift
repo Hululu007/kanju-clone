@@ -44,6 +44,22 @@ final class BatchDownloadSmokeUITests: XCTestCase {
         add(tree)
     }
 
+    /// 切集页的批量条在 `.main` 滚动容器里、选集区上方：真机上经常在折叠线以下，
+    /// 直接按 isHittable 找会漏。先试着找，找不到就把网页往上滑，最多四次。
+    private func revealBatchEntry(_ app: XCUIApplication, timeout: TimeInterval = 30) -> XCUIElement? {
+        let deadline = Date().addingTimeInterval(timeout)
+        var swipes = 0
+        while Date() < deadline {
+            if let hit = webButton(app, labels: ["一键全集"], timeout: 1) { return hit }
+            if swipes < 4 {
+                let web = app.webViews.firstMatch
+                if web.exists { web.swipeUp() ; swipes += 1 }
+            }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.4))
+        }
+        return nil
+    }
+
     private func fail(_ message: String, _ name: String, _ app: XCUIApplication) {
         attachDiagnostics(app, name: name)
         XCTFail(message)
@@ -138,9 +154,11 @@ final class BatchDownloadSmokeUITests: XCTestCase {
             return
         }
 
-        // 一键全集是主入口；若站点某版没有，再退到「下载已选」（仍按真按钮 role）。
-        guard let entry = webButton(app, labels: ["一键全集", "下载已选"], timeout: 30) else {
-            fail("选集页没有批量下载入口（一键全集 / 下载已选）：下载队列功能还没合入，这一项未完成",
+        // 「一键全集」在选集区上方，真机上常在折叠线以下：先滚到它，再点。
+        // 不再退到「下载已选」：那条路要求先选集，没选集点它永远不会入队，
+        // 只会得到一个和产品无关的假失败（run 44324813325 就是这么红的）。
+        guard let entry = revealBatchEntry(app) else {
+            fail("选集页没有批量下载入口（一键全集）：滚到底也没找到，下载队列功能没合入或入口没挂上",
                  "missing-batch-entry", app)
             return
         }
