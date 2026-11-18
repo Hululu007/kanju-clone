@@ -243,6 +243,7 @@ node --test --test-name-pattern='landscape playback goes immersive again' ios/Te
 | [44222400396](https://github.com/kenzhao11/kanju-clone/actions/runs/44222400396) | 0.1.10 的 `AppBootstrap.js`（对照分支，已删） | 头栏那条**红**：`replayed=true/none/none/block`（片名小签收起了，顶上头栏还是 block）；工具条下载按钮那条也红（按钮不存在） |
 | [44221519568](https://github.com/kenzhao11/kanju-clone/actions/runs/44221519568) | 本分支（0.1.11） | 模拟器 26 条全绿 + Node 76 项全绿 + Release 包编译通过 |
 | [44233858043](https://github.com/kenzhao11/kanju-clone/actions/runs/44233858043) | **只含新测试**的 0.1.12 分支（修复前） | 模拟器 32 条里 **16 条红**：`main=[0,60,844,330]`、`barHidden=false`、`missing-library`、后台任务没有落盘、AppDelegate 不接后台会话 |
+| [44236687669](https://github.com/kenzhao11/kanju-clone/actions/runs/44236687669) | 本分支（0.1.12 / build 13） | 模拟器 **37 条全绿** + Node **81 项全绿** + Release 包编译通过；`ZhuijuAI-unsigned.ipa` sha256 `0704361af0cb12020d132de893de666fe861569cefd8d55059ccc6df2bd96604` |
 
 0.1.9 那次的具体失败（可直接对照现象）：
 
