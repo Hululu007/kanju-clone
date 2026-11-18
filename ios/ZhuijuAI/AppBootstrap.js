@@ -237,9 +237,10 @@
       'html[data-ios-immersive] #player video{width:100%!important;height:100%!important;aspect-ratio:auto!important;object-fit:contain!important;background:#000}',
       /* 画面档位：三条写在沉浸态那条之后，同样的优先级下由它们覆盖 contain。
          适应=完整画面（可留边），裁剪=等比铺满（裁边），拉伸=不等比铺满。 */
-      'html[data-ios-fit="contain"] #player video{object-fit:contain!important}',
-      'html[data-ios-fit="cover"] #player video{object-fit:cover!important}',
-      'html[data-ios-fit="fill"] #player video{object-fit:fill!important}',
+      /* 画面填充不走 object-fit：真机上站点给 video 的盒子和内联样式会把它盖掉，
+         用户看到的就是「点了没反应」。三档改成按 videoWidth/videoHeight 直接算元素
+         几何（见 applyFitGeometry），渲染层必须照做，没有第二条样式可以顶掉它。 */
+      '#player video[data-ios-fit-box]{position:absolute!important;left:50%!important;top:50%!important;transform:translate(-50%,-50%)!important;max-width:none!important;max-height:none!important;object-fit:fill!important;background:#000}',
       'html[data-ios-immersive],html[data-ios-immersive] body{overflow:hidden!important}',
       /* 全屏：上方那一排「显示设置 / 线路 / 弹幕 / 画中画 / 下一集」整条收起。
          它原本被固定到右上角，正好压在画面上，是真机上最挡视线的一排；
@@ -309,7 +310,28 @@
       '#ppCtrl .pc-seek::-webkit-slider-thumb{-webkit-appearance:none;width:14px;height:14px;margin-top:-5px;border:0;border-radius:50%;background:#16e09d}',
       '#ppCtrl #ppRate{background:rgba(255,255,255,.16)}',
       '#ppCtrl #ppFull{background:rgba(22,224,157,.92);color:#04241a}',
-      '#ppCtrl #ppFit{background:rgba(255,255,255,.16)}',
+      /* 全屏 + 暂停时才在屏幕顶部出现的一排：默认 / 拉伸 / 平铺（规格 §1） */
+      '#iosFitBar{position:absolute;left:0;right:0;top:0;z-index:10005;display:none;justify-content:center;gap:8px;padding:calc(10px + env(safe-area-inset-top,0px)) 12px 10px;background:linear-gradient(to bottom,rgba(0,0,0,.75),rgba(0,0,0,0));pointer-events:none}',
+      '#iosFitBar.on{display:flex}',
+      '#iosFitBar button{pointer-events:auto;appearance:none;border:1px solid rgba(255,255,255,.28);border-radius:9px;padding:9px 14px;font-size:13px;font-weight:600;background:rgba(0,0,0,.45);color:#fff;min-height:40px}',
+      '#iosFitBar button.on{border-color:#16e09d;background:rgba(22,224,157,.9);color:#04241a}',
+      /* 集数网格：一行 5–6 个，格子之间留正常间距（规格 §2） */
+      '#iosDlGrid{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:8px;margin-top:8px}',
+      '#iosDlGrid .ios-dl-cell{appearance:none;border:1px solid rgba(255,255,255,.16);border-radius:10px;background:rgba(255,255,255,.06);color:#e8f1f5;font-size:12px;font-weight:600;padding:10px 4px;min-height:56px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px}',
+      '#iosDlGrid .ios-dl-cell .ios-dl-cell-state{font-size:10px;font-weight:600;color:rgba(232,241,245,.66)}',
+      '#iosDlGrid .ios-dl-cell.busy{border-color:rgba(22,224,157,.6);background:rgba(22,224,157,.16)}',
+      '#iosDlGrid .ios-dl-cell.done{border-color:rgba(22,224,157,.5);color:#16e09d}',
+      '#iosDlGrid .ios-dl-cell.done .ios-dl-cell-state{color:#16e09d}',
+      "html[data-theme='light'] #iosDlGrid .ios-dl-cell{background:rgba(15,20,24,.06);color:#141a1e;border-color:rgba(15,20,24,.14)}",
+      '#iosDlGrid .ios-dl-cell .ios-dl-cell-name{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}',
+      /* 已下载列表：每行左滑露出红色删除（规格 §3），不做批量 */
+      '#iosDlShows .ios-dl-row{position:relative;overflow:hidden;border-radius:10px;margin-top:8px;background:rgba(255,255,255,.05)}',
+      '#iosDlShows .ios-dl-row-body{display:flex;align-items:center;gap:10px;padding:11px 12px;background:inherit;transition:transform .16s ease;will-change:transform;touch-action:pan-y}',
+      '#iosDlShows .ios-dl-row-title{flex:1 1 auto;font-size:13px;font-weight:600;color:#e8f1f5}',
+      '#iosDlShows .ios-dl-row-size{flex:0 0 auto;font-size:11px;color:rgba(232,241,245,.6)}',
+      '#iosDlShows .ios-dl-row-del{position:absolute;right:0;top:0;bottom:0;width:84px;border:0;background:#e5484d;color:#fff;font-size:13px;font-weight:700;border-radius:0 10px 10px 0}',
+      "html[data-theme='light'] #iosDlShows .ios-dl-row{background:rgba(15,20,24,.05)}",
+      "html[data-theme='light'] #iosDlShows .ios-dl-row-title{color:#141a1e}", 
       '#iosDownloadStatus{margin:12px 0;padding:12px;border:1px solid rgba(255,255,255,.14);border-radius:10px;background:rgba(0,0,0,.12);color:inherit;font-size:13px}',
       /* 首页没有站点面板（只有一句「设置面板即将上线」），注入层自带一个：
          下载进度和播放方式都在里面，任何页面都能打开。 */
@@ -413,7 +435,8 @@
     document.head.appendChild(style);
     mountCtrlBar();
     mountDownloadPanel();
-    mountBatchBar();
+    mountDlEntry();
+    mountFitBar();
     applyImmersive();
     installPlaybackGuard();
   }
@@ -573,16 +596,25 @@
     }
     syncCtrlVisibility();
     syncFullButton();
-    applyFit();
+    applyFitGeometry();
+    syncFitBar();
   }
 
-  /* ---------- 画面模式：适应 / 裁剪 / 拉伸 ----------
-     4:3 或 2.35:1 的片源在「适应」下会留黑边，用户可能想铺满。三档写到
-     html[data-ios-fit] 上，由样式表落到真正的 #player video；选择落 localStorage，
-     换集/旋转/重进 App 都按记住的那一档来，不重置回默认值。 */
+  /* ---------- 画面填充：默认 / 拉伸 / 平铺（规格 §1） ----------
+     只在全屏 + 暂停时出现在屏幕顶部；恢复播放随控制栏一起收起；记住上次选择。
+
+     为什么不再用 object-fit：真机报告「拉伸、平铺点了画面没变化」。排查结论是
+     0.1.15 只把档位写到 CSS 的 object-fit 上，而注入层那条 `#player video` 的
+     沉浸态规则与站点自己的宽高/内联样式同优先级、后写者胜 —— 一旦站点重渲染播放器
+     或内联样式回写，object-fit 就被顶掉；更根本的是 object-fit 只在「元素盒子」与
+     视频宽高比不一致时才有效果，站点给的是 100%/100% 的盒子时它形同虚设。
+     这个 App 里没有自己的 AVPlayerLayer（视频由 WKWebView 的 <video> 播），
+     所以 videoGravity 的等价物就是**元素自身的真实几何**：按 videoWidth/videoHeight
+     算出盒子的像素宽高与居中位置直接写上去，渲染层必须照做，没有第二条样式能覆盖。 */
   var FIT_PREF = 'kj-ios-fit';
-  var FIT_MODES = ['contain', 'cover', 'fill'];
-  var FIT_LABELS = { contain: '适应', cover: '裁剪', fill: '拉伸' };
+  var FIT_MODES = ['contain', 'fill', 'cover'];
+  /* 规格里的三个名字对应 AVPlayerLayer 的三种 gravity */
+  var FIT_LABELS = { contain: '默认', fill: '拉伸', cover: '平铺' };
   var fitMode = 'contain';
 
   function readFitPref() {
@@ -591,25 +623,94 @@
     return FIT_MODES.indexOf(stored) >= 0 ? stored : 'contain';
   }
 
-  function applyFit() {
+  /// 真正改可见画面：把 <video> 自己的盒子算成目标几何（默认=等比装进屏幕、拉伸=铺满变形、
+  /// 平铺=等比放大到盖满屏幕）。容器裁掉溢出部分，所以平铺是「裁边填满」而不是留黑边。
+  function applyFitGeometry() {
+    var video = document.getElementById('video');
+    var player = document.getElementById('player');
+    if (!video || !player || !video.style) return;
     fitMode = readFitPref();
-    var root = document.documentElement;
-    if (root && typeof root.setAttribute === 'function') root.setAttribute('data-ios-fit', fitMode);
-    var button = document.getElementById('ppFit');
-    if (!button) return;
-    var label = FIT_LABELS[fitMode] || '适应';
-    button.textContent = label;
-    if (typeof button.setAttribute === 'function') {
-      button.setAttribute('aria-label', '画面比例：' + label + '，点击切换');
+    var vw = Number(video.videoWidth) || 0;
+    var vh = Number(video.videoHeight) || 0;
+    var rect = player.getBoundingClientRect ? player.getBoundingClientRect() : null;
+    var cw = rect ? Number(rect.width) || 0 : 0;
+    var ch = rect ? Number(rect.height) || 0 : 0;
+    /* 还没拿到画面尺寸就先按容器铺满，等 loadedmetadata 再算 */
+    if (!vw || !vh || !cw || !ch) {
+      video.style.width = '100%';
+      video.style.height = '100%';
+      if (typeof video.setAttribute === 'function') video.setAttribute('data-ios-fit-box', fitMode);
+      return;
+    }
+    var width = cw;
+    var height = ch;
+    if (fitMode === 'contain') {
+      var fit = Math.min(cw / vw, ch / vh);
+      width = vw * fit;
+      height = vh * fit;
+    } else if (fitMode === 'cover') {
+      var cover = Math.max(cw / vw, ch / vh);
+      width = vw * cover;
+      height = vh * cover;
+    }
+    /* fill（拉伸）：盒子就是容器，画面被非等比拉满 —— 和 .resize 一致 */
+    video.style.width = Math.round(width) + 'px';
+    video.style.height = Math.round(height) + 'px';
+    if (typeof video.setAttribute === 'function') video.setAttribute('data-ios-fit-box', fitMode);
+    var bar = document.getElementById('iosFitBar');
+    if (bar) {
+      var buttons = bar.querySelectorAll ? bar.querySelectorAll('button') : [];
+      for (var i = 0; i < buttons.length; i++) {
+        var mode = buttons[i].getAttribute ? buttons[i].getAttribute('data-fit') : '';
+        buttons[i].className = mode === fitMode ? 'on' : '';
+      }
     }
   }
 
-  function cycleFit() {
-    var next = FIT_MODES[(FIT_MODES.indexOf(fitMode) + 1) % FIT_MODES.length];
-    try { localStorage.setItem(FIT_PREF, next); } catch (error) { /* 存不了就只在本次生效 */ }
-    applyFit();
-    announce('画面：' + (FIT_LABELS[fitMode] || '适应'));
-    return fitMode;
+  function chooseFit(mode) {
+    if (FIT_MODES.indexOf(mode) < 0) return;
+    try { localStorage.setItem(FIT_PREF, mode); } catch (error) { /* 存不了就只在本次生效 */ }
+    fitMode = mode;
+    applyFitGeometry();
+    announce('画面：' + (FIT_LABELS[mode] || '默认'));
+  }
+
+  /// 顶部那排控件只在「全屏 + 暂停」时出现（规格 §1）
+  function syncFitBar() {
+    var bar = document.getElementById('iosFitBar');
+    if (!bar) return;
+    var video = document.getElementById('video');
+    var paused = !video || video.paused !== false;
+    var show = immersiveNow() && paused;
+    bar.className = show ? 'on' : '';
+    if (!show) return;
+    fitMode = readFitPref();
+    var buttons = bar.querySelectorAll ? bar.querySelectorAll('button') : [];
+    for (var i = 0; i < buttons.length; i++) {
+      var mode = buttons[i].getAttribute ? buttons[i].getAttribute('data-fit') : '';
+      buttons[i].className = mode === fitMode ? 'on' : '';
+    }
+  }
+
+  function mountFitBar() {
+    var player = document.getElementById('player');
+    if (!player || typeof player.appendChild !== 'function') return false;
+    if (document.getElementById('iosFitBar')) { syncFitBar(); return true; }
+    var bar = document.createElement('div');
+    bar.id = 'iosFitBar';
+    for (var i = 0; i < FIT_MODES.length; i++) {
+      (function (mode) {
+        var button = document.createElement('button');
+        button.type = 'button';
+        button.textContent = FIT_LABELS[mode];
+        button.setAttribute('data-fit', mode);
+        button.setAttribute('aria-label', '画面' + FIT_LABELS[mode]);
+        bar.appendChild(button);
+      }(FIT_MODES[i]));
+    }
+    player.appendChild(bar);
+    syncFitBar();
+    return true;
   }
 
   /* ---------- 全屏里控制栏“点一下才出来，几秒后自己收起” ----------
@@ -656,6 +757,14 @@
     clearCtrlTimer();
     if (autoHide === false) return;
     hideCtrlSoon();
+  }
+
+  /* 容器尺寸变了（旋转、进出全屏、键盘收起）就按新的容器重新算一遍画面几何：
+     三档写的是像素宽高，不重算就会停在旧尺寸上。 */
+  function refitSoon() {
+    applyFitGeometry();
+    syncFitBar();
+    setTimeout(function () { applyFitGeometry(); syncFitBar(); }, 180);
   }
 
   function syncCtrlVisibility() {
@@ -966,6 +1075,7 @@
       if (busy) {
         var who = downloadState.show || '';
         var which = downloadState.ep || downloadState.name || '本集';
+        /* 规格 §2：设置里不再有多集队列/批量控制，只留这一句当前单集的状态 */
         running.textContent = '正在下载 ' + (who ? who + ' · ' : '') + which + ' · '
           + (downloadState.percent ? downloadState.percent + '%' : '准备中');
       }
@@ -1034,19 +1144,23 @@
     for (var s = 0; s < shows.length; s++) {
       list.appendChild(libraryItem(shows[s]));
     }
+    bindSwipe(list);
     return true;
   }
 
   function libraryItem(show) {
-    var item = document.createElement('div');
-    item.className = 'ios-dl-show';
-    if (typeof item.setAttribute === 'function') item.setAttribute('data-show', show.id);
+    /* 规格 §3：已下载列表按行列出，每行左滑露出红色「删除」，删除时同时删本地文件。
+       不做一键全部删除，也不做多选 —— 一行就是一个具体文件，滑哪行删哪行。 */
+    var wrap = document.createElement('div');
+    wrap.className = 'ios-dl-show';
+    if (typeof wrap.setAttribute === 'function') wrap.setAttribute('data-show', show.id);
+    /* 剧这一级：封面 + 剧名 + 「已下载 N/M 集」（REG-006 的片库信息不回退） */
     if (show.cover) {
       var cover = document.createElement('img');
       cover.className = 'ios-dl-cover';
       cover.src = show.cover;
       cover.alt = show.title;
-      item.appendChild(cover);
+      wrap.appendChild(cover);
     }
     var meta = document.createElement('div');
     meta.className = 'ios-dl-meta';
@@ -1059,31 +1173,154 @@
     /* 总集数不知道就不写分母：宁可少写，也不编一个错的。 */
     count.textContent = '已下载 ' + show.eps.length + (show.total > 0 ? '/' + show.total : '') + ' 集';
     meta.appendChild(count);
-    var eps = document.createElement('div');
-    eps.className = 'ios-dl-eps';
-    for (var e = 0; e < show.eps.length; e++) {
+    var chips = document.createElement('div');
+    chips.className = 'ios-dl-eps';
+    for (var c = 0; c < show.eps.length; c++) {
       var chip = document.createElement('span');
       chip.className = 'ios-dl-ep';
-      chip.textContent = show.eps[e].label || ('第' + show.eps[e].key + '集');
-      eps.appendChild(chip);
+      chip.textContent = show.eps[c].label || ('第' + show.eps[c].key + '集');
+      chips.appendChild(chip);
     }
-    meta.appendChild(eps);
-    /* 整部剧的队列进度 + 暂停 / 继续 / 取消（取消只停任务，不删已下载文件） */
-    var summary = queueSummary(show.id);
-    if (summary.total) {
-      var queue = document.createElement('div');
-      queue.className = 'ios-dl-queue';
-      queue.textContent = queueText(summary);
-      meta.appendChild(queue);
-      var actions = document.createElement('div');
-      actions.className = 'ios-dl-actions';
-      if (summary.running + summary.queued > 0) actions.appendChild(queueActionButton(show.id, 'pause', '暂停整部剧'));
-      if (summary.paused > 0) actions.appendChild(queueActionButton(show.id, 'resume', '继续下载'));
-      if (summary.busy) actions.appendChild(queueActionButton(show.id, 'cancel', '取消整部剧'));
-      if (actions.children.length) meta.appendChild(actions);
+    meta.appendChild(chips);
+    wrap.appendChild(meta);
+    for (var e = 0; e < show.eps.length; e++) {
+      var ep = show.eps[e];
+      var row = document.createElement('div');
+      row.className = 'ios-dl-row';
+      row.setAttribute('data-dl-show', show.id);
+      row.setAttribute('data-dl-key', String(ep.key));
+      row.setAttribute('data-dl-path', String(ep.path || ''));
+      row.setAttribute('aria-label', (ep.label || ('第' + ep.key + '集')) + ' 已下载，左滑可删除');
+      var body = document.createElement('div');
+      body.className = 'ios-dl-row-body';
+      var title = document.createElement('span');
+      title.className = 'ios-dl-row-title';
+      title.textContent = ep.label || ('第' + ep.key + '集');
+      body.appendChild(title);
+      var size = document.createElement('span');
+      size.className = 'ios-dl-row-size';
+      size.textContent = ep.size ? megabyte(ep.size) : '';
+      body.appendChild(size);
+      row.appendChild(body);
+      var del = document.createElement('button');
+      del.className = 'ios-dl-row-del';
+      del.type = 'button';
+      del.textContent = '删除';
+      del.setAttribute('data-dl-delete', '1');
+      row.appendChild(del);
+      wrap.appendChild(row);
     }
-    item.appendChild(meta);
-    return item;
+    return wrap;
+  }
+
+  /// 滑动状态：一行一次，只允许同时露出一行
+  var swipeRow = null;
+  var swipeStart = null;
+
+  function setRowOffset(row, dx) {
+    if (!row) return;
+    var body = row.querySelector ? row.querySelector('.ios-dl-row-body') : null;
+    if (!body || !body.style) return;
+    var width = row.getBoundingClientRect ? row.getBoundingClientRect().width : 320;
+    var limit = Math.min(96, Math.max(64, width * 0.28));
+    var offset = Math.max(-limit, Math.min(0, dx));
+    body.style.transform = offset ? 'translateX(' + offset + 'px)' : '';
+    if (offset < 0) row.setAttribute('data-dl-open', '1');
+    else row.removeAttribute('data-dl-open');
+  }
+
+  function closeOtherRows(keep) {
+    var rows = document.querySelectorAll ? document.querySelectorAll('#iosDlShows .ios-dl-row') : [];
+    for (var i = 0; i < rows.length; i++) {
+      if (rows[i] !== keep) setRowOffset(rows[i], 0);
+    }
+  }
+
+  /// 真的删除：先把记录从片库里去掉，再让原生删掉那个文件（只删这一行）
+  function deleteDownloaded(showId, key) {
+    var library = readLibrary();
+    var shows = library.shows;
+    var removed = [];
+    for (var s = 0; s < shows.length; s++) {
+      if (String(shows[s].id) !== String(showId)) continue;
+      var keep = [];
+      for (var e = 0; e < shows[s].eps.length; e++) {
+        if (String(shows[s].eps[e].key) === String(key)) removed.push(shows[s].eps[e]);
+        else keep.push(shows[s].eps[e]);
+      }
+      shows[s].eps = keep;
+    }
+    var next = [];
+    for (var i = 0; i < shows.length; i++) if (shows[i].eps.length) next.push(shows[i]);
+    writeStore(LIBRARY_STORE, JSON.stringify({ shows: next }));
+    renderDownloadLibrary();
+    if (!removed.length) {
+      announce('这条记录已经不在了');
+      return false;
+    }
+    var path = String(removed[0].path || '');
+    if (path) postNative({ action: 'deleteLocal', path: path, name: removed[0].name || '' });
+    announce(path ? '已删除这一集和它的文件' : '已删除这一集（没有本地文件）');
+    return true;
+  }
+
+  function deleteRowAt(node) {
+    var cursor = node;
+    while (cursor) {
+      if (cursor.getAttribute && cursor.getAttribute('data-dl-key') !== null) {
+        setRowOffset(cursor, 0);
+        return deleteDownloaded(String(cursor.getAttribute('data-dl-show') || ''), String(cursor.getAttribute('data-dl-key')));
+      }
+      cursor = cursor.parentNode;
+    }
+    return false;
+  }
+
+  /* 左滑手势：touch 事件在 iOS WKWebView 里最可靠（pointer 事件在滚动容器里会被吞） */
+  function bindSwipe(list) {
+    if (!list || list.__iosSwipeBound) return;
+    if (typeof list.addEventListener !== 'function') return;
+    list.__iosSwipeBound = true;
+    function rowOf(node) {
+      var cursor = node;
+      while (cursor) {
+        if (cursor.className && String(cursor.className).split(' ').indexOf('ios-dl-row') >= 0) return cursor;
+        cursor = cursor.parentNode;
+      }
+      return null;
+    }
+    list.addEventListener('touchstart', function (event) {
+      var touch = event.touches && event.touches[0];
+      if (!touch) return;
+      swipeStart = { x: touch.clientX, y: touch.clientY, row: rowOf(event.target) };
+    }, { passive: true });
+    list.addEventListener('touchmove', function (event) {
+      if (!swipeStart || !swipeStart.row) return;
+      var touch = event.touches && event.touches[0];
+      if (!touch) return;
+      var dx = touch.clientX - swipeStart.x;
+      var dy = touch.clientY - swipeStart.y;
+      /* 竖向多于横向就交还给列表滚动，不抢手势 */
+      if (Math.abs(dy) > Math.abs(dx) + 6) { swipeStart = null; return; }
+      if (dx > 0) return;
+      closeOtherRows(swipeStart.row);
+      setRowOffset(swipeStart.row, dx);
+    }, { passive: true });
+    list.addEventListener('touchend', function () {
+      if (!swipeStart || !swipeStart.row) return;
+      var row = swipeStart.row;
+      swipeStart = null;
+      var body = row.querySelector ? row.querySelector('.ios-dl-row-body') : null;
+      var shifted = body && body.style ? /translateX\(/.test(String(body.style.transform)) : false;
+      /* 滑过一半就停在删除按钮上，否则弹回 */
+      if (!shifted) setRowOffset(row, 0);
+      else {
+        var width = row.getBoundingClientRect ? row.getBoundingClientRect().width : 320;
+        var limit = Math.min(96, Math.max(64, width * 0.28));
+        var current = Math.abs(Number(String(body.style.transform).replace(/[^0-9.-]/g, '')) || 0);
+        setRowOffset(row, current > limit / 2 ? -limit : 0);
+      }
+    }, { passive: true });
   }
 
   /* ---------- 设置面板：任何页面都能打开，首页也有 ---------- */
@@ -1300,7 +1537,6 @@
     barButton('ppCast', '外放', '用其他 App 播放或投屏');
     barButton('ppRate', '1×', '倍速');
     /* 画面档位放在全屏左边：全屏仍然是控制栏最右端那一个（真机上习惯的位置）。 */
-    barButton('ppFit', '适应', '画面比例：适应，点击切换');
     barButton('ppFull', '全屏', '全屏播放');
 
     /* 外放菜单：分享直链 / 复制直链 / 下载（登录后）/ 用其他播放器打开（下载后） */
@@ -2141,31 +2377,12 @@
     if (document.getElementById('iosDlPanel')) syncDlSheet();
   }
 
+  /* 0.1.16 规格 §2：不再有「选择 / 一键全集 / 从本集往后 / 下载已选」这条批量条，
+     下载入口只有选集旁的「下载」按钮 + 它下面那张集数网格（点一格下一集）。 */
   function mountBatchBar() {
-    mountDlEntry();
-    var grid = document.getElementById('epGrid');
-    if (!grid || !grid.parentNode) return false;
-    if (document.getElementById('iosBatchBar')) { syncBatchBar(); return true; }
-    var bar = document.createElement('div');
-    bar.id = 'iosBatchBar';
-    function barButton(id, label) {
-      var button = document.createElement('button');
-      button.id = id;
-      button.type = 'button';
-      button.textContent = label;
-      bar.appendChild(button);
-      return button;
-    }
-    barButton('iosBatchSelect', '选择');
-    barButton('iosBatchAll', '一键全集');
-    barButton('iosBatchForward', '从本集往后');
-    barButton('iosBatchStart', '下载已选');
-    var note = document.createElement('span');
-    note.id = 'iosBatchNote';
-    bar.appendChild(note);
-    grid.parentNode.insertBefore(bar, grid);
-    syncBatchBar();
-    return true;
+    var bar = document.getElementById('iosBatchBar');
+    if (bar && bar.parentNode) bar.parentNode.removeChild(bar);
+    return false;
   }
 
   /* 批量入队：先逐集解析真实片源，再把整批交给原生那条队列（并发/去重都在原生层）。 */
@@ -2453,7 +2670,8 @@
     button.setAttribute('data-total', String(total));
   }
 
-  /// 就地展开的列表：每次同步都按真实队列/片库重建每一行的状态文字。
+  /// 就地展开的集数网格：点一格 = 立刻把这一集加进共享下载队列（规格 §2）。
+  /// 没有全选、没有「一键全集」、没有「下载已选」二次确认。
   function syncDlPanel() {
     var panel = document.getElementById('iosDlPanel');
     if (!panel) return;
@@ -2473,67 +2691,60 @@
       var title = document.createElement('span');
       title.id = 'iosDlTitle';
       head.appendChild(title);
-      var all = document.createElement('button');
-      all.id = 'iosDlAll';
-      all.type = 'button';
-      all.textContent = '全选';
-      head.appendChild(all);
-      var clear = document.createElement('button');
-      clear.id = 'iosDlClear';
-      clear.type = 'button';
-      clear.textContent = '清空';
-      head.appendChild(clear);
-      var start = document.createElement('button');
-      start.id = 'iosDlStart';
-      start.type = 'button';
-      start.textContent = '下载已选';
-      head.appendChild(start);
-      var note = document.createElement('span');
-      note.id = 'iosDlNote';
-      head.appendChild(note);
       panel.appendChild(head);
     }
     var titleNode = document.getElementById('iosDlTitle');
-    if (titleNode) titleNode.textContent = '选集下载 · 共 ' + nodes.length + ' 集';
-    var startNode = document.getElementById('iosDlStart');
-    if (startNode) startNode.textContent = batchPicked.length ? '下载已选 (' + batchPicked.length + ')' : '下载已选';
-    var noteNode = document.getElementById('iosDlNote');
-    if (noteNode) {
-      noteNode.textContent = batchPicked.length ? '已选 ' + batchPicked.length + ' 集' : '点条目选中要下载的集';
+    if (titleNode) titleNode.textContent = '选集下载 · 共 ' + nodes.length + ' 集（点一集即开始下载）';
+    var grid = document.getElementById('iosDlGrid');
+    if (!grid) {
+      grid = document.createElement('div');
+      grid.id = 'iosDlGrid';
+      panel.appendChild(grid);
     }
     for (var i = 0; i < nodes.length; i++) {
       var node = nodes[i];
       var key = epKeyOf(node);
-      var row = document.getElementById('iosDlRow' + key);
-      if (!row) {
-        row = document.createElement('button');
-        row.type = 'button';
-        row.id = 'iosDlRow' + key;
-        row.className = 'ios-dl-row';
-        row.setAttribute('data-dl-ep', key);
-        var tick = document.createElement('span');
-        tick.className = 'ios-dl-tick';
-        row.appendChild(tick);
-        var name = document.createElement('span');
-        name.className = 'ios-dl-name';
-        row.appendChild(name);
-        var state = document.createElement('span');
-        state.className = 'ios-dl-state';
-        row.appendChild(state);
-        panel.appendChild(row);
-      }
       var label = epLabelOf(node) || ('第' + key + '集');
-      var picked = batchPicked.indexOf(key) >= 0;
-      row.className = 'ios-dl-row' + (picked ? ' on' : '');
-      var nameNode = row.querySelector ? row.querySelector('.ios-dl-name') : null;
-      if (nameNode) nameNode.textContent = label;
-      var tickNode = row.querySelector ? row.querySelector('.ios-dl-tick') : null;
-      if (tickNode) tickNode.textContent = picked ? '✓' : '○';
-      var stateNode = row.querySelector ? row.querySelector('.ios-dl-state') : null;
-      if (stateNode) stateNode.textContent = dlStateText(showId, key);
-      /* 无障碍名把「第几集 + 状态」一起说出来，读屏和自动化都读得到 */
-      row.setAttribute('aria-label', label + ' ' + (stateNode ? stateNode.textContent : ''));
+      var state = dlStateText(showId, key);
+      var cell = document.getElementById('iosDlCell' + key);
+      if (!cell) {
+        cell = document.createElement('button');
+        cell.type = 'button';
+        cell.id = 'iosDlCell' + key;
+        cell.className = 'ios-dl-cell';
+        cell.setAttribute('data-dl-ep', key);
+        var nameNode = document.createElement('span');
+        nameNode.className = 'ios-dl-cell-name';
+        cell.appendChild(nameNode);
+        var stateNode = document.createElement('span');
+        stateNode.className = 'ios-dl-cell-state';
+        cell.appendChild(stateNode);
+        /* 直接握在元素上：不依赖 querySelector（老内核和测试夹具里它不一定支持类选择器） */
+        cell.__iosName = nameNode;
+        cell.__iosState = stateNode;
+        grid.appendChild(cell);
+      }
+      var shortLabel = /^第\d+集$/.test(label) ? label.replace('集', '') : label;
+      if (cell.__iosName) cell.__iosName.textContent = shortLabel;
+      if (cell.__iosState) cell.__iosState.textContent = state;
+      cell.className = 'ios-dl-cell'
+        + (state === '已下载' ? ' done' : '')
+        + (state.indexOf('下载中') === 0 || state === '排队中' ? ' busy' : '');
+      /* 无障碍名把集号和状态一起报出来：读屏与自动化都读得到 */
+      cell.setAttribute('aria-label', label + ' ' + state);
     }
+  }
+
+  /// 点一格：立刻入队（单集），格子马上变「下载中」并给一句轻提示。
+  function startEpisodeDownload(key) {
+    var nodes = epNodes();
+    for (var i = 0; i < nodes.length; i++) {
+      if (epKeyOf(nodes[i]) !== key) continue;
+      announce('已加入下载');
+      startBatch([nodes[i]]);
+      return true;
+    }
+    return false;
   }
 
   function syncDlSheet() {
@@ -2631,79 +2842,18 @@
       toggleDlSheet();
       return true;
     }
-    if (hit(target, 'iosDlAll')) {
+    if (target && target.getAttribute && String(target.getAttribute('data-dl-delete') || '') === '1') {
       event.preventDefault();
       event.stopImmediatePropagation();
-      batchPicked = [];
-      var everyone = epNodes();
-      for (var a = 0; a < everyone.length; a++) {
-        var key = epKeyOf(everyone[a]);
-        if (key && batchPicked.indexOf(key) < 0) batchPicked.push(key);
-        syncPickClass(everyone[a], true);
-      }
-      syncBatchBar();
-      syncDlSheet();
-      return true;
-    }
-    if (hit(target, 'iosDlClear')) {
-      event.preventDefault();
-      event.stopImmediatePropagation();
-      batchPicked = [];
-      var allNodes = epNodes();
-      for (var c = 0; c < allNodes.length; c++) syncPickClass(allNodes[c], false);
-      syncBatchBar();
-      syncDlSheet();
-      return true;
-    }
-    if (hit(target, 'iosDlStart')) {
-      event.preventDefault();
-      event.stopImmediatePropagation();
-      startBatch(pickedNodes());
+      deleteRowAt(target);
       return true;
     }
     if (dlRowKeyOf(target)) {
       event.preventDefault();
       event.stopImmediatePropagation();
-      toggleDlRow(target);
+      startEpisodeDownload(dlRowKeyOf(target));
       return true;
     }
-    if (hit(target, 'iosBatchSelect')) {
-      event.preventDefault();
-      event.stopImmediatePropagation();
-      batchSelecting = !batchSelecting;
-      if (!batchSelecting) {
-        var nodes = epNodes();
-        for (var n = 0; n < nodes.length; n++) syncPickClass(nodes[n], false);
-        batchPicked = [];
-      }
-      syncBatchBar();
-      return true;
-    }
-    if (hit(target, 'iosBatchAll')) {
-      event.preventDefault();
-      event.stopImmediatePropagation();
-      startBatch(allEpNodes());
-      return true;
-    }
-    if (hit(target, 'iosBatchForward')) {
-      event.preventDefault();
-      event.stopImmediatePropagation();
-      startBatch(forwardEpNodes());
-      return true;
-    }
-    if (hit(target, 'iosBatchStart')) {
-      event.preventDefault();
-      event.stopImmediatePropagation();
-      startBatch(pickedNodes());
-      return true;
-    }
-    if (hit(target, 'iosOpenDownloaded')) {
-      event.preventDefault();
-      event.stopImmediatePropagation();
-      openLocal();
-      return true;
-    }
-    /* 点面板外面的深色底也能关，不必非得找「关闭」按钮 */
     if (hit(target, 'iosSettingsSheet') && !hit(target, 'iosSettingsCard')) {
       event.preventDefault();
       event.stopImmediatePropagation();
@@ -2742,12 +2892,18 @@
       toggleFullscreen();
       return true;
     }
-    if (hit(target, 'ppFit')) {
-      event.preventDefault();
-      event.stopImmediatePropagation();
-      cycleFit();
-      hideCtrlSoon();
-      return true;
+    if (hit(target, 'iosFitBar')) {
+      var modeNode = target;
+      while (modeNode && modeNode !== event.currentTarget) {
+        var mode = modeNode.getAttribute ? modeNode.getAttribute('data-fit') : '';
+        if (mode) {
+          event.preventDefault();
+          event.stopImmediatePropagation();
+          chooseFit(String(mode));
+          return true;
+        }
+        modeNode = modeNode.parentNode;
+      }
     }
     var batchAction = batchActionOf(target);
     if (batchAction) {
@@ -2832,6 +2988,9 @@
       /* 全屏里播放时把控制栏收起来，暂停时再拿出来：用户不碰屏幕就只剩画面。 */
       if (name === 'pause') showCtrl(false);
       else if (name === 'play') hideCtrlSoon();
+      /* 画面档位那排只在「全屏 + 暂停」出现（规格 §1）；换集/首帧后重新按新宽高算几何 */
+      applyFitGeometry();
+      syncFitBar();
     }, true);
   });
   document.addEventListener('input', function (event) {
@@ -2899,10 +3058,12 @@
   }
   onWindow('resize', function () {
     applyImmersive();
+    refitSoon();
   });
   onWindow('orientationchange', function () {
     if (!landscape()) explicitInline = false;
     applyImmersive();
+    refitSoon();
   });
   /* ---------- 首页日期条：一进来停在今天（只在条内横向定位，不动页面） ---------- */
   var stripTouched = false;
@@ -3114,13 +3275,15 @@
   }
   /* 站点是 SPA：换集或重渲染可能整块换掉 #player，几次补挂 */
   [0, 400, 1200, 2600].forEach(function (delay) {
-    setTimeout(function () { mountCtrlBar(); mountToolDownload(); mountBatchBar(); }, delay);
+    setTimeout(function () { mountCtrlBar(); mountToolDownload(); mountDlEntry(); mountFitBar(); }, delay);
   });
   /* 首页/播放页的站点渲染是异步的：面板和状态晚一步再补一次 */
   [0, 600, 1600].forEach(function (delay) {
     setTimeout(function () {
       mountDownloadPanel();
       mountToolDownload();
+      mountDlEntry();
+      mountFitBar();
       syncExtToggle();
       syncDownloadRow();
     }, delay);

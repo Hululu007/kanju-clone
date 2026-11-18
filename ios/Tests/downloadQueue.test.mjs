@@ -410,106 +410,71 @@ function batchReply(showId, idx) {
 
 const settle = () => new Promise((resolve) => setTimeout(resolve, 60));
 
-test('one tap batch download resolves every episode to its real media url before queueing', async () => {
+/* 夹具 DOM 的 textContent 不会把子节点文字拼起来，读文本要自己聚合。 */
+const textOf = (el) => (el ? ((el.children || []).map((child) => child.textContent || '').join(' ') || el.textContent || '') : '');
+const childWithClass = (el, name) => ((el && el.children ? el.children : []).find((child) => String(child.className || '').split(' ').indexOf(name) >= 0) || null);
+
+
+/* 0.1.16 规格 §2：下载入口只有选集旁的「下载」按钮 + 它下面那张集数网格。
+   点一个格子 = 立刻把这一集加进同一条共享队列（不再有全选/一键全集/下载已选）。 */
+test('tapping one cell in the episode grid queues exactly that episode', async () => {
   const state = fixture({ signedIn: true, episodes: [0, 1, 2] });
   state.ready();
-  const bar = state.document.getElementById('iosBatchBar');
-  assert.ok(bar, '选集区没有批量下载条');
-  state.replies.push(batchReply('fixture', 0), batchReply('fixture', 1), batchReply('fixture', 2));
-
-  state.click(state.document.getElementById('iosBatchAll'));
-  await settle();
-
-  const message = state.messages.at(-1);
-  assert.equal(message.action, 'downloadBatch');
-  assert.equal(message.signedIn, true);
-  assert.equal(message.items.length, 3, `三集都要入队：${JSON.stringify(message)}`);
-  assert.equal(message.items.map((item) => item.url).join(','),
-    'https://media.example/0.mp4,https://media.example/1.mp4,https://media.example/2.mp4',
-    '每一集都要用站点解析出来的真实片源，不能拿播放页地址顶替');
-  assert.ok(message.items.every((item) => item.url !== 'https://zhuiju.dpdns.org/player/?id=fixture'),
-    '播放页 URL 不是视频');
-  assert.equal(message.items.map((item) => item.epKey).join(','), '0,1,2', 'showId + 集号是原生队列的去重键');
-  assert.equal(message.items.map((item) => item.showId).join(','), 'fixture,fixture,fixture');
-  assert.equal(message.items[0].title, '测试剧');
-  assert.equal(message.items[1].name, '测试剧 第2集.mp4', '批量下载的文件名也是真实剧名 + 集号');
-});
-
-test('an HLS or page-url episode is skipped with a reason instead of being downloaded', async () => {
-  const state = fixture({ signedIn: true, episodes: [0, 1, 2] });
-  state.ready();
-  state.replies.push(
-    batchReply('fixture', 0),
-    json({ showId: 'fixture', idx: 1, episodeNumber: 2, verified: true, kind: 'hls', url: 'https://media.example/1.m3u8' }),
-    json({ showId: 'fixture', idx: 2, episodeNumber: 3, verified: true, kind: 'mp4', url: 'https://zhuiju.dpdns.org/player/?id=fixture&ep=2' })
-  );
-
-  state.click(state.document.getElementById('iosBatchAll'));
-  await settle();
-
-  const message = state.messages.at(-1);
-  assert.equal(message.action, 'downloadBatch');
-  assert.equal(message.items.length, 1, `只有真正解析出视频的那一集能入队：${JSON.stringify(message)}`);
-  assert.equal(message.items[0].epKey, '0');
-  assert.match(state.toastText(), /跳过 2 集/, '跳过的集要如实告诉用户');
-});
-
-test('download from the current episode onward starts at the selected episode', async () => {
-  const state = fixture({ signedIn: true, episodes: [0, 1, 2, 3, 4] });
-  state.ready();
-  for (const button of state.epButtons) button.className = 'ep';
-  state.epButtons[2].className = 'ep on';
-  state.replies.push(batchReply('fixture', 2), batchReply('fixture', 3), batchReply('fixture', 4));
-
-  state.click(state.document.getElementById('iosBatchForward'));
-  await settle();
-
-  const message = state.messages.at(-1);
-  assert.equal(message.action, 'downloadBatch');
-  assert.equal(message.items.map((item) => item.epKey).join(','), '2,3,4',
-    '从本集往后：当前集和它后面的每一集，前面的不重复下');
-});
-
-test('the selection mode picks episodes for a chosen batch without leaving the page', async () => {
-  const state = fixture({ signedIn: true, episodes: [0, 1, 2] });
-  state.ready();
-  state.click(state.document.getElementById('iosBatchSelect'));
-  state.click(state.epButtons[1]);
-  assert.match(state.epButtons[1].className, /ios-pick/, '选中的集要有可见标记');
-  assert.equal(state.document.getElementById('iosBatchStart').textContent, '下载已选 (1)');
+  assert.equal(state.document.getElementById('iosBatchBar'), null,
+    '批量条（选择/一键全集/从本集往后/下载已选）必须已经删掉');
+  state.click(state.document.getElementById('iosDlButton'));
   state.replies.push(batchReply('fixture', 1));
 
-  state.click(state.document.getElementById('iosBatchStart'));
+  const cell = state.document.getElementById('iosDlCell1');
+  assert.ok(cell, '集数网格里没有第二集那一格');
+  assert.match(textOf(cell), /第2集|2/, '格子要写集号');
+  state.click(cell);
   await settle();
+
   const message = state.messages.at(-1);
   assert.equal(message.action, 'downloadBatch');
-  assert.equal(message.items.map((item) => item.epKey).join(','), '1', '只下用户选中的那一集');
+  assert.equal(message.items.length, 1, '点一格只下这一集');
+  assert.equal(message.items[0].epKey, '1');
+  assert.equal(message.items[0].url, 'https://media.example/1.mp4', '要用站点解析出来的真实片源');
+  assert.match(state.toastText(), /已加入下载/, '点完要给一句轻提示');
 });
 
-test('the settings sheet shows the whole show queue with pause, resume and cancel', () => {
+test('the grid shows each episode state and never offers a batch action', async () => {
   const state = fixture({ signedIn: true, episodes: [0, 1, 2] });
   state.ready();
-  state.click(state.settingsTrigger);
+  state.click(state.document.getElementById('iosDlButton'));
   state.window.__zhuijuDownloads('snapshot', [
-    { id: 'a', showId: 'fixture', epKey: '0', epLabel: '第1集', title: '测试剧', status: 'done', received: 100, total: 100, path: '/tmp/a.mp4', size: 100, name: 'a.mp4' },
-    { id: 'b', showId: 'fixture', epKey: '1', epLabel: '第2集', title: '测试剧', status: 'running', received: 40, total: 100, path: '', size: 0, name: 'b.mp4' },
-    { id: 'c', showId: 'fixture', epKey: '2', epLabel: '第3集', title: '测试剧', status: 'queued', received: 0, total: 100, path: '', size: 0, name: 'c.mp4' }
+    { id: 'b', showId: 'fixture', epKey: '1', epLabel: '第2集', title: '测试剧', status: 'running', received: 40, total: 100, path: '', size: 0, name: 'b.mp4' }
   ]);
-  const item = state.document.getElementById('iosDlShows').children[0];
-  assert.ok(item, '队列里的剧要出现在设置面板里');
-  const queueNode = item.querySelector('.ios-dl-queue');
-  assert.ok(queueNode, '设置里要有整部剧的队列进度');
-  const text = queueNode.textContent;
-  assert.match(text, /任务 1\/3 集/, `要按整部剧汇总：${text}`);
-  assert.match(text, /进行中 1/, text);
-  assert.match(text, /排队 1/, text);
-  assert.match(text, /总进度 47%/, `总进度按真实字节算：${text}`);
-  const actions = item.querySelector('.ios-dl-actions');
-  assert.ok(actions && actions.children.length >= 2, '要能暂停整部剧/取消整部剧');
-  const pause = actions.children[0];
-  state.click(pause);
-  assert.equal(state.messages.at(-1).action, 'downloadPause');
-  assert.equal(state.messages.at(-1).showId, 'fixture');
+  const grid = state.document.getElementById('iosDlGrid');
+  assert.ok(grid, '展开后应当是集数网格');
+  const cells = grid.querySelectorAll('.ios-dl-cell');
+  assert.equal(cells.length, 3, '每一集一格');
+  assert.match(textOf(cells[1]), /下载中/, '正在下载的那一格要显示进度状态');
+  assert.match(textOf(cells[0]), /可下载|未下载/, '还没下的格子要显示可下载');
+  for (const id of ['iosDlAll', 'iosDlClear', 'iosDlStart', 'iosBatchAll', 'iosBatchStart']) {
+    assert.equal(state.document.getElementById(id), null, `不该再有 ${id} 这种批量入口`);
+  }
+});
+
+test('a downloaded row can be deleted on its own, and only that file is asked to be removed', () => {
+  const state = fixture({ signedIn: true, episodes: [0, 1] });
+  state.ready();
+  state.window.__zhuijuDownloads('snapshot', [
+    { id: 'a', showId: 'fixture', epKey: '0', epLabel: '第1集', title: '测试剧', status: 'done', received: 10, total: 10, path: '/tmp/a.mp4', size: 10, name: 'a.mp4' },
+    { id: 'b', showId: 'fixture', epKey: '1', epLabel: '第2集', title: '测试剧', status: 'done', received: 10, total: 10, path: '/tmp/b.mp4', size: 10, name: 'b.mp4' }
+  ]);
+  state.click(state.settingsTrigger);
+  const list = state.document.getElementById('iosDlShows');
+  const rows = list.querySelectorAll('.ios-dl-row');
+  assert.ok(rows.length >= 2, '已下载列表要一行一集，左滑才有得删');
+  const target = rows[0];
+  const button = childWithClass(childWithClass(target, 'ios-dl-row-body') || target, 'ios-dl-row-del') || childWithClass(target, 'ios-dl-row-del');
+  assert.ok(button, '每一行都要有删除按钮（左滑露出来）');
+  state.click(button);
+  const message = state.messages.at(-1);
+  assert.equal(message.action, 'deleteLocal', '删除要让原生删掉本地文件');
+  assert.equal(message.path, '/tmp/a.mp4', '只删这一行对应的那个文件');
 });
 
 test('a failed episode never lets the show look complete and an unknown length has no percent', () => {

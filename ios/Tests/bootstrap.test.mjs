@@ -479,7 +479,7 @@ test('fullscreen sits at the right end of the control bar and drives native rota
   const bar = state.document.getElementById('ppCtrl');
   assert.ok(bar, '自带控制栏没有挂上');
   assert.deepEqual(bar.children.map((child) => child.id),
-    ['ppPlay', 'ppTime', 'ppSeek', 'ppCast', 'ppRate', 'ppFit', 'ppFull', 'ppCastMenu', 'ppRateMenu'],
+    ['ppPlay', 'ppTime', 'ppSeek', 'ppCast', 'ppRate', 'ppFull', 'ppCastMenu', 'ppRateMenu'],
     '全屏必须是进度条后面的最后一个按钮，画面档位紧挨着它');
   assert.equal(state.video.controls, false, '自带控制栏挂上后必须收起原生控件');
   assert.ok(state.video.removed.includes('controls'));

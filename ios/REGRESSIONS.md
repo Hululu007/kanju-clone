@@ -540,6 +540,61 @@ node --test --test-name-pattern='landscape playback goes immersive again' ios/Te
   站点实际投屏按钮的命中（不同模板可能用不同的文案/类名，`castEntryNode()` 按文字、
   无障碍名和 cast/dlna/airplay 类名三路识别，认不出时会退回挂在选集网格上方，不会瞎挡功能）。
 
+## REG-015 全屏画面填充点了没变化（拉伸/平铺无效）
+
+- **现象**：全屏下点「拉伸」「平铺」，画面没有任何变化；三档控件还一直挂在控制栏上，
+  竖屏页内也能看到，恢复了播放也不收起。
+- **复现步骤**：进播放页 → 全屏 → 点「拉伸」/「平铺」→ 画面比例不变（始终是等比留黑边）。
+- **根因**（0.1.15，`ios/ZhuijuAI/AppBootstrap.js`）：档位只写了 CSS
+  `html[data-ios-fit=...] #player video{object-fit:...!important}`。三个问题叠在一起：
+  1. 注入层自己的沉浸态规则 `html[data-ios-immersive] #player video{...object-fit:contain!important}`
+     与这三条**同优先级**，站点重渲染播放器或回写内联样式时谁后写谁赢，档位会被顶回 contain；
+  2. `object-fit` 只在「元素盒子」与视频宽高比不一致时才产生效果，站点给的是 100%×100% 的盒子，
+     一旦容器和视频比例接近，它本来就看不出变化；
+  3. 这个 App **没有自己的 AVPlayerLayer**（视频由 WKWebView 的 `<video>` 播，全仓无 AVPlayer/AVPlayerLayer），
+     所以「改 videoGravity」在这里唯一可靠的等价物是**改元素自身的几何**，改 CSS 属性不够。
+- **修复**：
+  - 三档改成按 `video.videoWidth/videoHeight` 与容器尺寸算**像素几何**：默认=等比装进屏幕、
+    拉伸=盒子铺满（非等比）、平铺=等比放大到盖满并被容器裁边；直接写 `width/height` 到 `<video>`，
+    渲染层必须照做，没有第二条样式能覆盖它（`applyFitGeometry()`）。
+  - 容器尺寸变化（旋转、进出全屏）与换集/首帧后重算（`refitSoon()`、`loadedmetadata`/`play` 钩子）。
+  - 控件按规格挪到**屏幕顶部**，只在「全屏 + 暂停」出现（`#iosFitBar`，当前项高亮），
+    恢复播放随控制栏一起收起；控制栏里原来那一格删掉，竖屏/设置面板都不再出现。
+  - 选择落 `localStorage['kj-ios-fit']`（contain/fill/cover = 默认/拉伸/平铺），重进保持。
+- **测试名**：本次按 HARK-SMALL-UI-EXEMPT（Ken 2026-11-19 03:08）不新增 XCUITest、不跑模拟器；
+  代码层确认见下。
+- **代码层确认**：`applyFitGeometry()` 是唯一写入画面几何的地方，写入对象是
+  `document.getElementById('video')`（当下可见的那个 `<video>`），三档分别算出不同的
+  `style.width/height` 像素值；`syncFitBar()` 只决定控件显隐与高亮，不参与渲染。
+  **未在真机验证**，需手机自测。
+- **修复版本**：0.1.16（build 17）
+- **验证边界**：本次只做到编译通过 + 本地 Node 夹具；像素几何在真机上的观感（尤其刘海与安全区）
+  必须真机确认。
+
+## REG-016 下载要绕两步，且已下载的集没法单独删掉
+
+- **现象**：①选集旁的下载入口点开后是一排「全选 / 一键全集 / 从本集往后 / 下载已选」，
+  想下某一集要先选再确认；设置面板里还有整部剧的队列进度与暂停/继续/取消。
+  ②已下载列表只能看，删不掉；想清掉某一集只能去「文件」App 里翻。
+- **复现步骤**：播放页 → 下载 → 选出「下载已选」→ 两步才入队；设置 → 已下载 → 没有任何删除入口。
+- **根因**：0.1.14 的批量下载把「多选 + 二次确认」当成了唯一入口；片库只写不删，
+  网页侧没有删文件的原生通道（`MediaDownloader` 只下载不删）。
+- **修复**（照 ios/UX_SPEC.md §2 §3）：
+  - 集数网格替代批量条：一行 5 格，每格标状态（可下载 / 下载中 N% / 已下载）；
+    **点一格立刻入队**并提示「已加入下载」，可以连续点多集，走同一条共享队列（并发/去重不变）。
+  - 删掉 `#iosBatchBar`（选择 / 一键全集 / 从本集往后 / 下载已选）与面板里的 `全选/清空/下载已选`；
+    设置面板里的整部剧队列块（暂停整部剧 / 继续 / 取消整部剧）一并删除。
+  - 已下载列表改「一行一集」，支持左滑露出红色「删除」；删除时先删片库记录，再让原生
+    `deleteLocal` 删掉**这一行对应的那个文件**（路径必须落在 App 的 Documents 里，越界拒绝）。
+    没有一键全部删除，也没有多选。
+- **测试名**（Node 夹具，随本次改动更新）：
+  `tapping one cell in the episode grid queues exactly that episode`、
+  `the grid shows each episode state and never offers a batch action`、
+  `a downloaded row can be deleted on its own, and only that file is asked to be removed`；
+  同时删除已不存在的批量条用例（一键全集 / 选择模式 / 从本集往后 / 整部剧暂停继续取消）。
+- **修复版本**：0.1.16（build 17）
+- **验证边界**：左滑手势走 touch 事件，模拟器/真机手感与删除后文件是否真的消失需真机确认。
+
 ## 模拟器验收记录
 
 `InjectedUITests` 在 GitHub Actions 的 `macos-15` + iOS 模拟器上跑（`ios-unsigned.yml` 的

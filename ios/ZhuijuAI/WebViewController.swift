@@ -43,6 +43,8 @@ final class WebViewController: UIViewController {
         case downloadSync
         /// 下载完成后用系统应用列表打开本地文件。
         case openLocal
+        /// 已下载列表左滑删除：删掉这一集在本地的那个文件（只删这一个）。
+        case deleteLocal
     }
 
     /// 系统分享面板里的链接项：声明成标准 URL（`public.url`）并带上链接元数据，
@@ -100,6 +102,8 @@ final class WebViewController: UIViewController {
                 target?.cancelDownload()
             case PlayerAction.openLocal.rawValue:
                 target?.presentLocalFile(path: body["path"] as? String, name: body["name"] as? String)
+            case PlayerAction.deleteLocal.rawValue:
+                target?.deleteLocalFile(path: body["path"] as? String)
             default:
                 target?.apply(playerAction: action)
             }
@@ -422,6 +426,25 @@ final class WebViewController: UIViewController {
 
     /// 把下载好的本地文件交给系统：文件类型（public.movie / public.mpeg-4）是
     /// 播放器 App 能出现在列表里的方式，也是这类 App 唯一合法的入口。
+    /// 已下载列表左滑删除：只删这一集对应的那个文件，记录由网页侧先删。
+    /// 路径必须先确认落在 App 自己的 Documents 里，避免被网页指到别处。
+    fileprivate func deleteLocalFile(path: String?) {
+        guard let raw = path?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else { return }
+        let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let target = URL(fileURLWithPath: raw).standardizedFileURL
+        guard target.path.hasPrefix(documents.standardizedFileURL.path) else {
+            NSLog("deleteLocal refused: %@ is outside Documents", raw)
+            return
+        }
+        do {
+            if FileManager.default.fileExists(atPath: target.path) {
+                try FileManager.default.removeItem(at: target)
+            }
+        } catch {
+            NSLog("deleteLocal failed: %@", String(describing: error))
+        }
+    }
+
     fileprivate func presentLocalFile(path: String?, name: String?) {
         guard let path = path, !path.isEmpty else { return }
         let fileURL = URL(fileURLWithPath: path)
