@@ -1,0 +1,103 @@
+name: Package the unsigned IPA only
+
+# 只打包、不跑任何模拟器或测试步骤。
+#
+# 为什么单独一份：`ios-unsigned.yml` 每次都会跑 XCTest 全量（含模拟器 UI 冒烟），
+# 而 2026-11-19 Ken 明确要求「立即停止 0.1.15 的模拟器 / XCUITest / 截图 / CI 测试工作，
+# 只要编译通过就出 unsigned IPA」。这份工作流只做：xcodegen → Release 构建 → 打 Payload zip。
+#
+# 构建的代码由 `code_ref` 决定（默认 main），因此可以精确地从某一个已提交的 SHA 出包，
+# 不必把任何改动推到 main。产物名带 commit 前 7 位，便于核对是哪一次提交出的包。
+on:
+  workflow_dispatch:
+    inputs:
+      code_ref:
+        description: '要出包的 commit SHA（默认 main）'
+        required: false
+        default: 'main'
+
+jobs:
+  package:
+    runs-on: macos-15
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.code_ref }}
+
+      - name: Record what is being built
+        run: |
+          set -uo pipefail
+          echo "ref=${{ inputs.code_ref }}" | tee build-info.log
+          git rev-parse HEAD | tee -a build-info.log
+          git log -1 --format='%s' | tee -a build-info.log
+          grep -n 'MARKETING_VERSION\|CURRENT_PROJECT_VERSION' ios/project.yml | tee -a build-info.log
+          cat build-info.log
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        working-directory: ios
+        run: xcodegen generate
+
+      - name: Build Release for device (unsigned)
+        working-directory: ios
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project ZhuijuAI.xcodeproj \
+            -scheme ZhuijuAI \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build | tee xcodebuild.log
+
+      - name: Package unsigned IPA
+        working-directory: ios
+        run: |
+          set -euo pipefail
+          APP="build/Build/Products/Release-iphoneos/ZhuijuAI.app"
+          test -d "$APP"
+          SHORT=$(git rev-parse --short=7 HEAD)
+          VERSION=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Info.plist")
+          BUILD=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP/Info.plist")
+          NAME="ZhuijuAI-${VERSION}-build${BUILD}-unsigned"
+          echo "app=$APP version=$VERSION build=$BUILD name=$NAME sha=$SHORT" | tee ipa-info.log
+          rm -rf Payload
+          mkdir Payload
+          cp -R "$APP" Payload/
+          /usr/bin/zip -qry "${NAME}.ipa" Payload
+          shasum -a 256 "${NAME}.ipa" | tee "${NAME}.ipa.sha256"
+          echo "$NAME" > ipa-name.txt
+
+      - name: Prove the binary really is unsigned
+        working-directory: ios
+        run: |
+          set +e
+          NAME=$(cat ipa-name.txt)
+          echo "--- codesign on the packaged app ---" | tee ipa-codesign.log
+          codesign -dv --verbose=4 "Payload/ZhuijuAI.app" >> ipa-codesign.log 2>&1
+          echo "codesign-exit=$?" | tee -a ipa-codesign.log
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "Payload/ZhuijuAI.app/Info.plist" | tee -a ipa-codesign.log
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "Payload/ZhuijuAI.app/Info.plist" | tee -a ipa-codesign.log
+          /usr/bin/unzip -l "${NAME}.ipa" | head -20 | tee -a ipa-codesign.log
+          cat ipa-codesign.log
+
+      - name: Upload the IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: ZhuijuAI-unsigned-ipa-only
+          path: |
+            ios/*.ipa
+            ios/*.ipa.sha256
+            ios/ipa-name.txt
+            ios/ipa-info.log
+            ios/ipa-codesign.log
+            ios/build-info.log
+          retention-days: 14
