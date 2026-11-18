@@ -1,7 +1,12 @@
 (function () {
   'use strict';
   if (window.top !== window) return;
-  if (window.location.protocol !== 'https:' || window.location.hostname !== 'zhuiju.dpdns.org') return;
+  var TEST_ORIGIN = String(window.__zhuijuTestOrigin || '');
+  if (window.location.protocol !== 'https:' || window.location.hostname !== 'zhuiju.dpdns.org') {
+    /* 出包关卡的截图工作流要在一个同机夹具站上真点一遍；只认原生在测试进程里
+       注入的这一个 origin，正式包里没有这个变量，下面的 early return 照常生效。 */
+    if (!TEST_ORIGIN || window.location.origin !== TEST_ORIGIN) return;
+  }
   if (window.__zhuijuIOSReady) return;
   window.__zhuijuIOSReady = true;
 
@@ -24,6 +29,9 @@
   }
 
   var generation = 0;
+  /* 批量下载逐集解析片源时，同一个 /api/play 不应该按「当前正在播放的那一集」校验：
+     否则除了当前集以外每一集都会被当成过期请求中止。计数只在解析期间 > 0。 */
+  var batchResolving = 0;
   var pendingPlayback = null;
   var playbackController = null;
   var originalFetch = window.fetch;
@@ -32,6 +40,12 @@
     if (element) element.textContent = message;
   }
   function abortError() { return new DOMException('播放请求已过期', 'AbortError'); }
+  /* 片源只允许 https；测试夹具站是自己的同机 http 服务时，只放行那个 host。 */
+  function allowedMediaOrigin(media) {
+    if (media.protocol === 'https:') return true;
+    if (!TEST_ORIGIN) return false;
+    try { return media.origin === TEST_ORIGIN && media.hostname === new URL(TEST_ORIGIN).hostname; } catch (error) { return false; }
+  }
   function stillSelected(index, requestGeneration) {
     var selected = document.querySelector('.ep.on');
     return requestGeneration === generation && (!selected || Number(selected.dataset.ep) === index);
@@ -55,7 +69,7 @@
     if (data.kind !== 'hls' && data.kind !== 'mp4') return false;
     var media;
     try { media = new URL(data.url); } catch (error) { return false; }
-    if (media.protocol !== 'https:' || !media.hostname || media.username || media.password) return false;
+    if (!allowedMediaOrigin(media) || !media.hostname || media.username || media.password) return false;
     var selected = document.querySelector('.ep.on');
     var label = selected ? String(selected.textContent).trim().match(/^第\s*(\d+)\s*集$/) : null;
     return !label || Number(label[1]) === data.episodeNumber;
@@ -78,7 +92,7 @@
     var next = Object.assign({}, options || {}, { credentials: 'same-origin' });
     var requestGeneration = generation;
     var index = Number(url.searchParams.get('ep'));
-    var isPlayback = url.pathname === '/api/play';
+    var isPlayback = url.pathname === '/api/play' && batchResolving === 0;
     var signal, abort, controller;
     if (isPlayback) {
       if (!stillSelected(index, requestGeneration)) throw abortError();
@@ -113,7 +127,7 @@
       var data = await response.clone().json();
       if (!stillSelected(index, requestGeneration) || controller !== playbackController || controller.signal.aborted) throw abortError();
       if (data.error) return response;
-      if (!validResult(data, url)) {
+      if (batchResolving === 0 && !validResult(data, url)) {
         hint('片源身份或集数校验失败，已停止播放，请重试本集或切换线路');
         throw new Error('片源身份或集数校验失败');
       }
@@ -221,6 +235,11 @@
       /* 全屏：竖屏也铺满，横屏时整屏播放，不再只有中间一条 */
       'html[data-ios-immersive] #player{position:fixed!important;inset:0!important;width:100%!important;height:100%!important;z-index:10000!important;border-radius:0!important;margin:0!important;background:#000!important;display:flex!important;align-items:center!important;justify-content:center!important}',
       'html[data-ios-immersive] #player video{width:100%!important;height:100%!important;aspect-ratio:auto!important;object-fit:contain!important;background:#000}',
+      /* 画面适配：适应（contain，整画面留黑边）/ 裁剪（cover，等比裁边）/ 拉伸（fill，不等比填满）。
+         用根节点上的 data-ios-fit 落到真正的 video 上，切集/旋转/重进都按记住的那一档重新应用。 */
+      'html[data-ios-fit="contain"] #player video{object-fit:contain!important}',
+      'html[data-ios-fit="cover"] #player video{object-fit:cover!important}',
+      'html[data-ios-fit="fill"] #player video{object-fit:fill!important}',
       'html[data-ios-immersive],html[data-ios-immersive] body{overflow:hidden!important}',
       /* 全屏：上方那一排「显示设置 / 线路 / 弹幕 / 画中画 / 下一集」整条收起。
          它原本被固定到右上角，正好压在画面上，是真机上最挡视线的一排；
@@ -317,6 +336,20 @@
       '.ios-dl-count{font-size:12px;color:rgba(244,247,248,.72);margin-top:2px}',
       '.ios-dl-eps{display:flex;flex-wrap:wrap;gap:4px;margin-top:6px}',
       '.ios-dl-ep{font-size:11px;line-height:1;padding:4px 6px;border-radius:5px;background:rgba(255,255,255,.1);color:#e9f2f4}',
+      /* 整部剧的队列进度 + 暂停/继续/取消：按钮在设置面板的下载列表里 */
+      '.ios-dl-queue{margin-top:6px;font-size:12px;color:#b8f5dd;line-height:1.4}',
+      '.ios-dl-actions{display:flex;gap:6px;margin-top:8px;flex-wrap:wrap}',
+      '.ios-dl-actions button{border:0;border-radius:8px;padding:9px 12px;font-size:12px;font-weight:700;background:rgba(255,255,255,.14);color:#f4f7f8;min-height:38px}',
+      '.ios-dl-actions button[data-batch-action="cancel"]{background:rgba(255,86,86,.22);color:#ffd9d9}',
+      /* 选集页的批量下载条：选择 / 一键全集 / 从本集往后 / 下载已选 */
+      '#iosBatchBar{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:8px 0;padding:8px;border-radius:10px;background:rgba(255,255,255,.06)}',
+      '#iosBatchBar button{border:0;border-radius:8px;padding:9px 11px;font-size:12px;font-weight:700;background:rgba(255,255,255,.14);color:#f4f7f8;min-height:38px}',
+      '#iosBatchBar button#iosBatchStart{background:#16e09d;color:#04241a}',
+      '#iosBatchBar span{font-size:12px;color:rgba(244,247,248,.76)}',
+      '#epGrid .ep.ios-pick{outline:2px solid #16e09d!important;outline-offset:-2px}',
+      'html[data-theme=\'light\'] #iosBatchBar{background:rgba(15,20,24,.06)}',
+      'html[data-theme=\'light\'] #iosBatchBar button{background:rgba(15,20,24,.1);color:#141a1e}',
+      'html[data-theme=\'light\'] #iosBatchBar span{color:rgba(15,20,24,.66)}',
       '#ppRateMenu{position:absolute;right:6px;bottom:calc(100% + 6px);display:none;flex-direction:column;gap:2px;padding:6px;border-radius:12px;background:rgba(12,18,22,.97);border:1px solid rgba(255,255,255,.14)}',
       '#ppRateMenu.on{display:flex}',
       '#ppRateMenu .pc-rate-opt{border:0;background:transparent;color:#fff;font-size:13px;line-height:1;padding:9px 18px;border-radius:8px;white-space:nowrap;cursor:pointer}',
@@ -360,6 +393,8 @@
     document.head.appendChild(style);
     mountCtrlBar();
     mountDownloadPanel();
+    mountBatchBar();
+    applyFit();
     applyImmersive();
     installPlaybackGuard();
   }
@@ -518,6 +553,7 @@
       restoreImmersiveControls();
     }
     syncCtrlVisibility();
+    applyFit();
     syncFullButton();
   }
 
@@ -843,6 +879,10 @@
     for (var i = 0; i < shows.length; i++) {
       parts.push(shows[i].id + '|' + shows[i].title + '|' + shows[i].cover + '|' + shows[i].total + '|' + shows[i].eps.length);
     }
+    /* 队列状态变化也要重渲染：暂停/排队/失败都要马上看到 */
+    for (var q = 0; q < queueTasks.length; q++) {
+      parts.push('q:' + queueTasks[q].id + ':' + queueTasks[q].status + ':' + queueTasks[q].received + ':' + queueTasks[q].total);
+    }
     return parts.join(';');
   }
 
@@ -870,6 +910,27 @@
     var list = document.getElementById('iosDlShows');
     if (!list) return false;
     var shows = readLibrary().shows;
+    /* 排队中的剧也要出现在这里：还没下完一集时，也要能暂停/继续/取消整部剧 */
+    var batches = readBatchShows();
+    for (var b = 0; b < batches.length; b++) {
+      var batch = batches[b];
+      if (!batch || !batch.id) continue;
+      if (!queueSummary(batch.id).total) continue;
+      var known = false;
+      for (var k = 0; k < shows.length; k++) if (String(shows[k].id) === String(batch.id)) known = true;
+      if (known) continue;
+      shows.push({ id: String(batch.id), title: String(batch.title || ''), cover: String(batch.cover || ''), total: Number(batch.total) || 0, eps: [] });
+    }
+    /* 只在队列里（还没下完一集）的剧也要列出来，否则用户看不到进度也暂停不了 */
+    for (var t = 0; t < queueTasks.length; t++) {
+      var task = queueTasks[t];
+      var taskShow = String(task.showId || '');
+      if (!taskShow) continue;
+      var listed = false;
+      for (var s3 = 0; s3 < shows.length; s3++) if (String(shows[s3].id) === taskShow) listed = true;
+      if (listed) continue;
+      shows.push({ id: taskShow, title: String(task.title || ''), cover: '', total: 0, eps: [] });
+    }
     /* 没下过东西也没在下载：不挂一个空的「下载」标题在那儿 */
     box.hidden = !shows.length && !downloadState.busy;
     if (typeof box.setAttribute === 'function') {
@@ -921,6 +982,20 @@
       eps.appendChild(chip);
     }
     meta.appendChild(eps);
+    /* 整部剧的队列进度 + 暂停 / 继续 / 取消（取消只停任务，不删已下载文件） */
+    var summary = queueSummary(show.id);
+    if (summary.total) {
+      var queue = document.createElement('div');
+      queue.className = 'ios-dl-queue';
+      queue.textContent = queueText(summary);
+      meta.appendChild(queue);
+      var actions = document.createElement('div');
+      actions.className = 'ios-dl-actions';
+      if (summary.running + summary.queued > 0) actions.appendChild(queueActionButton(show.id, 'pause', '暂停整部剧'));
+      if (summary.paused > 0) actions.appendChild(queueActionButton(show.id, 'resume', '继续下载'));
+      if (summary.busy) actions.appendChild(queueActionButton(show.id, 'cancel', '取消整部剧'));
+      if (actions.children.length) meta.appendChild(actions);
+    }
     item.appendChild(meta);
     return item;
   }
@@ -1138,6 +1213,8 @@
     bar.appendChild(seek);
     barButton('ppCast', '外放', '用其他 App 播放或投屏');
     barButton('ppRate', '1×', '倍速');
+    /* 画面适配：适应 → 裁剪 → 拉伸 循环；选择记在 localStorage，切集/旋转/重进都保持。 */
+    barButton('ppFit', '适应', '画面适配方式（适应 / 裁剪 / 拉伸）');
     barButton('ppFull', '全屏', '全屏播放');
 
     /* 外放菜单：分享直链 / 复制直链 / 下载（登录后）/ 用其他播放器打开（下载后） */
@@ -1723,6 +1800,405 @@
     return (size / 1048576).toFixed(1) + ' MB';
   }
 
+  /* ---------- 画面适配：适应 / 裁剪 / 拉伸 ---------- */
+  var FIT_STORE = 'kj-ios-fit';
+  var FIT_MODES = [
+    { key: 'contain', label: '适应' },
+    { key: 'cover', label: '裁剪' },
+    { key: 'fill', label: '拉伸' }
+  ];
+
+  function fitMode() {
+    var raw = String(readStore(FIT_STORE) || '');
+    for (var i = 0; i < FIT_MODES.length; i++) if (FIT_MODES[i].key === raw) return raw;
+    /* 默认适应：整画面都看得见，不够的地方留黑边 */
+    return 'contain';
+  }
+
+  function fitLabel(mode) {
+    for (var i = 0; i < FIT_MODES.length; i++) if (FIT_MODES[i].key === mode) return FIT_MODES[i].label;
+    return '适应';
+  }
+
+  /* 把记住的那一档落到当前 <video> 上：换集会整块换掉 video，旋转/重进要重新读一次。 */
+  function applyFit() {
+    var mode = fitMode();
+    var root = document.documentElement;
+    if (root && typeof root.setAttribute === 'function') root.setAttribute('data-ios-fit', mode);
+    var video = document.getElementById('video');
+    if (video && video.style) {
+      try { video.style.objectFit = mode; } catch (error) { /* 老内核只认 data 属性那条 CSS */ }
+    }
+    var button = document.getElementById('ppFit');
+    if (button) {
+      button.textContent = fitLabel(mode);
+      button.setAttribute('aria-label', '画面适配：' + fitLabel(mode) + '（点了切下一档）');
+    }
+    return mode;
+  }
+
+  function cycleFit() {
+    var order = [];
+    for (var i = 0; i < FIT_MODES.length; i++) order.push(FIT_MODES[i].key);
+    var next = order[(order.indexOf(fitMode()) + 1) % order.length];
+    writeStore(FIT_STORE, next);
+    applyFit();
+    announce('画面适配：' + fitLabel(next));
+    return next;
+  }
+
+  /* ---------- 选集批量下载：多选 / 一键全集 / 从本集往后 ----------
+     单集和批量共用原生那条持久队列（并发 2、按 showId+集号去重）。
+     每一集都从站点接口解析真实媒体地址，绝不把播放页地址当成视频。 */
+  var BATCH_STORE = 'kj-ios-batch';
+  var QUEUE_STORE = 'kj-ios-queue';
+  var batchSelecting = false;
+  var batchPicked = [];
+  var queueTasks = [];
+
+  function readBatchShows() {
+    var parsed = null;
+    try { parsed = JSON.parse(readStore(BATCH_STORE) || 'null'); } catch (error) { parsed = null; }
+    return parsed && typeof parsed.length === 'number' ? parsed : [];
+  }
+
+  function rememberBatchShow(show) {
+    var list = readBatchShows();
+    var id = String(show.id || show.title || '');
+    if (!id) return;
+    var next = [];
+    var found = false;
+    for (var i = 0; i < list.length; i++) {
+      if (!list[i]) continue;
+      if (String(list[i].id) === id) {
+        next.push({
+          id: id,
+          title: show.title || list[i].title,
+          cover: show.cover || list[i].cover,
+          total: Number(show.total) || Number(list[i].total) || 0,
+          at: Date.now()
+        });
+        found = true;
+      } else {
+        next.push(list[i]);
+      }
+    }
+    if (!found) {
+      next.unshift({ id: id, title: show.title || '', cover: show.cover || '', total: Number(show.total) || 0, at: Date.now() });
+    }
+    writeStore(BATCH_STORE, JSON.stringify(next.slice(0, 30)));
+  }
+
+  function restoreQueue() {
+    var parsed = null;
+    try { parsed = JSON.parse(readStore(QUEUE_STORE) || 'null'); } catch (error) { parsed = null; }
+    if (parsed && typeof parsed.length === 'number') queueTasks = parsed;
+  }
+
+  function saveQueue() {
+    writeStore(QUEUE_STORE, JSON.stringify(queueTasks.slice(0, 300)));
+  }
+
+  function queueFor(showIdValue) {
+    var list = [];
+    for (var i = 0; i < queueTasks.length; i++) {
+      if (String(queueTasks[i].showId || '') === String(showIdValue)) list.push(queueTasks[i]);
+    }
+    return list;
+  }
+
+  /* 整部剧的总体进度：总字节未知时不算百分比，只报已经收了多少（不造 100%）。 */
+  function queueSummary(showIdValue) {
+    var tasks = queueFor(showIdValue);
+    var summary = { total: tasks.length, done: 0, failed: 0, cancelled: 0, running: 0, queued: 0, paused: 0, received: 0, bytesTotal: 0, unknown: 0 };
+    for (var i = 0; i < tasks.length; i++) {
+      var task = tasks[i];
+      var status = String(task.status || '');
+      if (summary[status] !== undefined) summary[status] += 1;
+      if (status === 'cancelled') continue;
+      summary.received += Number(task.received) || 0;
+      summary.bytesTotal += Number(task.total) || 0;
+      /* 只要有一条没拿到总长度，整部剧就不能算百分比 */
+      if ((Number(task.total) || 0) <= 0) summary.unknown += 1;
+    }
+    summary.busy = summary.running + summary.queued + summary.paused > 0;
+    summary.finished = !summary.busy && summary.done > 0;
+    summary.allDone = summary.finished && !summary.failed && !summary.cancelled;
+    return summary;
+  }
+
+  function queueText(summary) {
+    if (!summary.total) return '';
+    var parts = ['任务 ' + summary.done + '/' + summary.total + ' 集'];
+    if (summary.running) parts.push('进行中 ' + summary.running);
+    if (summary.queued) parts.push('排队 ' + summary.queued);
+    if (summary.paused) parts.push('已暂停 ' + summary.paused);
+    if (summary.failed) parts.push('失败 ' + summary.failed);
+    if (summary.cancelled) parts.push('已取消 ' + summary.cancelled);
+    if (summary.bytesTotal > 0 && !summary.unknown) {
+      parts.push('总进度 ' + Math.min(100, Math.round(summary.received / summary.bytesTotal * 100)) + '%');
+    } else if (summary.received > 0) {
+      /* 服务器没给总长度：只说实收字节，不编百分比 */
+      parts.push('已收 ' + megabyte(summary.received));
+    }
+    if (summary.allDone) parts.push('全部完成');
+    else if (summary.finished && summary.failed) parts.push('部分失败');
+    return parts.join(' · ');
+  }
+
+  function queueActionButton(showIdValue, action, label) {
+    var button = document.createElement('button');
+    button.type = 'button';
+    button.textContent = label;
+    if (typeof button.setAttribute === 'function') {
+      button.setAttribute('data-batch-action', action);
+      button.setAttribute('data-show-id', String(showIdValue));
+    }
+    if (button.dataset) {
+      button.dataset.batchAction = action;
+      button.dataset.showId = String(showIdValue);
+    }
+    return button;
+  }
+
+  function batchActionOf(node) {
+    var cursor = node;
+    while (cursor) {
+      var action = cursor.dataset && cursor.dataset.batchAction ? cursor.dataset.batchAction : '';
+      if (!action && typeof cursor.getAttribute === 'function') action = cursor.getAttribute('data-batch-action') || '';
+      if (action) {
+        var showIdValue = cursor.dataset && cursor.dataset.showId ? cursor.dataset.showId : '';
+        if (!showIdValue && typeof cursor.getAttribute === 'function') showIdValue = cursor.getAttribute('data-show-id') || '';
+        return { action: String(action), showId: String(showIdValue || '') };
+      }
+      cursor = cursor.parentNode;
+    }
+    return null;
+  }
+
+  function handleBatchAction(info) {
+    if (!info || !info.showId) return false;
+    if (info.action === 'pause') {
+      postNative({ action: 'downloadPause', showId: info.showId });
+      announce('已暂停这部剧的下载');
+      return true;
+    }
+    if (info.action === 'resume') {
+      postNative({ action: 'downloadResume', showId: info.showId });
+      announce('继续下载这部剧');
+      return true;
+    }
+    if (info.action === 'cancel') {
+      postNative({ action: 'downloadCancel', showId: info.showId });
+      announce('已取消这部剧的下载（已下载的文件保留）');
+      return true;
+    }
+    return false;
+  }
+
+  function epNodes() {
+    return document.querySelectorAll ? document.querySelectorAll('#epGrid .ep') : [];
+  }
+
+  function epKeyOf(node) {
+    if (!node || !node.dataset || node.dataset.ep === undefined || node.dataset.ep === null) return '';
+    return String(node.dataset.ep);
+  }
+
+  function epLabelOf(node) {
+    var text = node && node.textContent ? String(node.textContent).trim() : '';
+    return text.replace(/\s+/g, '').slice(0, 16);
+  }
+
+  function epNodeOf(node) {
+    var cursor = node;
+    while (cursor) {
+      if (cursor.className && String(cursor.className).split(' ').indexOf('ep') >= 0 && cursor.dataset && cursor.dataset.ep !== undefined) return cursor;
+      cursor = cursor.parentNode;
+    }
+    return null;
+  }
+
+  function currentEpIndex() {
+    var list = epNodes();
+    for (var i = 0; i < list.length; i++) {
+      if (String(list[i].className).split(' ').indexOf('on') >= 0) return i;
+    }
+    return 0;
+  }
+
+  function currentLine() {
+    var active = document.querySelector ? document.querySelector('.line.on') : null;
+    if (active && active.dataset && active.dataset.line) return String(active.dataset.line);
+    try { return new URLSearchParams(window.location.search).get('line') || ''; } catch (error) { return ''; }
+  }
+
+  function extensionOf(url) {
+    var match = /\.(mp4|m4v|mov|mkv|ts)(?:[?#]|$)/i.exec(String(url || ''));
+    return match ? '.' + match[1].toLowerCase() : '.mp4';
+  }
+
+  /* 每集都向站点接口要真实片源（show + ep + 线路），并核对 showId/集号/verified；
+     播放页 URL、HLS 清单、不匹配的集一律不下载，只给出原因。 */
+  function resolveEpisodeUrl(showIdValue, key, line) {
+    var query = '/api/play?show=' + encodeURIComponent(showIdValue) + '&ep=' + encodeURIComponent(key)
+      + (line ? '&line=' + encodeURIComponent(line) : '');
+    batchResolving += 1;
+    return window.fetch(query).then(function (response) {
+      if (!response || !response.ok) return { reason: '第' + key + '集解析失败（' + (response ? response.status : '无响应') + '）' };
+      return response.json();
+    }).then(function (data) {
+      if (!data || data.error) return { reason: '第' + key + '集没有可用片源' };
+      if (String(data.showId) !== String(showIdValue) || Number(data.idx) !== Number(key) || data.verified !== true) {
+        return { reason: '第' + key + '集片源与选集不匹配，已跳过' };
+      }
+      if (data.kind === 'hls') return { reason: '第' + key + '集是 HLS 分片线路，不能整集下载' };
+      if (data.kind !== 'mp4') return { reason: '第' + key + '集线路类型不支持下载' };
+      var media;
+      try { media = new URL(data.url); } catch (error) { return { reason: '第' + key + '集地址无效' }; }
+      if (!allowedMediaOrigin(media) || isPageUrl(media.href)) return { reason: '第' + key + '集没有解析到真实视频地址' };
+      if (/\.m3u8(?:[?#]|$)/i.test(media.href)) return { reason: '第' + key + '集是 HLS 分片线路，不能整集下载' };
+      return { url: media.href, reason: '' };
+    }).catch(function () { return { reason: '第' + key + '集解析失败' }; }).then(function (result) {
+      batchResolving = Math.max(0, batchResolving - 1);
+      return result;
+    }, function (error) {
+      batchResolving = Math.max(0, batchResolving - 1);
+      return { reason: '第' + key + '集解析失败' };
+    });
+  }
+
+  function syncPickClass(node, on) {
+    var parts = String(node.className || '').split(' ').filter(function (part) { return part && part !== 'ios-pick'; });
+    if (on) parts.push('ios-pick');
+    node.className = parts.join(' ');
+  }
+
+  function togglePick(node) {
+    var key = epKeyOf(node);
+    if (!key) return;
+    var at = batchPicked.indexOf(key);
+    if (at >= 0) batchPicked.splice(at, 1);
+    else batchPicked.push(key);
+    syncPickClass(node, at < 0);
+    syncBatchBar();
+  }
+
+  function batchBarNote() {
+    if (!batchSelecting) return '选择后可批量下载（单集下载仍在工具条上）';
+    return batchPicked.length ? '已选 ' + batchPicked.length + ' 集' : '点选集卡片选中要下载的集';
+  }
+
+  function syncBatchBar() {
+    var bar = document.getElementById('iosBatchBar');
+    if (!bar) return;
+    var pick = document.getElementById('iosBatchSelect');
+    if (pick) pick.textContent = batchSelecting ? '完成选择' : '选择';
+    var start = document.getElementById('iosBatchStart');
+    if (start) start.textContent = batchPicked.length ? '下载已选 (' + batchPicked.length + ')' : '下载已选';
+    var note = document.getElementById('iosBatchNote');
+    if (note) note.textContent = batchBarNote();
+  }
+
+  function mountBatchBar() {
+    var grid = document.getElementById('epGrid');
+    if (!grid || !grid.parentNode) return false;
+    if (document.getElementById('iosBatchBar')) { syncBatchBar(); return true; }
+    var bar = document.createElement('div');
+    bar.id = 'iosBatchBar';
+    function barButton(id, label) {
+      var button = document.createElement('button');
+      button.id = id;
+      button.type = 'button';
+      button.textContent = label;
+      bar.appendChild(button);
+      return button;
+    }
+    barButton('iosBatchSelect', '选择');
+    barButton('iosBatchAll', '一键全集');
+    barButton('iosBatchForward', '从本集往后');
+    barButton('iosBatchStart', '下载已选');
+    var note = document.createElement('span');
+    note.id = 'iosBatchNote';
+    bar.appendChild(note);
+    grid.parentNode.insertBefore(bar, grid);
+    syncBatchBar();
+    return true;
+  }
+
+  /* 批量入队：先逐集解析真实片源，再把整批交给原生那条队列（并发/去重都在原生层）。 */
+  function startBatch(nodes) {
+    if (!signedIn()) { askLogin(); return Promise.resolve(0); }
+    if (!nodes || !nodes.length) { announce('先选几集再下载'); return Promise.resolve(0); }
+    var meta = showMeta();
+    var id = String(meta.id || meta.title || '');
+    var line = currentLine();
+    var total = epNodes().length || Number(meta.total) || 0;
+    rememberBatchShow({ id: id, title: meta.title, cover: meta.cover, total: total });
+    announce('正在解析 ' + nodes.length + ' 集的片源…');
+    var jobs = [];
+    for (var i = 0; i < nodes.length; i++) {
+      (function (node) {
+        var key = epKeyOf(node);
+        jobs.push(resolveEpisodeUrl(id, key, line).then(function (result) {
+          if (!result.url) return { reason: result.reason, key: key };
+          return { url: result.url, key: key, label: epLabelOf(node) || ('第' + key + '集') };
+        }));
+      }(nodes[i]));
+    }
+    return Promise.all(jobs).then(function (results) {
+      var items = [];
+      var skipped = [];
+      for (var r = 0; r < results.length; r++) {
+        if (!results[r].url) { skipped.push(results[r].reason); continue; }
+        var key = results[r].key;
+        var label = results[r].label;
+        items.push({
+          id: 'dl' + Date.now() + '-' + key,
+          showId: id,
+          epKey: key,
+          epLabel: label,
+          title: meta.title || '',
+          url: results[r].url,
+          name: safeName(String(meta.title || '未命名') + ' ' + label) + extensionOf(results[r].url)
+        });
+      }
+      if (!items.length) { announce(skipped[0] || '这些集都没有可下载的片源'); return 0; }
+      postNative({
+        action: 'downloadBatch',
+        signedIn: true,
+        show: { id: id, title: meta.title || '', cover: meta.cover || '', total: total },
+        items: items
+      });
+      announce('已加入下载队列：' + items.length + ' 集'
+        + (skipped.length ? '，跳过 ' + skipped.length + ' 集（' + skipped[0] + '）' : '')
+        + '；同时最多下 2 集');
+      return items.length;
+    });
+  }
+
+  function pickedNodes() {
+    var list = [];
+    var nodes = epNodes();
+    for (var i = 0; i < nodes.length; i++) {
+      if (batchPicked.indexOf(epKeyOf(nodes[i])) >= 0) list.push(nodes[i]);
+    }
+    return list;
+  }
+
+  function allEpNodes() {
+    var list = [];
+    var nodes = epNodes();
+    for (var i = 0; i < nodes.length; i++) list.push(nodes[i]);
+    return list;
+  }
+
+  function forwardEpNodes() {
+    var nodes = allEpNodes();
+    var start = currentEpIndex();
+    return nodes.slice(start);
+  }
+
   /* 原生层回传：同一个 id 才认，避免换集之后旧任务改乱新状态 */
   window.__zhuijuDownload = function (payload) {
     /* 换页后本地状态是从 localStorage 恢复的，id 对得上就接着更新 */
@@ -1758,9 +2234,58 @@
     else announce('下载失败：' + (payload.reason || '网络不给力，稍后再试'));
   };
 
+  /* 原生队列快照：整部剧的进度、排队/暂停/失败状态都从这份快照来（重启后也一样） */
+  window.__zhuijuDownloads = function (kind, tasks) {
+    if (kind !== 'snapshot' || !tasks || typeof tasks.length !== 'number') return;
+    queueTasks = tasks;
+    saveQueue();
+    renderDownloadLibrary();
+    syncBatchBar();
+  };
+
   function handleCtrlClick(event) {
     var target = event.target;
     if (!target) return false;
+    /* 选集页「选择」模式：点选集卡片是选中/取消，不再跳集 */
+    if (batchSelecting) {
+      var epNode = epNodeOf(target);
+      if (epNode) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        togglePick(epNode);
+        return true;
+      }
+    }
+    if (hit(target, 'iosBatchSelect')) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      batchSelecting = !batchSelecting;
+      if (!batchSelecting) {
+        var nodes = epNodes();
+        for (var n = 0; n < nodes.length; n++) syncPickClass(nodes[n], false);
+        batchPicked = [];
+      }
+      syncBatchBar();
+      return true;
+    }
+    if (hit(target, 'iosBatchAll')) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      startBatch(allEpNodes());
+      return true;
+    }
+    if (hit(target, 'iosBatchForward')) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      startBatch(forwardEpNodes());
+      return true;
+    }
+    if (hit(target, 'iosBatchStart')) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      startBatch(pickedNodes());
+      return true;
+    }
     if (hit(target, 'iosOpenDownloaded')) {
       event.preventDefault();
       event.stopImmediatePropagation();
@@ -1792,6 +2317,8 @@
       playExternal();
       return true;
     }
+    var batchAction = batchActionOf(target);
+    if (batchAction && handleBatchAction(batchAction)) return true;
     if (hit(target, 'ppPlay')) {
       event.preventDefault();
       event.stopImmediatePropagation();
@@ -1802,6 +2329,19 @@
       event.preventDefault();
       event.stopImmediatePropagation();
       toggleFullscreen();
+      return true;
+    }
+    if (hit(target, 'ppFit')) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      cycleFit();
+      return true;
+    }
+    var batchAction = batchActionOf(target);
+    if (batchAction) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      handleBatchAction(batchAction);
       return true;
     }
     if (hit(target, 'ppCast')) {
@@ -1890,6 +2430,8 @@
     document.addEventListener(name, function (event) {
       if (!event.target || event.target.id !== 'video') return;
       rememberMedia();
+      /* 换集/重渲染会把整块 <video> 换掉：记住的适配方式要重新落上去 */
+      applyFit();
     }, true);
   });
 
@@ -2146,6 +2688,8 @@
 
   /* 下载状态先恢复：换页/重启后原生下载还在跑，进度条要接着显示 */
   restoreDownload();
+  restoreQueue();
+  applyFit();
   if (downloadState.id || downloadState.busy || downloadState.path) {
     ensureSettingsSheet();
     mountDownloadPanel();
@@ -2161,7 +2705,7 @@
   }
   /* 站点是 SPA：换集或重渲染可能整块换掉 #player，几次补挂 */
   [0, 400, 1200, 2600].forEach(function (delay) {
-    setTimeout(function () { mountCtrlBar(); mountToolDownload(); }, delay);
+    setTimeout(function () { mountCtrlBar(); mountToolDownload(); mountBatchBar(); applyFit(); }, delay);
   });
   /* 首页/播放页的站点渲染是异步的：面板和状态晚一步再补一次 */
   [0, 600, 1600].forEach(function (delay) {

@@ -1,21 +1,20 @@
 import Foundation
 import UserNotifications
 
-/// 一集一次、用户点一下下一个文件。
+/// 持久下载队列：单集和批量走同一条队列。
 ///
-/// 三条边界写在代码里，而不是只在文档里：
-/// 1. 同时只有一个任务 —— 再来一集先取消旧的，不做队列、不做批量抓取；
-/// 2. 只接受 https 直链（调用方已用 `WebViewController.shareableURL` 校验过一次）；
-/// 3. 落盘到沙盒 Documents/Downloads，用户可见、可取消、可自己清理。
+/// 边界写在代码里，而不是只在文档里：
+/// 1. 全队列最多同时跑 `maxConcurrent`（2）条，其余排队等空位；
+/// 2. 同一部剧的同一集（showId + 集标识）在排队/下载/暂停时不会重复入队；
+/// 3. 任务、进度、暂停用的 resumeData 都落 UserDefaults，进程被回收后重新拉起还能接上；
+/// 4. 暂停用 `cancel(byProducingResumeData:)` 拿到真实续传数据，拿不到就如实从 0 重来；
+/// 5. 取消只停任务、只标状态，不删除已经下载完成（或已经落盘）的文件；
+/// 6. 一集失败只影响这一集，绝不把整部剧标成完成；
+/// 7. 只接受 https 直链的 MP4/M4V/MOV/MKV/TS；HLS（.m3u8）、网页地址、其它扩展名如实拒绝；
+/// 8. 总长度未知（服务器没给 Content-Length）时不编百分比，只报已收字节。
 ///
-/// 0.1.12 起改用后台会话（background URLSession）：
-/// - 切到别的 App、锁屏时系统会继续传（由系统调度，不占前台执行时间）；
-/// - 任务和最新进度落在 UserDefaults，进程被回收后重新拉起也能找回；
-/// - 完成/失败会重放给网页，网页侧从 localStorage 恢复的进度条能对上；
-/// - 完成时发一条本地通知（没授权就不发，下载本身不受影响）。
-///
-/// 一个进程只允许一个后台会话、一个标识，所以状态全部是类级的：
-/// 任何时候 `MediaDownloader()` 拿到的都是同一个下载器。
+/// 0.1.12 起用后台会话（background URLSession），切到别的 App、锁屏时由系统继续传。
+/// 一个进程只允许一个后台会话、一个标识，所以状态全部是类级的。
 ///
 /// 明确不能保证的：用户在后台把 App 强制退出（上滑清掉）时系统会停掉会话，
 /// 这种情况会如实标记为「下载被系统中断」，不会假装完成。
@@ -25,6 +24,8 @@ final class MediaDownloader: NSObject {
         case http(Int)
         case network(String)
         case disk(String)
+        /// 线路本身不支持整集下载（HLS / 网页地址 / 非视频扩展名）
+        case unsupported(String)
 
         var message: String {
             switch self {
@@ -32,8 +33,20 @@ final class MediaDownloader: NSObject {
             case .http(let code): return "片源服务器返回 \(code)"
             case .network(let text): return text.isEmpty ? "网络中断" : text
             case .disk(let text): return text.isEmpty ? "写不进本机存储" : text
+            case .unsupported(let text): return text.isEmpty ? "这条线路不能整集下载" : text
             }
         }
+    }
+
+    /// 网页请求入队的一集：id 由网页生成，showId + epKey 是去重键。
+    struct Request {
+        var id: String
+        var url: URL
+        var name: String
+        var meta: [String: String]
+
+        var showId: String { meta["showId"] ?? meta["id"] ?? "" }
+        var epKey: String { meta["epKey"] ?? "" }
     }
 
     /// 一个下载任务在磁盘上的记录：进程被回收后靠它把状态接回来。
@@ -46,7 +59,7 @@ final class MediaDownloader: NSObject {
         var meta: [String: String]
         var received: Int64
         var total: Int64
-        /// running / done / failed / cancelled
+        /// queued / running / paused / done / failed / cancelled
         var status: String
         var path: String
         var size: Int64
@@ -55,7 +68,14 @@ final class MediaDownloader: NSObject {
         var delivered: Bool
         var taskIdentifier: Int
         var updatedAt: Double
+        /* 0.1.14 新增：去重与暂停续传。旧记录没有这两个字段，解码时按缺省处理。 */
+        var showId: String? = nil
+        var epKey: String? = nil
+        var resumeData: String? = nil
     }
+
+    /// 同一时刻最多跑几条：用户要的是「两集一起下」，不是把整部剧一起拉满。
+    static let maxConcurrent = 2
 
     /// 后台会话的标识：App 被重新拉起时系统就是用它把回调交回来的，不能改。
     static let backgroundIdentifier = "org.dpdns.zhuiju.ios.downloads"
@@ -65,21 +85,114 @@ final class MediaDownloader: NSObject {
     static let shared = MediaDownloader()
     /// 系统在 `handleEventsForBackgroundURLSession` 里给的收尾回调。
     static var backgroundCompletion: (() -> Void)?
+    /// 状态变化时通知界面（进度、终态、暂停、排队变化）。界面再转发给网页。
+    static var eventSink: (([[String: Any]]) -> Void)?
 
     private static var sessionStorage: URLSession?
     private static var records: [Record] = []
     private static var progressHandlers: [String: (Int64, Int64) -> Void] = [:]
     private static var finishHandlers: [String: (Result<[String: Any], Failure>) -> Void] = [:]
-    private static var activeId: String?
-    private static var activeTask: URLSessionDownloadTask?
+    private static var tasks: [String: URLSessionDownloadTask] = [:]
     private static var finishedTasks: Set<Int> = []
     private static var movedFiles: [Int: [String: Any]] = [:]
     private static var lastPersistAt: TimeInterval = 0
 
-    var isBusy: Bool { Self.activeId != nil }
+    var isBusy: Bool {
+        Self.freshRecords().contains { $0.status == "running" || $0.status == "queued" }
+    }
 
     /// 给回归测试看的只读信息：确认这是后台会话、标识没改名。
     var sessionConfiguration: URLSessionConfiguration { Self.sessionInstance().configuration }
+
+    // MARK: - 纯逻辑（可单元测试，不碰网络）
+
+    /// 这条线路能不能整集下载。返回 nil 表示可以，否则是给用户看的原因。
+    ///
+    /// 只收 https 的视频直链：播放页地址、HLS 清单、blob:/data: 一律拒绝 ——
+    /// 把播放网页当成视频下下来的，是一张 HTML 而不是剧集。
+    static func rejection(of url: URL) -> String? {
+        let scheme = (url.scheme ?? "").lowercased()
+        if scheme != "https" {
+            return "只支持 https 直链下载，这条线路是 \(scheme.isEmpty ? "未知协议" : scheme)"
+        }
+        if url.host?.isEmpty != false { return "这条线路没有有效的主机名" }
+        let path = url.path.lowercased()
+        if path.hasSuffix(".m3u8") || path.hasSuffix(".m3u") {
+            return "HLS 分片线路没法整集下载；换一条 MP4 线路再试。"
+        }
+        if path.hasSuffix(".html") || path.hasSuffix(".htm") {
+            return "这是播放网页，不是视频文件，不能下载"
+        }
+        let videoExtensions = [".mp4", ".m4v", ".mov", ".mkv", ".ts"]
+        if !videoExtensions.contains(where: { path.hasSuffix($0) }) {
+            /* 没有扩展名的直链（`/play/19`）放过：它可能是 CDN 直出，
+               真正下载时按内容校验，失败就如实报错。 */
+            if path.contains(".") { return "这条线路的文件类型不能整集下载" }
+        }
+        return nil
+    }
+
+    /// 队列调度（纯函数）：当前还能再启动哪几条。
+    static func planStarts(_ list: [Record], limit: Int = maxConcurrent) -> [Record] {
+        let running = list.filter { $0.status == "running" }.count
+        var slots = max(0, limit - running)
+        guard slots > 0 else { return [] }
+        var picked: [Record] = []
+        for record in list.sorted(by: { $0.updatedAt < $1.updatedAt }) where record.status == "queued" {
+            if slots <= 0 { break }
+            picked.append(record)
+            slots -= 1
+        }
+        return picked
+    }
+
+    /// 去重：同一部剧的同一集正在排队/下载/暂停时不重复入队。
+    static func duplicateIndex(in list: [Record], showId: String, epKey: String) -> Int? {
+        guard !epKey.isEmpty else { return nil }
+        return list.firstIndex { record in
+            guard (record.showId ?? "") == showId, (record.epKey ?? "") == epKey else { return false }
+            return record.status == "queued" || record.status == "running" || record.status == "paused"
+        }
+    }
+
+    /// 一部剧的总体进度：总集数未知时 `knownTotal=false`，界面不许造百分比。
+    struct Summary {
+        var total = 0
+        var done = 0
+        var failed = 0
+        var cancelled = 0
+        var running = 0
+        var queued = 0
+        var paused = 0
+        var received: Int64 = 0
+        var bytesTotal: Int64 = 0
+        var knownBytes: Bool { bytesTotal > 0 }
+        /// 只有「所有任务都成功」才算整部剧完成；有失败就是部分失败。
+        var finished: Bool { queued == 0 && running == 0 && paused == 0 && done > 0 }
+        var allDone: Bool { finished && failed == 0 && cancelled == 0 }
+    }
+
+    static func summary(_ list: [Record], showId: String) -> Summary {
+        var result = Summary()
+        for record in list where record.status != "cancelled" || (record.showId ?? "") == showId {
+            guard (record.showId ?? "") == showId else { continue }
+            result.total += 1
+            switch record.status {
+            case "done": result.done += 1
+            case "failed": result.failed += 1
+            case "cancelled": result.cancelled += 1
+            case "running": result.running += 1
+            case "queued": result.queued += 1
+            case "paused": result.paused += 1
+            default: break
+            }
+            if record.status != "cancelled" {
+                result.received += record.received
+                result.bytesTotal += record.total
+            }
+        }
+        return result
+    }
 
     /// 文件名清洗：只留文件名本身，路径分隔符、控制字符一律换掉，并补上视频扩展名。
     ///
@@ -129,12 +242,32 @@ final class MediaDownloader: NSObject {
         onProgress: @escaping (Int64, Int64) -> Void,
         onFinish: @escaping (Result<[String: Any], Failure>) -> Void
     ) {
-        Self.begin(id: id, url: url, name: name, meta: meta, onProgress: onProgress, onFinish: onFinish)
+        var flat: [String: String] = [:]
+        for (key, value) in meta ?? [:] {
+            if let text = value as? String { flat[key] = text }
+            else if let number = value as? NSNumber { flat[key] = number.stringValue }
+        }
+        let request = Request(id: id, url: url, name: name, meta: flat)
+        Self.enqueue([request], progress: [id: onProgress], finish: [id: onFinish])
     }
 
-    func cancel(silent: Bool = false) {
-        Self.stop(silent: silent)
+    /// 批量入队：单集和批量共用同一条持久队列。
+    @discardableResult
+    func enqueue(_ requests: [Request]) -> [String] {
+        Self.enqueue(requests)
     }
+
+    /// 暂停一整部剧（正在传的取 resumeData、排队的转 paused）。
+    func pause(showId: String) { Self.pause(showId: showId) }
+
+    /// 继续一整部剧（paused → queued，再按并发上限调度）。
+    func resume(showId: String) { Self.resume(showId: showId) }
+
+    /// 取消一整部剧：只停任务、只标状态，已下载的文件不动。
+    func cancel(showId: String) { Self.cancel(showId: showId) }
+
+    /// 取消全部（含排队的）。`silent` 给测试收尾用，不回调。
+    func cancel(silent: Bool = false) { Self.stop(silent: silent) }
 
     func restore(completion: (() -> Void)? = nil) {
         Self.reconcile(completion: completion)
@@ -142,6 +275,11 @@ final class MediaDownloader: NSObject {
 
     func eventsForPage() -> [[String: Any]] {
         Self.pageEvents()
+    }
+
+    /// 队列快照：网页侧据此算「按剧总体进度」和每条任务的状态，重启后也能对齐。
+    func snapshotForPage() -> [[String: Any]] {
+        Self.snapshot()
     }
 
     func handleBackgroundEvents(completion: @escaping () -> Void) {
@@ -164,117 +302,261 @@ final class MediaDownloader: NSObject {
         return created
     }
 
-    private static func begin(
-        id: String,
-        url: URL,
-        name: String,
-        meta: [String: Any]?,
-        onProgress: @escaping (Int64, Int64) -> Void,
-        onFinish: @escaping (Result<[String: Any], Failure>) -> Void
-    ) {
-        stop(silent: true)
-        /* 每次开始前以磁盘为准：进程可能刚被拉起，内存里的记录并不是最新的。 */
+    // MARK: - 入队 / 调度
+
+    private static func freshRecords() -> [Record] {
         records = loadRecords()
-        var flat: [String: String] = [:]
-        for (key, value) in meta ?? [:] {
-            if let text = value as? String { flat[key] = text }
-            else if let number = value as? NSNumber { flat[key] = number.stringValue }
-        }
-        let record = Record(
-            id: id,
-            url: url.absoluteString,
-            name: name,
-            title: flat["title"] ?? "",
-            ep: flat["epLabel"] ?? "",
-            meta: flat,
-            received: 0,
-            total: 0,
-            status: "running",
-            path: "",
-            size: 0,
-            reason: "",
-            delivered: false,
-            taskIdentifier: 0,
-            updatedAt: Date().timeIntervalSince1970
-        )
-        upsert(record)
-        activeId = id
-        progressHandlers[id] = onProgress
-        finishHandlers[id] = onFinish
-        requestNotificationPermissionOnce()
-
-        let task = sessionInstance().downloadTask(with: url)
-        task.taskDescription = id
-        activeTask = task
-        update(id) { $0.taskIdentifier = task.taskIdentifier }
-        task.resume()
+        return records
     }
 
+    @discardableResult
+    private static func enqueue(
+        _ requests: [Request],
+        progress: [String: (Int64, Int64) -> Void] = [:],
+        finish: [String: (Result<[String: Any], Failure>) -> Void] = [:]
+    ) -> [String] {
+        records = loadRecords()
+        var accepted: [String] = []
+        var rejected: [(String, String, [String: String])] = []
+        for request in requests {
+            if let reason = rejection(of: request.url) {
+                rejected.append((request.id, reason, request.meta))
+                continue
+            }
+            let showId = request.showId
+            let epKey = request.epKey
+            if let index = duplicateIndex(in: records, showId: showId, epKey: epKey) {
+                /* 已经在队列里：不重复入队（同一部剧同一集只跑一条） */
+                accepted.append(records[index].id)
+                continue
+            }
+            /* 之前下过 / 失败过：重新入队时用新记录覆盖旧记录（换文件也要能重下） */
+            if let index = records.firstIndex(where: { ($0.showId ?? "") == showId && ($0.epKey ?? "") == epKey && !epKey.isEmpty }) {
+                records.remove(at: index)
+            }
+            var record = Record(
+                id: request.id,
+                url: request.url.absoluteString,
+                name: request.name,
+                title: request.meta["title"] ?? "",
+                ep: request.meta["epLabel"] ?? "",
+                meta: request.meta,
+                received: 0,
+                total: 0,
+                status: "queued",
+                path: "",
+                size: 0,
+                reason: "",
+                delivered: false,
+                taskIdentifier: 0,
+                updatedAt: Date().timeIntervalSince1970
+            )
+            record.showId = showId
+            record.epKey = epKey
+            records.append(record)
+            accepted.append(request.id)
+            progressHandlers[request.id] = progress[request.id]
+            finishHandlers[request.id] = finish[request.id]
+        }
+        for (id, reason, meta) in rejected {
+            /* 不支持就如实拒绝：留一条 failed 记录，网页能显示真实原因，不会静默消失 */
+            var record = Record(
+                id: id, url: "", name: meta["name"] ?? "", title: meta["title"] ?? "",
+                ep: meta["epLabel"] ?? "", meta: meta, received: 0, total: 0, status: "failed",
+                path: "", size: 0, reason: reason, delivered: false, taskIdentifier: 0,
+                updatedAt: Date().timeIntervalSince1970
+            )
+            record.showId = meta["showId"] ?? meta["id"] ?? ""
+            record.epKey = meta["epKey"] ?? ""
+            records.append(record)
+        }
+        if !requests.isEmpty { requestNotificationPermissionOnce() }
+        persist(force: true)
+        pump()
+        emitStateEvents()
+        return accepted
+    }
+
+    private static func pump() {
+        for record in planStarts(records) {
+            launch(record)
+        }
+        persist(force: true)
+    }
+
+    private static func launch(_ record: Record) {
+        let session = sessionInstance()
+        let task: URLSessionDownloadTask?
+        if let text = record.resumeData, let data = Data(base64Encoded: text) {
+            task = session.downloadTask(withResumeData: data)
+        } else if let url = URL(string: record.url) {
+            task = session.downloadTask(with: url)
+        } else {
+            task = nil
+        }
+        guard let downloadTask = task else {
+            fail(id: record.id, failure: .network("下载地址无效"))
+            return
+        }
+        downloadTask.taskDescription = record.id
+        tasks[record.id] = downloadTask
+        update(record.id) { current in
+            current.status = "running"
+            current.taskIdentifier = downloadTask.taskIdentifier
+            current.resumeData = nil
+            current.reason = ""
+        }
+        downloadTask.resume()
+    }
+
+    /// 暂停一部剧：正在传的用系统给的 resumeData，排队的直接转 paused。
+    private static func pause(showId: String) {
+        records = loadRecords()
+        var changed = false
+        for record in records where record.status == "queued" && matches(record, showId) {
+            update(record.id) { $0.status = "paused"; $0.reason = "已暂停" }
+            changed = true
+        }
+        let running = records.filter { $0.status == "running" && matches($0, showId) }.map(\.id)
+        for id in running {
+            /* 先把状态改成 paused：delegate 收到取消回调时就不会再写成「失败」 */
+            update(id) { $0.status = "paused"; $0.reason = "已暂停" }
+            changed = true
+            if let task = tasks.removeValue(forKey: id) {
+                task.cancel(byProducingResumeData: { data in
+                    guard let data, !data.isEmpty else { return }
+                    update(id) { $0.resumeData = data.base64EncodedString() }
+                })
+            }
+        }
+        progressHandlers[showId] = nil
+        if changed { persist(force: true); emitStateEvents() }
+    }
+
+    private static func resume(showId: String) {
+        records = loadRecords()
+        var changed = false
+        for record in records where record.status == "paused" && matches(record, showId) {
+            update(record.id) { $0.status = "queued"; $0.reason = "" }
+            changed = true
+        }
+        if changed { persist(force: true); pump(); emitStateEvents() }
+    }
+
+    /// 取消一部剧：停任务、标状态。已下载的文件保留。
+    private static func cancel(showId: String) {
+        records = loadRecords()
+        var changed = false
+        for record in records where matches(record, showId) && (record.status == "queued" || record.status == "paused" || record.status == "running") {
+            update(record.id) { current in
+                current.status = "cancelled"
+                current.reason = "已取消"
+                current.delivered = false
+                current.resumeData = nil
+                /* 取消后不保留一个「下了多少」的假进度 */
+                current.received = 0
+            }
+            changed = true
+            if let task = tasks.removeValue(forKey: id(of: record)) { task.cancel() }
+        }
+        if changed { persist(force: true); pump(); emitStateEvents() }
+    }
+
+    /// 取消全部（含排队）。测试收尾与「清空队列」共用。
     private static func stop(silent: Bool) {
-        guard let id = activeId else { return }
-        if !records.contains(where: { $0.id == id }) { records = loadRecords() }
-        activeId = nil
-        activeTask?.cancel()
-        activeTask = nil
-        let handler = finishHandlers.removeValue(forKey: id)
-        progressHandlers.removeValue(forKey: id)
-        update(id) { record in
-            /* 已经落盘的完成态不能被一次取消改回 cancelled */
-            guard record.status == "running" else { return }
-            record.status = "cancelled"
-            record.reason = "已取消"
-            record.received = 0
+        records = loadRecords()
+        for record in records where record.status == "queued" || record.status == "paused" || record.status == "running" {
+            update(record.id) { current in
+                guard current.status != "done" else { return }
+                current.status = "cancelled"
+                current.reason = "已取消"
+                current.received = 0
+                current.resumeData = nil
+                current.delivered = false
+            }
+            if let task = tasks.removeValue(forKey: id(of: record)) { task.cancel() }
         }
-        if !silent { handler?(.failure(.cancelled)) }
+        let handlers = finishHandlers
+        finishHandlers.removeAll()
+        progressHandlers.removeAll()
+        if !silent {
+            for (_, handler) in handlers { handler(.failure(.cancelled)) }
+        }
+        persist(force: true)
+        emitStateEvents()
     }
+
+    private static func matches(_ record: Record, _ showId: String) -> Bool {
+        guard !showId.isEmpty else { return false }
+        return (record.showId ?? "") == showId
+    }
+
+    private static func id(of record: Record) -> String { record.id }
 
     /// 重新接上后台会话：App 被系统重新拉起时，这里把上一个进程留下的任务找回来。
+    ///
+    /// running 但系统里已经没有这条任务 → 如实标「系统中断」；
+    /// queued / paused 的按原状态保留并重新调度（重启后队列不会凭空消失）。
     private static func reconcile(completion: (() -> Void)?) {
         let activeSession = sessionInstance()
-        activeSession.getAllTasks { tasks in
-            let alive = Set(tasks.compactMap { $0.taskDescription })
+        records = loadRecords()
+        activeSession.getAllTasks { systemTasks in
+            let alive = Set(systemTasks.compactMap { $0.taskDescription })
             var changed = false
-            var list = loadRecords()
-            for index in list.indices where list[index].status == "running" {
-                if alive.contains(list[index].id) { continue }
+            for index in records.indices where records[index].status == "running" {
+                if alive.contains(records[index].id) { continue }
                 /* 系统没给完成回调、任务也不在了：如实标失败，不许假装完成。 */
-                list[index].status = "failed"
-                list[index].reason = "下载被系统中断（App 被强制退出或任务被清理）"
-                list[index].delivered = false
+                records[index].status = "failed"
+                records[index].reason = "下载被系统中断（App 被强制退出或任务被清理）"
+                records[index].delivered = false
                 changed = true
             }
-            records = list
-            activeId = list.last(where: { $0.status == "running" })?.id
+            for task in systemTasks {
+                guard let id = task.taskDescription,
+                      let index = records.firstIndex(where: { $0.id == id }) else { continue }
+                records[index].status = "running"
+                records[index].taskIdentifier = task.taskIdentifier
+                tasks[id] = task as? URLSessionDownloadTask
+            }
             if changed { persist(force: true) }
+            /* 上次没跑完的队列接着跑（并发仍然最多两条） */
+            pump()
             completion?()
         }
     }
 
-    /// 交给网页的事件：终态只交一次，进度每次都可以重发。
+    /// 交给网页的终态/进度事件：终态只交一次，进度每次都可以重发。
     private static func pageEvents() -> [[String: Any]] {
         records = loadRecords()
         var events: [[String: Any]] = []
         var needsSave = false
         for record in records {
             if record.status == "running" {
-                events.append(["event": "progress", "id": record.id, "received": record.received, "total": record.total])
+                events.append([
+                    "event": "progress", "id": record.id,
+                    "received": record.received, "total": record.total,
+                    "showId": record.showId ?? "", "epKey": record.epKey ?? "",
+                ])
                 continue
             }
             if record.delivered { continue }
             switch record.status {
             case "done":
-                events.append(["event": "done", "id": record.id, "path": record.path, "name": record.name, "size": record.size])
+                events.append(["event": "done", "id": record.id, "path": record.path, "name": record.name, "size": record.size,
+                               "showId": record.showId ?? "", "epKey": record.epKey ?? "", "ep": record.ep])
             case "cancelled":
-                events.append(["event": "cancelled", "id": record.id])
+                events.append(["event": "cancelled", "id": record.id,
+                               "showId": record.showId ?? "", "epKey": record.epKey ?? ""])
             case "failed":
-                events.append(["event": "failed", "id": record.id, "reason": record.reason])
+                events.append(["event": "failed", "id": record.id, "reason": record.reason,
+                               "showId": record.showId ?? "", "epKey": record.epKey ?? ""])
             default:
                 continue
             }
             needsSave = true
         }
         if needsSave {
-            for index in records.indices where records[index].status != "running" {
+            for index in records.indices where records[index].status != "running" && records[index].status != "queued" && records[index].status != "paused" {
                 records[index].delivered = true
             }
             persist(force: true)
@@ -282,12 +564,58 @@ final class MediaDownloader: NSObject {
         return events
     }
 
+    /// 队列快照：所有任务的真实状态（含排队/暂停），网页据此算整剧进度。
+    private static func snapshot() -> [[String: Any]] {
+        records = loadRecords()
+        return records.map { record in
+            [
+                "id": record.id,
+                "showId": record.showId ?? "",
+                "epKey": record.epKey ?? "",
+                "epLabel": record.ep,
+                "title": record.title,
+                "name": record.name,
+                "status": record.status,
+                "received": record.received,
+                "total": record.total,
+                "path": record.path,
+                "size": record.size,
+                "reason": record.reason,
+            ]
+        }
+    }
+
+    /// 把内存里的状态推给界面（界面再转发给网页）。
+    private static func emitStateEvents() {
+        guard let sink = eventSink else { return }
+        records = loadRecords()
+        var payload: [[String: Any]] = []
+        for record in records {
+            var item: [String: Any] = [
+                "event": record.status == "running" ? "progress" : record.status,
+                "id": record.id,
+                "showId": record.showId ?? "",
+                "epKey": record.epKey ?? "",
+                "status": record.status,
+                "received": record.received,
+                "total": record.total,
+                "reason": record.reason,
+                "name": record.name,
+                "path": record.path,
+                "size": record.size,
+            ]
+            if record.status == "done" || record.status == "failed" || record.status == "cancelled" { item["event"] = record.status }
+            payload.append(item)
+        }
+        sink(payload)
+    }
+
     /// 后台回调收尾：会话已重建、状态已对账后再告诉系统，别提前收尾。
     private static func adoptBackgroundEvents(completion: @escaping () -> Void) {
         backgroundCompletion = completion
         reconcile(completion: {
-            sessionInstance().getAllTasks { tasks in
-                guard tasks.isEmpty else { return }
+            sessionInstance().getAllTasks { systemTasks in
+                guard systemTasks.isEmpty else { return }
                 if let pending = backgroundCompletion {
                     backgroundCompletion = nil
                     pending()
@@ -307,20 +635,12 @@ final class MediaDownloader: NSObject {
         let now = Date().timeIntervalSince1970
         if !force && now - lastPersistAt < 1 { return }
         lastPersistAt = now
-        /* 只留最近几条：真正的长期下载史在网页侧的片库里。 */
-        let trimmed = Array(records.suffix(6))
+        /* 队列里可能有整部剧的集数：保留最近 400 条，够长又不会把 UserDefaults 撑爆。
+           真正的长期下载史在网页侧的片库里。 */
+        let trimmed = Array(records.suffix(400))
         if let data = try? JSONEncoder().encode(trimmed) {
             UserDefaults.standard.set(data, forKey: tasksKey)
         }
-    }
-
-    private static func upsert(_ record: Record) {
-        if let index = records.firstIndex(where: { $0.id == record.id }) {
-            records[index] = record
-        } else {
-            records.append(record)
-        }
-        persist(force: true)
     }
 
     private static func update(_ id: String, force: Bool = true, _ mutate: (inout Record) -> Void) {
@@ -332,7 +652,9 @@ final class MediaDownloader: NSObject {
     }
 
     private static func record(_ id: String) -> Record? {
-        records.first(where: { $0.id == id })
+        if let hit = records.first(where: { $0.id == id }) { return hit }
+        records = loadRecords()
+        return records.first(where: { $0.id == id })
     }
 
     // MARK: - 通知
@@ -366,13 +688,16 @@ final class MediaDownloader: NSObject {
             record.received = record.size
             record.total = max(record.total, record.size)
             record.delivered = false
+            record.resumeData = nil
+            record.reason = ""
         }
         if let finished = record(id) { notifyFinished(finished) }
-        activeId = nil
-        activeTask = nil
+        tasks.removeValue(forKey: id)
         let handler = finishHandlers.removeValue(forKey: id)
         progressHandlers.removeValue(forKey: id)
+        emitStateEvents()
         handler?(.success(payload))
+        pump()
     }
 
     private static func fail(id: String, failure: Failure) {
@@ -380,12 +705,14 @@ final class MediaDownloader: NSObject {
             record.status = failure.isCancellation ? "cancelled" : "failed"
             record.reason = failure.message
             record.delivered = false
+            record.resumeData = nil
         }
-        activeId = nil
-        activeTask = nil
+        tasks.removeValue(forKey: id)
         let handler = finishHandlers.removeValue(forKey: id)
         progressHandlers.removeValue(forKey: id)
+        emitStateEvents()
         handler?(.failure(failure))
+        pump()
     }
 }
 
@@ -406,7 +733,7 @@ extension MediaDownloader: URLSessionDownloadDelegate {
     ) {
         guard let id = downloadTask.taskDescription else { return }
         Self.update(id, force: false) { record in
-            record.status = "running"
+            guard record.status == "running" else { return }
             record.received = totalBytesWritten
             record.total = totalBytesExpectedToWrite > 0 ? totalBytesExpectedToWrite : record.total
         }
@@ -447,6 +774,8 @@ extension MediaDownloader: URLSessionDownloadDelegate {
         /* 同一条任务可能被重复回调（完成 + 取消 + 重连）：只认第一次终态。 */
         guard !Self.finishedTasks.contains(task.taskIdentifier) else { return }
         Self.finishedTasks.insert(task.taskIdentifier)
+        Self.tasks.removeValue(forKey: id)
+        /* 暂停/取消是我们自己先改的状态：这里不能再写成失败。 */
         guard Self.record(id)?.status == "running" else { return }
         if let error = error as NSError? {
             if error.domain == NSURLErrorDomain && error.code == NSURLErrorCancelled {
