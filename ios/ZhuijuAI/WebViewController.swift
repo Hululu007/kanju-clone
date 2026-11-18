@@ -4,8 +4,24 @@ import WebKit
 
 final class WebViewController: UIViewController {
     private enum Site {
-        static let home = URL(string: "https://zhuiju.dpdns.org/")!
+        static let defaultHome = URL(string: "https://zhuiju.dpdns.org/")!
         static let host = "zhuiju.dpdns.org"
+
+        /// 出包关卡（XCUITest 截图工作流）要在没有账号、没有公网的模拟器里真点一遍页面。
+        /// 起始地址只允许从**测试进程**的环境变量覆盖：正式包是 Release，`#if DEBUG`
+        /// 之外读不到这条通道，线上地址永远是 defaultHome。
+        static var testHome: URL? {
+            #if DEBUG
+            guard let raw = ProcessInfo.processInfo.environment["KJ_TEST_HOME_URL"],
+                  let url = URL(string: raw) else { return nil }
+            return url
+            #else
+            return nil
+            #endif
+        }
+
+        static var home: URL { testHome ?? defaultHome }
+        static var hostName: String { testHome?.host ?? host }
     }
 
     /// 播放器全屏状态由网页内的「全屏」按钮通过 WKScriptMessageHandler 通知。
@@ -16,6 +32,12 @@ final class WebViewController: UIViewController {
         case share
         /// 下载一集到沙盒（网页已做过登录门控，这里再核一次）。
         case download
+        /// 批量入队（选集页「一键全集」「从本集往后」「下载已选」都走这条）。
+        case downloadBatch
+        /// 整部剧暂停 / 继续 / 取消：只动队列，不删除已下载的文件。
+        case downloadPause
+        case downloadResume
+        case downloadCancel
         case cancelDownload
         /// 网页回到前台/刚加载：把后台会话里的最新状态和终态补给它。
         case downloadSync
@@ -64,6 +86,14 @@ final class WebViewController: UIViewController {
                 target?.presentExternalShare(url: body["url"] as? String, title: body["title"] as? String)
             case PlayerAction.download.rawValue:
                 target?.beginDownload(body)
+            case PlayerAction.downloadBatch.rawValue:
+                target?.beginBatchDownload(body)
+            case PlayerAction.downloadPause.rawValue:
+                target?.pauseDownloads(showId: body["showId"] as? String)
+            case PlayerAction.downloadResume.rawValue:
+                target?.resumeDownloads(showId: body["showId"] as? String)
+            case PlayerAction.downloadCancel.rawValue:
+                target?.cancelDownloads(showId: body["showId"] as? String)
             case PlayerAction.downloadSync.rawValue:
                 target?.flushDownloadEvents()
             case PlayerAction.cancelDownload.rawValue:
@@ -145,6 +175,17 @@ final class WebViewController: UIViewController {
         configureLayout()
         configureErrorView()
         observeProgress()
+        /* 队列状态变化（进度/终态/暂停/排队）先到界面，再转发给网页。
+           批量下载没有逐条的 onFinish，靠这条通道把状态推回去。 */
+        MediaDownloader.eventSink = { [weak self] events in
+            guard let self = self else { return }
+            var finished = false
+            for event in events {
+                self.sendDownloadEvent(event)
+                if let name = event["event"] as? String, name != "progress" { finished = true }
+            }
+            if finished { self.sendDownloadSnapshot() }
+        }
         /* 从后台回来时把后台会话的最新进度/终态补到网页上：
            切出去下载时网页是挂起的，收不到 delegate 回调。 */
         NotificationCenter.default.addObserver(
@@ -220,13 +261,27 @@ final class WebViewController: UIViewController {
 
     /// 能交给外部播放器的地址：只有 https 直链。
     /// 明文 http、blob:/data:（MSE 加密流）、以及非 URL 一律返回 nil —— 交给别的 App 也没法播。
+    /// 唯一例外是 XCUITest 的受控源：只在测试进程（起始地址被环境变量覆盖）时
+    /// 放行 127.0.0.1 的 http，正式包里这条分支永远不成立。
     static func shareableURL(_ raw: String?) -> URL? {
         guard let raw = raw,
               !raw.isEmpty,
               let link = URL(string: raw),
-              link.scheme?.lowercased() == "https",
               link.host?.isEmpty == false else { return nil }
-        return link
+        let scheme = link.scheme?.lowercased()
+        if scheme == "https" { return link }
+        if scheme == "http", Site.testHome != nil, isLoopback(link), isVideoPath(link) { return link }
+        return nil
+    }
+
+    static func isLoopback(_ url: URL) -> Bool {
+        let host = (url.host ?? "").lowercased()
+        return host == "127.0.0.1" || host == "localhost" || host == "::1"
+    }
+
+    static func isVideoPath(_ url: URL) -> Bool {
+        let path = url.path.lowercased()
+        return [".mp4", ".m4v", ".mov", ".mkv", ".ts"].contains { path.hasSuffix($0) }
     }
 
     /// 外部播放：把直链交给系统分享面板，由用户选已安装的播放器或 AirPlay。
@@ -272,31 +327,84 @@ final class WebViewController: UIViewController {
                     "received": received, "total": total,
                 ])
             },
-            onFinish: { [weak self] result in
-                switch result {
-                case .success(let payload):
-                    var event = payload
-                    event["event"] = "done"
-                    event["id"] = id
-                    self?.sendDownloadEvent(event)
-                case .failure(let error):
-                    self?.sendDownloadEvent(["event": "failed", "id": id, "reason": error.message])
-                }
-            }
+            onFinish: { _ in /* 状态由 eventSink + snapshot 统一回传，避免同一条终态投两遍 */ }
         )
+        sendDownloadSnapshot()
+    }
+
+    /// 批量入队：一条消息带整批选集，原生层负责去重、并发上限和持久化。
+    fileprivate func beginBatchDownload(_ body: [String: Any]) {
+        guard body["signedIn"] as? Bool == true else {
+            sendDownloadEvent(["event": "failed", "id": "batch", "reason": "登录后才能批量下载"])
+            return
+        }
+        guard let items = body["items"] as? [[String: Any]], !items.isEmpty else { return }
+        var requests: [MediaDownloader.Request] = []
+        for item in items {
+            guard let id = item["id"] as? String, !id.isEmpty else { continue }
+            guard let link = Self.shareableURL(item["url"] as? String) else {
+                sendDownloadEvent(["event": "failed", "id": id, "reason": "这条线路的地址不能下载"])
+                continue
+            }
+            let name = MediaDownloader.fileName(from: link.absoluteString, fallback: item["name"] as? String ?? "video.mp4")
+            var meta: [String: String] = (body["show"] as? [String: Any])?.reduce(into: [:]) { result, pair in
+                if let text = pair.value as? String { result[pair.key] = text }
+                else if let number = pair.value as? NSNumber { result[pair.key] = number.stringValue }
+            } ?? [:]
+            meta["showId"] = (item["showId"] as? String) ?? meta["id"] ?? ""
+            meta["epKey"] = (item["epKey"] as? String) ?? ""
+            meta["epLabel"] = (item["epLabel"] as? String) ?? ""
+            meta["title"] = (item["title"] as? String) ?? meta["title"] ?? ""
+            requests.append(MediaDownloader.Request(id: id, url: link, name: name, meta: meta))
+        }
+        if !requests.isEmpty { downloader.enqueue(requests) }
+        sendDownloadSnapshot()
+    }
+
+    fileprivate func pauseDownloads(showId: String?) {
+        guard let showId = showId, !showId.isEmpty else { return }
+        downloader.pause(showId: showId)
+        sendDownloadSnapshot()
+    }
+
+    fileprivate func resumeDownloads(showId: String?) {
+        guard let showId = showId, !showId.isEmpty else { return }
+        downloader.resume(showId: showId)
+        sendDownloadSnapshot()
+    }
+
+    fileprivate func cancelDownloads(showId: String?) {
+        guard let showId = showId, !showId.isEmpty else { return }
+        downloader.cancel(showId: showId)
+        sendDownloadSnapshot()
     }
 
     fileprivate func cancelDownload() {
         downloader.cancel()
+        sendDownloadSnapshot()
     }
 
     /// 把后台会话里的状态补回网页：进度每次都可以重发，完成/失败/取消只发一次。
     fileprivate func flushDownloadEvents() {
         downloader.restore { [weak self] in
             guard let self = self else { return }
+            self.sendDownloadSnapshot()
             for event in self.downloader.eventsForPage() {
                 self.sendDownloadEvent(event)
             }
+            self.sendDownloadSnapshot()
+        }
+    }
+
+    /// 队列快照：网页侧用它算整剧进度、恢复暂停/排队状态。
+    private func sendDownloadSnapshot() {
+        let tasks = downloader.snapshotForPage()
+        guard JSONSerialization.isValidJSONObject(tasks),
+              let data = try? JSONSerialization.data(withJSONObject: tasks),
+              let text = String(data: data, encoding: .utf8) else { return }
+        let script = "window.__zhuijuDownloads && window.__zhuijuDownloads(\"snapshot\", " + text + ");"
+        DispatchQueue.main.async { [weak self] in
+            self?.webView.evaluateJavaScript(script, completionHandler: nil)
         }
     }
 
@@ -433,7 +541,12 @@ final class WebViewController: UIViewController {
     }
 
     private func isSite(_ url: URL?) -> Bool {
-        guard let url, url.scheme?.lowercased() == "https", url.user == nil, url.password == nil else { return false }
+        guard let url, url.user == nil, url.password == nil else { return false }
+        if let testHome = Site.testHome, url.host?.lowercased() == testHome.host?.lowercased() {
+            /* 测试夹具站是同机 http 服务：只放行它自己的 host，其它照样拦。 */
+            return url.port == testHome.port
+        }
+        guard url.scheme?.lowercased() == "https" else { return false }
         return url.host?.lowercased() == Site.host && (url.port == nil || url.port == 443)
     }
 
