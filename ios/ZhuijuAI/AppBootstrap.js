@@ -1,7 +1,12 @@
 (function () {
   'use strict';
   if (window.top !== window) return;
-  if (window.location.protocol !== 'https:' || window.location.hostname !== 'zhuiju.dpdns.org') return;
+  /* 出包关卡（XCUITest 截图）在同机受控夹具站上真点一遍页面：只认原生在测试进程里
+     注入的这一个 origin。正式包没有这个变量，下面这条 early return 照常生效。 */
+  var TEST_ORIGIN = String(window.__zhuijuTestOrigin || '');
+  if (window.location.protocol !== 'https:' || window.location.hostname !== 'zhuiju.dpdns.org') {
+    if (!TEST_ORIGIN || window.location.origin !== TEST_ORIGIN) return;
+  }
   if (window.__zhuijuIOSReady) return;
   window.__zhuijuIOSReady = true;
 

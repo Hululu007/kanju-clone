@@ -4,8 +4,11 @@ import WebKit
 
 final class WebViewController: UIViewController {
     private enum Site {
-        static let home = URL(string: "https://zhuiju.dpdns.org/")!
+        static let defaultHome = URL(string: "https://zhuiju.dpdns.org/")!
         static let host = "zhuiju.dpdns.org"
+        /// 出包关卡的 XCUITest 在没有账号的模拟器里跑同机受控夹具站；
+        /// 起始地址只从 `KJTestLaunch`（Debug 构建的环境变量）来，Release 包永远走站点首页。
+        static var home: URL { KJTestLaunch.home ?? defaultHome }
     }
 
     /// 播放器全屏状态由网页内的「全屏」按钮通过 WKScriptMessageHandler 通知。
@@ -109,6 +112,14 @@ final class WebViewController: UIViewController {
         let bridge = PlayerBridge()
         bridge.target = self
         contentController.add(bridge, name: "iosPlayer")
+        /* 夹具站的 origin 放行变量必须在 AppBootstrap.js 之前落到页面里（Debug 测试通道才有值）。 */
+        if let prelude = KJTestLaunch.bootstrapPrelude {
+            contentController.addUserScript(WKUserScript(
+                source: prelude,
+                injectionTime: .atDocumentStart,
+                forMainFrameOnly: true
+            ))
+        }
         if let scriptURL = Bundle.main.url(forResource: "AppBootstrap", withExtension: "js"),
            let source = try? String(contentsOf: scriptURL, encoding: .utf8) {
             let script = WKUserScript(source: source, injectionTime: .atDocumentStart, forMainFrameOnly: true)

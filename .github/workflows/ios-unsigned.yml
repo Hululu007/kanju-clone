@@ -2,6 +2,12 @@ name: Build unsigned iOS IPA
 
 on:
   workflow_dispatch:
+    inputs:
+      ui_smoke:
+        description: '跑出包关卡的 XCUITest 三项（真启动 App + 逐张截图），false 时只出 IPA'
+        type: choice
+        options: ['true', 'false']
+        default: 'true'
   push:
     paths:
       - 'ios/**'
@@ -67,7 +73,7 @@ jobs:
           # 后台会话要连 nsurlsessiond 的 XPC 服务，未签名的测试宿主会被拒绝（4097）。
           xcodebuild -project ZhuijuAI.xcodeproj -scheme ZhuijuAI -destination "platform=iOS Simulator,id=$DEVICE" -derivedDataPath build CODE_SIGN_IDENTITY=- CODE_SIGNING_REQUIRED=NO INFOPLIST_FILE=FixtureInfo.plist build-for-testing | tee simulator-build.log
           codesign -dv --verbose=2 build/Build/Products/Debug-iphonesimulator/ZhuijuAI.app 2>&1 | tee -a simulator-build.log || true
-          xcodebuild -project ZhuijuAI.xcodeproj -scheme ZhuijuAI -destination "platform=iOS Simulator,id=$DEVICE" -derivedDataPath build -resultBundlePath playback-tests.xcresult CODE_SIGN_IDENTITY=- CODE_SIGNING_REQUIRED=NO test-without-building | tee simulator-tests.log
+          xcodebuild -project ZhuijuAI.xcodeproj -scheme ZhuijuAI -destination "platform=iOS Simulator,id=$DEVICE" -derivedDataPath build -resultBundlePath playback-tests.xcresult CODE_SIGN_IDENTITY=- CODE_SIGNING_REQUIRED=NO -only-testing:ZhuijuAITests test-without-building | tee simulator-tests.log
           xcrun xcresulttool get test-results summary --path playback-tests.xcresult | tee simulator-tests-summary.log
 
       - name: Build Release for device
@@ -104,6 +110,80 @@ jobs:
           path: |
             ios/ZhuijuAI-unsigned.ipa
             ios/ZhuijuAI-unsigned.ipa.sha256
+          retention-days: 14
+
+      # ---- 出包关卡：真启动 App、真点页面、逐张截图 ----------------------------------
+      # 页面来自同机受控夹具站（无账号、不连公网），片源是真 mp4，所以截图里有真画面。
+      - name: Serve the controlled fixture site
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.ui_smoke != 'false' }}
+        working-directory: ios
+        run: |
+          set -uo pipefail
+          mkdir -p UITests/Fixtures/site/media
+          ffmpeg -y -hide_banner -loglevel error \
+            -f lavfi -i testsrc2=size=640x480:rate=24 \
+            -f lavfi -i sine=frequency=440:sample_rate=44100 \
+            -t 6 -c:v libx264 -pix_fmt yuv420p -c:a aac -movflags +faststart \
+            UITests/Fixtures/site/media/fixture.mp4
+          nohup python3 UITests/Fixtures/fixture_server.py --root UITests/Fixtures/site --port 8765 \
+            > fixture-site.log 2>&1 &
+          for i in $(seq 1 60); do
+            if curl -sf -o /dev/null http://127.0.0.1:8765/player/index.html; then break; fi
+            sleep 0.5
+          done
+          curl -sS -o /dev/null -w 'fixture page %{http_code}\n' http://127.0.0.1:8765/player/index.html
+          curl -sS -o /dev/null -w 'fixture media %{http_code} (%{size_download} bytes)\n' http://127.0.0.1:8765/media/fixture.mp4
+
+      # 这一条是真门禁：App 起不来、页面点不动、少一档画面模式都算失败。
+      # 批量下载那一项在下载队列合入前会如实变红（没有 skip 掩护）。
+      - name: Run the app UI smoke and shoot every screen
+        id: ui_smoke
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.ui_smoke != 'false' }}
+        working-directory: ios
+        run: |
+          set -o pipefail
+          DEVICE=$(xcrun simctl list devices available -j | python3 -c 'import json,sys; d=json.load(sys.stdin); print(next(x["udid"] for group in d["devices"].values() for x in group if x["name"].startswith("iPhone")))')
+          echo "device=$DEVICE" | tee ui-smoke.log
+          xcrun simctl boot "$DEVICE" >/dev/null 2>&1 || true
+          xcrun simctl bootstatus "$DEVICE" -b >> ui-smoke.log 2>&1 || true
+          xcodebuild -project ZhuijuAI.xcodeproj -scheme ZhuijuAI \
+            -destination "platform=iOS Simulator,id=$DEVICE" \
+            -derivedDataPath build \
+            -resultBundlePath ui-smoke.xcresult \
+            CODE_SIGN_IDENTITY=- CODE_SIGNING_REQUIRED=NO INFOPLIST_FILE=FixtureInfo.plist \
+            -only-testing:ZhuijuAIUITests \
+            test-without-building 2>&1 | tee -a ui-smoke.log
+          xcrun xcresulttool get test-results summary --path ui-smoke.xcresult \
+            | tee ui-smoke-summary.log
+
+      # 导出截图本身也要能被审：少一张必需图就非零退出。
+      - name: Export the screenshots as PNG
+        if: always() && (github.event_name != 'workflow_dispatch' || inputs.ui_smoke != 'false')
+        working-directory: ios
+        run: |
+          set -uo pipefail
+          if [ -d ui-smoke.xcresult ]; then
+            python3 scripts/export-ui-screenshots.py \
+              --xcresult ui-smoke.xcresult --output ui-screenshots | tee ui-screenshots-export.log
+            echo "export-exit=${PIPESTATUS[0]}" | tee -a ui-screenshots-export.log
+          else
+            echo 'no ui-smoke.xcresult (the smoke did not run)' | tee ui-screenshots-export.log
+            exit 1
+          fi
+
+      - name: Upload the UI smoke screenshots
+        if: always() && (github.event_name != 'workflow_dispatch' || inputs.ui_smoke != 'false')
+        uses: actions/upload-artifact@v4
+        with:
+          # 固定名 + commit/run 绑定：审核时 gh run download 一次就能对上这一轮
+          name: ZhuijuAI-ui-smoke-${{ github.sha }}-run${{ github.run_id }}
+          path: |
+            ios/ui-screenshots
+            ios/ui-smoke.xcresult
+            ios/ui-smoke.log
+            ios/ui-smoke-summary.log
+            ios/ui-screenshots-export.log
+            ios/fixture-site.log
           retention-days: 14
 
       - name: Upload playback test evidence
