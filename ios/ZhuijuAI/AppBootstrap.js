@@ -191,7 +191,12 @@
     if (event.target.id === 'lineSelect') invalidate();
   }, true);
   document.addEventListener('visibilitychange', function () {
-    if (document.visibilityState !== 'hidden') return;
+    if (document.visibilityState !== 'hidden') {
+      /* 回到前台：让原生把后台会话里的最新进度/终态补回来 */
+      postNative({ action: 'downloadSync' });
+      syncDownloadRow();
+      return;
+    }
     pendingPlayback = null;
     var video = document.getElementById('video');
     if (video && video.webkitPresentationMode !== 'picture-in-picture') video.pause();
@@ -228,6 +233,14 @@
          它和播放器不在同一个层叠上下文里，z-index 压不住，只能直接收起来。 */
       'html[data-ios-immersive] .page-head{display:none!important}',
       'html[data-ios-immersive] .topbar{display:none!important}',
+      /* 真机横屏全屏时画面上方还空着一条 60px 高的深灰带（截图里就是它挡着画面）。
+         站点移动端把滚动容器写成 `.main{margin-top:60px;height:calc(100vh - 60px)}`，
+         而它又带 `-webkit-overflow-scrolling:touch`：WebKit 会把里面的 position:fixed
+         “收编”成相对这个滚动容器定位，于是 #player 只铺满了 .main 那一块（正好少掉顶部
+         60px 页头高度），上面露出页面背景。全屏时把 .main 本身铺满整屏：
+         不管 fixed 以视口还是以它为参照，#player 都正好盖住整块屏幕。 */
+      'html[data-ios-immersive] .main{position:fixed!important;top:0!important;left:0!important;right:0!important;bottom:0!important;width:100%!important;height:100%!important;margin:0!important;padding:0!important;overflow:hidden!important;-webkit-overflow-scrolling:auto!important;transform:none!important;z-index:9998!important}',
+      'html[data-ios-immersive] body{margin:0!important;padding:0!important}',
       'html[data-ios-immersive] .ph-back{display:none!important}',
       'html[data-ios-immersive] .ph-title{display:none!important}',
       /* 站点的「全屏」按钮优先走标准全屏 API（player.requestFullscreen），
@@ -266,7 +279,9 @@
          某集文字发黑看着像“被加了粗”，其实只是 hover 没褪。按粗指针重置回常态。 */
       '@media (hover:none){#epGrid .ep:hover{color:var(--ink-66)!important;background:rgba(255,255,255,.05)!important}html[data-theme=\'light\'] #epGrid .ep:hover{color:var(--ink-66)!important;background:rgba(15,20,24,.04)!important}#epGrid .ep.on:hover{color:var(--mint-text)!important;background:rgba(22,224,157,.16)!important}html[data-theme=\'light\'] #epGrid .ep.on:hover{color:#0b8a5f!important;background:rgba(18,153,111,.14)!important}}',
       /* ---------- 自带播放控制栏 + 品牌图 ---------- */
-      '#ppCtrl{position:absolute;left:0;right:0;bottom:0;z-index:6;display:flex;align-items:center;gap:6px;padding:6px 8px calc(6px + env(safe-area-inset-bottom,0px));background:linear-gradient(to top,rgba(0,0,0,.82),rgba(0,0,0,.44) 55%,rgba(0,0,0,0));color:#fff}',
+      '#ppCtrl{position:absolute;left:0;right:0;bottom:0;z-index:6;display:flex;align-items:center;gap:6px;padding:6px 8px calc(6px + env(safe-area-inset-bottom,0px));background:linear-gradient(to top,rgba(0,0,0,.82),rgba(0,0,0,.44) 55%,rgba(0,0,0,0));color:#fff;transition:opacity .18s ease}',
+      /* 全屏里控制栏收起来时整条消失：不留半透明底栏、不留渐变，画面上只剩视频本身。 */
+      '#ppCtrl.pc-hidden{opacity:0!important;visibility:hidden!important;pointer-events:none!important}',
       '#ppCtrl .pc-btn{appearance:none;-webkit-appearance:none;border:0;background:transparent;color:#fff;font-size:12px;font-weight:600;line-height:1;padding:9px 10px;border-radius:9px;white-space:nowrap;cursor:pointer}',
       '#ppCtrl .pc-btn:active{background:rgba(255,255,255,.2)}',
       '#ppCtrl .pc-time{font-size:11px;color:rgba(255,255,255,.85);font-variant-numeric:tabular-nums;white-space:nowrap}',
@@ -288,6 +303,20 @@
       '#iosDownloadFill{width:0;height:100%;border-radius:inherit;background:#16e09d;transition:width .15s linear}',
       '#iosOpenDownloaded{margin-top:10px;padding:8px 12px;border-radius:8px;background:#16e09d;color:#04241a;font-weight:700}',
       '#iosOpenDownloaded[hidden]{display:none!important}',
+      /* 设置里的下载：按剧列出封面/片名/下了哪几集，再跟正在下载的进度 */
+      '#iosDownloadLibrary{margin:2px 0 12px}',
+      '#iosDownloadLibrary[hidden]{display:none!important}',
+      '.ios-dl-heading{font-size:14px;font-weight:700;margin:0 0 8px}',
+      '.ios-dl-running{padding:10px 12px;margin-bottom:8px;border-radius:10px;background:rgba(22,224,157,.14);color:#b8f5dd;font-size:12px;line-height:1.4}',
+      '.ios-dl-running[hidden]{display:none!important}',
+      '.ios-dl-show{display:flex;align-items:center;gap:10px;padding:8px;border-radius:10px;background:rgba(255,255,255,.06)}',
+      '.ios-dl-show+.ios-dl-show{margin-top:8px}',
+      '.ios-dl-cover{width:40px;height:60px;object-fit:cover;border-radius:6px;flex:none;background:#1a2228}',
+      '.ios-dl-meta{min-width:0;flex:1 1 auto}',
+      '.ios-dl-name{font-size:13px;font-weight:700;line-height:1.35;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
+      '.ios-dl-count{font-size:12px;color:rgba(244,247,248,.72);margin-top:2px}',
+      '.ios-dl-eps{display:flex;flex-wrap:wrap;gap:4px;margin-top:6px}',
+      '.ios-dl-ep{font-size:11px;line-height:1;padding:4px 6px;border-radius:5px;background:rgba(255,255,255,.1);color:#e9f2f4}',
       '#ppRateMenu{position:absolute;right:6px;bottom:calc(100% + 6px);display:none;flex-direction:column;gap:2px;padding:6px;border-radius:12px;background:rgba(12,18,22,.97);border:1px solid rgba(255,255,255,.14)}',
       '#ppRateMenu.on{display:flex}',
       '#ppRateMenu .pc-rate-opt{border:0;background:transparent;color:#fff;font-size:13px;line-height:1;padding:9px 18px;border-radius:8px;white-space:nowrap;cursor:pointer}',
@@ -488,7 +517,72 @@
     } else {
       restoreImmersiveControls();
     }
+    syncCtrlVisibility();
     syncFullButton();
+  }
+
+  /* ---------- 全屏里控制栏“点一下才出来，几秒后自己收起” ----------
+     用户要的是全屏只剩画面：不点屏幕时不能留底栏、渐变或任何遮罩。
+     所以进沉浸态（正在播放）就直接收起，点画面再拿出来，3 秒后自动消失。 */
+  var CTRL_HIDE_MS = 3000;
+  var ctrlHideTimer = null;
+  var ctrlHidden = false;
+  var ctrlShownAt = 0;
+
+  function immersiveNow() {
+    var root = document.documentElement;
+    return !!(root && typeof root.hasAttribute === 'function' && root.hasAttribute('data-ios-immersive'));
+  }
+
+  function clearCtrlTimer() {
+    if (ctrlHideTimer) clearTimeout(ctrlHideTimer);
+    ctrlHideTimer = null;
+  }
+
+  function setCtrlHidden(hidden) {
+    ctrlHidden = !!hidden;
+    var bar = document.getElementById('ppCtrl');
+    if (!bar) return;
+    bar.className = 'pp-ctrl' + (hidden ? ' pc-hidden' : '');
+  }
+
+  function hideCtrlSoon() {
+    clearCtrlTimer();
+    if (!immersiveNow()) return;
+    var video = document.getElementById('video');
+    /* 暂停时把控制栏留给用户：这时收起来就点不到播放键了。 */
+    if (video && video.paused !== false) return;
+    ctrlHideTimer = setTimeout(function () {
+      ctrlHideTimer = null;
+      if (immersiveNow()) setCtrlHidden(true);
+    }, CTRL_HIDE_MS);
+  }
+
+  /* autoHide === false 时只拿出来、不计时（比如暂停态） */
+  function showCtrl(autoHide) {
+    setCtrlHidden(false);
+    ctrlShownAt = Date.now();
+    clearCtrlTimer();
+    if (autoHide === false) return;
+    hideCtrlSoon();
+  }
+
+  function syncCtrlVisibility() {
+    if (!immersiveNow()) {
+      clearCtrlTimer();
+      setCtrlHidden(false);
+      return;
+    }
+    var video = document.getElementById('video');
+    if (video && video.paused === false) {
+      /* 进沉浸态、并且正在播：直接收起，不等 3 秒。用户要的是“画面先干净”。
+         例外：刚被用户点出来的那一瞬，可能迁到一个 play 事件，别把它闪没。 */
+      clearCtrlTimer();
+      if (ctrlHidden || Date.now() - ctrlShownAt > 600) setCtrlHidden(true);
+      else hideCtrlSoon();
+    } else {
+      showCtrl(false);
+    }
   }
 
   function setUserFullscreen(on) {
@@ -554,8 +648,11 @@
     var phase = downloadState.busy ? 'running' : (downloadState.path ? 'done' : (downloadState.error ? 'failed' : 'idle'));
     writeStore(DOWNLOAD_STORE, JSON.stringify({
       id: downloadState.id, name: downloadState.name, path: downloadState.path,
+      show: downloadState.show || '', ep: downloadState.ep || '',
       busy: !!downloadState.busy, percent: downloadState.percent || 0,
       error: downloadState.error || '', state: phase,
+      /* 换页/重启后原生才回「完成」时，也要能把这一集归到正确的剧名下 */
+      meta: pendingMeta || null,
     }));
   }
 
@@ -569,11 +666,254 @@
     downloadState = {
       id: saved.id || '',
       name: saved.name || '',
+      show: saved.show || '',
+      ep: saved.ep || '',
       path: saved.path || '',
       busy: !!saved.busy && !saved.path,
       percent: Number(saved.percent) || 0,
       error: saved.state === 'failed' ? (saved.error || '下载中断') : '',
     };
+    if (saved.meta && typeof saved.meta === 'object' && saved.meta.title) pendingMeta = saved.meta;
+  }
+
+  /* ---------- 已下载的片库：设置里按剧列出「下了哪几集 / 共几集」 ----------
+     原生下载一次只跑一集，网页侧拿不到文件夹列表；所以每次下载完成就把
+     「剧名 / 封面 / 这一集」记到 localStorage。分组用站点自己的媒体 id
+     （播放页地址的 ?id=），拿不到 id 时退回剧名，同一部剧不会碎成两条。 */
+  var LIBRARY_STORE = 'kj-ios-downloads';
+  var libraryBox = null;
+
+  function readLibrary() {
+    var parsed = null;
+    try { parsed = JSON.parse(readStore(LIBRARY_STORE) || 'null'); } catch (error) { parsed = null; }
+    var shows = parsed && parsed.shows;
+    if (!shows || typeof shows.length !== 'number') return { shows: [] };
+    var clean = [];
+    for (var i = 0; i < shows.length; i++) {
+      var show = shows[i];
+      if (!show || !show.title) continue;
+      var source = show.eps && typeof show.eps.length === 'number' ? show.eps : [];
+      var eps = [];
+      for (var e = 0; e < source.length; e++) {
+        var ep = source[e];
+        if (!ep) continue;
+        eps.push({
+          key: ep.key === undefined || ep.key === null ? '' : String(ep.key),
+          label: String(ep.label || ''),
+          name: String(ep.name || ''),
+          path: String(ep.path || ''),
+          size: Number(ep.size) || 0,
+          at: Number(ep.at) || 0,
+        });
+      }
+      if (!eps.length) continue;
+      clean.push({
+        id: String(show.id || show.title),
+        title: String(show.title),
+        cover: String(show.cover || ''),
+        /* 0 表示「站点没告诉我们总集数」：界面只写「已下载 N 集」，绝不编一个分母。 */
+        total: Number(show.total) || 0,
+        eps: eps,
+      });
+    }
+    return { shows: clean };
+  }
+
+  function writeLibrary(library) {
+    writeStore(LIBRARY_STORE, JSON.stringify({ shows: library.shows || [] }));
+  }
+
+  /* 播放页能拿到的真实媒体标识：站点地址的 ?id=、详情标题、海报、总集数。 */
+  function episodeTotal() {
+    var more = document.getElementById('epMore');
+    if (more && typeof more.textContent === 'string') {
+      var fromMore = /(\d+)\s*集/.exec(more.textContent);
+      if (fromMore) return Number(fromMore[1]) || 0;
+    }
+    var buttons = document.querySelectorAll ? document.querySelectorAll('#epGrid .ep') : [];
+    if (buttons && buttons.length) return buttons.length;
+    /* 没有选集按钮的（电影/单集）就只有一集正片 */
+    var any = document.querySelector ? document.querySelector('.ep') : null;
+    return any ? 0 : 1;
+  }
+
+  function showMeta() {
+    var id = '';
+    try { id = new URLSearchParams(window.location.search).get('id') || ''; } catch (error) { id = ''; }
+    var title = '';
+    var heading = document.querySelector ? document.querySelector('.detail-info h1') : null;
+    if (heading && heading.textContent) title = String(heading.textContent).trim();
+    if (!title) title = String(document.title || '').replace(/\s*[-–—|]\s*看剧AI\s*$/, '').trim();
+    if (!title) {
+      var head = document.querySelector ? document.querySelector('.ph-title') : null;
+      if (head && head.textContent) title = String(head.textContent).trim();
+    }
+    var cover = '';
+    var poster = document.querySelector ? document.querySelector('.detail-poster img') : null;
+    if (poster && typeof poster.getAttribute === 'function') cover = poster.getAttribute('src') || '';
+    if (!cover) {
+      var video = document.getElementById('video');
+      if (video && typeof video.getAttribute === 'function') cover = video.getAttribute('poster') || '';
+    }
+    return { id: id || title, title: title, cover: cover, total: episodeTotal() };
+  }
+
+  /* 下载完成：把这一集记到对应剧名下（同一集重下就覆盖，不留重复）。 */
+  function recordDownloaded(payload, meta) {
+    var info = meta || {};
+    var title = String(info.title || '').trim();
+    if (!title) return;
+    var id = String(info.id || title);
+    var library = readLibrary();
+    var shows = library.shows;
+    var show = null;
+    for (var i = 0; i < shows.length; i++) {
+      if (shows[i].id === id || shows[i].title === title) { show = shows[i]; break; }
+    }
+    if (!show) {
+      show = { id: id, title: title, cover: String(info.cover || ''), total: Number(info.total) || 0, eps: [] };
+      shows.unshift(show);
+    }
+    if (info.cover) show.cover = String(info.cover);
+    if (Number(info.total) > 0) show.total = Number(info.total);
+    var key = info.epKey === undefined || info.epKey === null ? '' : String(info.epKey);
+    var record = {
+      key: key,
+      label: String(info.epLabel || ''),
+      name: String((payload && payload.name) || ''),
+      path: String((payload && payload.path) || ''),
+      size: Number(payload && payload.size) || 0,
+      at: Date.now(),
+    };
+    var replaced = false;
+    for (var e = 0; e < show.eps.length; e++) {
+      if (show.eps[e].key === record.key) { show.eps[e] = record; replaced = true; break; }
+    }
+    if (!replaced) show.eps.push(record);
+    show.eps.sort(function (a, b) {
+      var left = Number(a.key), right = Number(b.key);
+      if (isFinite(left) && isFinite(right) && left !== right) return left - right;
+      return (a.at || 0) - (b.at || 0);
+    });
+    /* 最近下过的那部剧排在最前面 */
+    shows.sort(function (a, b) { return latestAt(b) - latestAt(a); });
+    writeLibrary({ shows: shows });
+  }
+
+  function latestAt(show) {
+    var latest = 0;
+    for (var i = 0; i < show.eps.length; i++) latest = Math.max(latest, show.eps[i].at || 0);
+    return latest;
+  }
+
+  function downloadLibraryElement() {
+    if (libraryBox) return libraryBox;
+    var box = document.createElement('div');
+    box.id = 'iosDownloadLibrary';
+    box.className = 'ios-dl-lib';
+    var heading = document.createElement('div');
+    heading.className = 'ios-dl-heading';
+    heading.textContent = '下载';
+    box.appendChild(heading);
+    var running = document.createElement('div');
+    running.id = 'iosDlRunning';
+    running.className = 'ios-dl-running';
+    running.hidden = true;
+    if (typeof running.setAttribute === 'function') running.setAttribute('hidden', '');
+    box.appendChild(running);
+    var list = document.createElement('div');
+    list.id = 'iosDlShows';
+    list.className = 'ios-dl-shows';
+    box.appendChild(list);
+    libraryBox = box;
+    return box;
+  }
+
+  function librarySig(shows) {
+    var parts = [downloadState.busy ? 'run' : 'idle', String(downloadState.percent || 0), downloadState.show || '', downloadState.ep || '', downloadState.name || ''];
+    for (var i = 0; i < shows.length; i++) {
+      parts.push(shows[i].id + '|' + shows[i].title + '|' + shows[i].cover + '|' + shows[i].total + '|' + shows[i].eps.length);
+    }
+    return parts.join(';');
+  }
+
+  /* 已下载片库 + 正在下载的那一集：设置面板打开时就能看清「下了哪些、下到哪」。 */
+  function renderDownloadLibrary() {
+    var root = downloadRoot();
+    if (!root || typeof root.appendChild !== 'function') return false;
+    var box = downloadLibraryElement();
+    if (box.parentNode !== root) root.appendChild(box);
+
+    var running = document.getElementById('iosDlRunning');
+    if (running) {
+      var busy = !!downloadState.busy;
+      running.hidden = !busy;
+      if (typeof running.removeAttribute === 'function' && busy) running.removeAttribute('hidden');
+      else if (typeof running.setAttribute === 'function') running.setAttribute('hidden', '');
+      if (busy) {
+        var who = downloadState.show || '';
+        var which = downloadState.ep || downloadState.name || '本集';
+        running.textContent = '正在下载 ' + (who ? who + ' · ' : '') + which + ' · '
+          + (downloadState.percent ? downloadState.percent + '%' : '准备中');
+      }
+    }
+
+    var list = document.getElementById('iosDlShows');
+    if (!list) return false;
+    var shows = readLibrary().shows;
+    /* 没下过东西也没在下载：不挂一个空的「下载」标题在那儿 */
+    box.hidden = !shows.length && !downloadState.busy;
+    if (typeof box.setAttribute === 'function') {
+      if (box.hidden) box.setAttribute('hidden', '');
+      else box.removeAttribute('hidden');
+    }
+    var signature = librarySig(shows);
+    if (list.__iosLibrarySig === signature) return true;
+    list.__iosLibrarySig = signature;
+    if (typeof list.removeChild === 'function') {
+      while (list.firstChild) list.removeChild(list.firstChild);
+    } else if (list.children) {
+      list.children.length = 0;
+    }
+    for (var s = 0; s < shows.length; s++) {
+      list.appendChild(libraryItem(shows[s]));
+    }
+    return true;
+  }
+
+  function libraryItem(show) {
+    var item = document.createElement('div');
+    item.className = 'ios-dl-show';
+    if (typeof item.setAttribute === 'function') item.setAttribute('data-show', show.id);
+    if (show.cover) {
+      var cover = document.createElement('img');
+      cover.className = 'ios-dl-cover';
+      cover.src = show.cover;
+      cover.alt = show.title;
+      item.appendChild(cover);
+    }
+    var meta = document.createElement('div');
+    meta.className = 'ios-dl-meta';
+    var name = document.createElement('div');
+    name.className = 'ios-dl-name';
+    name.textContent = show.title;
+    meta.appendChild(name);
+    var count = document.createElement('div');
+    count.className = 'ios-dl-count';
+    /* 总集数不知道就不写分母：宁可少写，也不编一个错的。 */
+    count.textContent = '已下载 ' + show.eps.length + (show.total > 0 ? '/' + show.total : '') + ' 集';
+    meta.appendChild(count);
+    var eps = document.createElement('div');
+    eps.className = 'ios-dl-eps';
+    for (var e = 0; e < show.eps.length; e++) {
+      var chip = document.createElement('span');
+      chip.className = 'ios-dl-ep';
+      chip.textContent = show.eps[e].label || ('第' + show.eps[e].key + '集');
+      eps.appendChild(chip);
+    }
+    meta.appendChild(eps);
+    item.appendChild(meta);
+    return item;
   }
 
   /* ---------- 设置面板：任何页面都能打开，首页也有 ---------- */
@@ -689,9 +1029,13 @@
   function mountDownloadPanel() {
     var container = downloadRoot();
     if (!container || typeof container.appendChild !== 'function') return false;
+    /* 先片库（下了哪些剧、哪几集），再正在下载的进度条：从上往下读就是用户想问的顺序。 */
+    var lib = downloadLibraryElement();
+    if (lib.parentNode !== container) container.appendChild(lib);
     var box = downloadBoxElement();
     if (box.parentNode !== container) container.appendChild(box);
     downloadPanelMounted = true;
+    renderDownloadLibrary();
     return true;
   }
 
@@ -754,7 +1098,7 @@
 
     var bar = document.createElement('div');
     bar.id = 'ppCtrl';
-    bar.className = 'pp-ctrl';
+    bar.className = 'pp-ctrl' + (ctrlHidden && immersiveNow() ? ' pc-hidden' : '');
 
     function barButton(id, label, aria) {
       var element = document.createElement('button');
@@ -829,6 +1173,7 @@
     routeNativeFullscreen(video);
     syncCtrl();
     syncDownloadRow();
+    syncCtrlVisibility();
     return true;
   }
 
@@ -985,7 +1330,9 @@
   }
 
   /* ---------- 外放 / 下载菜单 ---------- */
-  var downloadState = { id: '', name: '', path: '', busy: false, percent: 0 };
+  var downloadState = { id: '', name: '', show: '', ep: '', path: '', busy: false, percent: 0 };
+  /* 这一集的剧名/封面/总集数/集号：下载完成时才能把「哪部剧的哪一集」记进片库。 */
+  var pendingMeta = null;
   var LINK_UNSUPPORTED = '这条线路是加密或临时流，没法交给其他 App；换一条线路再试。';
 
   /* 登录门控的唯一依据：站点自己的账号 token（注入层与站点同源，读的是同一份）。 */
@@ -1081,6 +1428,7 @@
       else if (typeof downloadOpen.setAttribute === 'function') downloadOpen.setAttribute('hidden', '');
     }
     syncToolDownload();
+    renderDownloadLibrary();
     saveDownload();
   }
 
@@ -1281,10 +1629,22 @@
       return;
     }
     var name = downloadName();
-    downloadState = { id: 'dl' + Date.now(), name: name, path: '', busy: true, percent: 0 };
+    var meta = showMeta();
+    meta.epKey = episodeKey();
+    meta.epLabel = episodeLabel() || (meta.total === 1 ? '正片' : '');
+    pendingMeta = meta;
+    downloadState = { id: 'dl' + Date.now(), name: name, show: meta.title, ep: meta.epLabel, path: '', busy: true, percent: 0 };
     syncDownloadRow();
     saveDownload(true);
-    postNative({ action: 'download', id: downloadState.id, url: url, name: name, signedIn: true });
+    postNative({
+      action: 'download', id: downloadState.id, url: url, name: name, signedIn: true,
+      /* 原生层只有拿到这组元数据，才能在 App 被回收后把这一集归到正确的剧名下 */
+      meta: {
+        id: meta.id || '', title: meta.title || '', cover: meta.cover || '',
+        total: meta.total || 0, epKey: meta.epKey === undefined ? '' : String(meta.epKey),
+        epLabel: meta.epLabel || '',
+      },
+    });
     announce('开始下载 ' + name);
   }
 
@@ -1325,6 +1685,8 @@
       return;
     }
     if (event === 'done') {
+      recordDownloaded(payload, pendingMeta);
+      pendingMeta = null;
       downloadState.busy = false;
       downloadState.percent = 100;
       downloadState.path = payload.path || '';
@@ -1337,6 +1699,7 @@
     downloadState.percent = 0;
     downloadState.error = event === 'cancelled' ? '已取消' : (payload.reason || '下载失败');
     downloadState.path = '';
+    pendingMeta = null;
     syncDownloadRow();
     saveDownload(true);
     if (event === 'cancelled') announce('已取消下载');
@@ -1446,6 +1809,15 @@
       setRate(target.dataset.rate);
       return true;
     }
+    /* 全屏里点一下画面 = 拿出控制栏；再点一下收起。
+       点在控制栏（包括倍速/外放菜单）上不算“点画面”：
+       这里只把自动收起的计时重新排上。 */
+    if (immersiveNow()) {
+      if (hit(target, 'ppCtrl')) { hideCtrlSoon(); return false; }
+      if (ctrlHidden) showCtrl(true);
+      else setCtrlHidden(true);
+      syncCtrl();
+    }
     return false;
   }
 
@@ -1453,6 +1825,9 @@
     document.addEventListener(name, function (event) {
       if (!event.target || event.target.id !== 'video') return;
       syncCtrl();
+      /* 全屏里播放时把控制栏收起来，暂停时再拿出来：用户不碰屏幕就只剩画面。 */
+      if (name === 'pause') showCtrl(false);
+      else if (name === 'play') hideCtrlSoon();
     }, true);
   });
   document.addEventListener('input', function (event) {
@@ -1724,6 +2099,8 @@
     mountDownloadPanel();
     syncDownloadRow();
   }
+  /* 问一次原生：后台下载可能在我们不知情时跑完了 */
+  setTimeout(function () { postNative({ action: 'downloadSync' }); }, 800);
 
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', prepareLayout, { once: true });

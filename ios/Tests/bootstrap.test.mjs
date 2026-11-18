@@ -42,6 +42,14 @@ function node(tag = 'div') {
       const index = siblings.indexOf(element);
       return index >= 0 ? siblings[index + 1] : undefined;
     },
+    get firstChild() { return element.children.length ? element.children[0] : null; },
+    removeChild(child) {
+      const at = element.children.indexOf(child);
+      if (at >= 0) element.children.splice(at, 1);
+      child.parentNode = null;
+      return child;
+    },
+    hasAttribute(name) { return name === 'hidden' ? !!element.hidden : name in element; },
     closest(selector) { return selector === '#' + element.id ? element : null; },
     querySelector(selector) {
       const want = String(selector).replace(/^\./, '');
@@ -145,6 +153,11 @@ function fixture({ origin = 'https://zhuiju.dpdns.org', storageThrows = false, l
   const searchInput = node('textarea');
   searchInput.id = 'q';
   searchInput.value = keyword;
+  /* 播放页详情头：片库要拿它当剧名和封面（比文件名靠谱，也不用猜） */
+  const detailTitle = node('h1');
+  detailTitle.textContent = '测试剧';
+  const posterImage = node('img');
+  posterImage.src = 'https://zhuiju.dpdns.org/posters/fixture.jpg';
   const hint = node('p');
   hint.id = 'playHint';
   hint.textContent = '';
@@ -231,6 +244,7 @@ function fixture({ origin = 'https://zhuiju.dpdns.org', storageThrows = false, l
     return child;
   };
   const document = { readyState: 'loading', visibilityState: 'visible', head, body,
+    title: '测试剧 - 看剧AI',
     addEventListener(name, listener) { (listeners[name] ||= []).push(listener); },
     removeEventListener(name, listener) {
       const list = listeners[name] || [];
@@ -269,6 +283,8 @@ function fixture({ origin = 'https://zhuiju.dpdns.org', storageThrows = false, l
     createElement(tag) { return node(tag); },
     querySelector(selector) {
       if (selector === '.ep.on') return noSelectedEpisode ? null : selected;
+      if (selector === '.detail-info h1') return homePage ? null : detailTitle;
+      if (selector === '.detail-poster img') return homePage ? null : posterImage;
       if (selector === '[data-action="login"]') return loginTrigger;
       if (selector === '.pp-tabs') return tabRow;
       if (selector === '[data-action="settings"]') return settingsTrigger;
@@ -276,6 +292,7 @@ function fixture({ origin = 'https://zhuiju.dpdns.org', storageThrows = false, l
     },
     querySelectorAll(selector) {
       if (selector === '.ep') return epButtons;
+      if (selector === '#epGrid .ep') return epButtons;
       if (selector === '.pp-tab') return tabButtons;
       if (selector === '.sb-name') return [sbName];
       if (selector === '.sb-sub') return [sbSub];
@@ -1279,4 +1296,137 @@ test('the toolbar download button asks for login instead of transferring', () =>
   assert.equal(state.messages.length, 0, '未登录不许发起传输');
   assert.equal(state.loginTrigger.opens, 1, '要顺手打开站点登录弹窗');
   assert.match(state.toastText(), /登录后才能下载/);
+});
+
+/* ---------- REG-006 设置里的「下载」要像片库，不是一条临时进度 ---------- */
+
+const librarySeed = {
+  shows: [
+    {
+      id: 'show-a', title: '百日谎言', cover: 'https://zhuiju.dpdns.org/posters/a.jpg', total: 12,
+      eps: [
+        { key: '18', label: '第19集', name: '追剧AI_第19集.mp4', path: '/tmp/a19.mp4', size: 1, at: 20 },
+        { key: '19', label: '第20集', name: '追剧AI_第20集.mp4', path: '/tmp/a20.mp4', size: 1, at: 21 },
+      ],
+    },
+    {
+      id: 'movie-b', title: '某部电影', cover: '', total: 0,
+      eps: [{ key: '0', label: '正片', name: '追剧AI_正片.mp4', path: '/tmp/b.mp4', size: 2, at: 10 }],
+    },
+  ],
+};
+
+test('the settings sheet lists downloaded shows with covers, episodes and totals', () => {
+  const state = fixture({ homePage: true, seed: { 'kj-ios-downloads': JSON.stringify(librarySeed) } });
+  state.ready();
+  state.click(state.document.querySelector('[data-action="settings"]'));
+
+  const library = state.document.getElementById('iosDownloadLibrary');
+  assert.ok(library, '设置面板里要有「下载」片库');
+  assert.equal(library.hidden, false, '有下载记录时片库必须显示');
+  const list = state.document.getElementById('iosDlShows');
+  const items = list.querySelectorAll('.ios-dl-show');
+  assert.equal(items.length, 2, '两部片子各占一条');
+
+  const show = items[0];
+  const cover = show.querySelector('.ios-dl-cover');
+  assert.ok(cover, '片名旁边要有封面');
+  assert.equal(cover.src, 'https://zhuiju.dpdns.org/posters/a.jpg');
+  assert.equal(cover.alt, '百日谎言');
+  assert.equal(show.querySelector('.ios-dl-name').textContent, '百日谎言');
+  assert.equal(show.querySelector('.ios-dl-count').textContent, '已下载 2/12 集');
+  const chips = show.querySelector('.ios-dl-eps').querySelectorAll('.ios-dl-ep');
+  assert.deepEqual(chips.map((chip) => chip.textContent), ['第19集', '第20集'], '每部剧要列出下了哪几集');
+
+  const movie = items[1];
+  assert.equal(movie.querySelector('.ios-dl-cover'), null, '没有封面就不摆一张假图');
+  assert.equal(movie.querySelector('.ios-dl-count').textContent, '已下载 1 集', '总集数未知时不许编一个分母');
+  assert.equal(movie.querySelector('.ios-dl-eps').querySelectorAll('.ios-dl-ep')[0].textContent, '正片');
+});
+
+test('the download library stays out of the way when nothing was downloaded', () => {
+  const state = fixture({ homePage: true });
+  state.ready();
+  state.click(state.document.querySelector('[data-action="settings"]'));
+  const library = state.document.getElementById('iosDownloadLibrary');
+  assert.ok(library, '结构在，但不该占着位置');
+  assert.equal(library.hidden, true, '没下过东西就别只挂一个空的「下载」标题');
+});
+
+test('a finished download joins the library with its show, episode and total', () => {
+  const state = fixture({ signedIn: true, episodes: ['18'] });
+  state.ready();
+  state.click(state.document.getElementById('ppToolDownload'));
+  const message = state.messages.at(-1);
+  assert.equal(message.action, 'download');
+  state.window.__zhuijuDownload({ id: message.id, event: 'done', path: '/tmp/x.mp4', name: '追剧AI_第19集.mp4', size: 10485760 });
+
+  const saved = JSON.parse(state.storage['kj-ios-downloads']);
+  assert.equal(saved.shows.length, 1, '下完一集就要记进片库');
+  assert.equal(saved.shows[0].title, '测试剧', '用详情页标题当剧名，不用文件名');
+  assert.equal(saved.shows[0].cover, 'https://zhuiju.dpdns.org/posters/fixture.jpg');
+  assert.equal(saved.shows[0].total, 1, '选集按钮数就是已知总集数');
+  assert.equal(saved.shows[0].eps[0].label, '第19集');
+  assert.equal(saved.shows[0].eps[0].path, '/tmp/x.mp4');
+
+  state.click(state.document.querySelector('[data-action="settings"]'));
+  const item = state.document.getElementById('iosDlShows').querySelector('.ios-dl-show');
+  assert.equal(item.querySelector('.ios-dl-count').textContent, '已下载 1/1 集');
+
+  /* 换页/重启：状态落在 localStorage，新页面靠它把片库摆回来 */
+  const reloaded = fixture({ homePage: true, seed: { 'kj-ios-downloads': state.storage['kj-ios-downloads'] } });
+  reloaded.ready();
+  reloaded.click(reloaded.document.querySelector('[data-action="settings"]'));
+  const again = reloaded.document.getElementById('iosDlShows').querySelector('.ios-dl-show');
+  assert.ok(again, '重启后片库还要在');
+  assert.equal(again.querySelector('.ios-dl-count').textContent, '已下载 1/1 集');
+});
+
+test('the running download shows its show, episode and percent in the library', () => {
+  const state = fixture({
+    homePage: true,
+    seed: {
+      'kj-ios-download': JSON.stringify({
+        id: 'dl9', name: '追剧AI_第21集.mp4', show: '百日谎言', ep: '第21集',
+        busy: true, percent: 42, state: 'running',
+        /* 真机上这段是开始下载时就落盘的：换页后完成事件靠它归到正确的剧名下 */
+        meta: { id: 'show-a', title: '百日谎言', cover: 'https://zhuiju.dpdns.org/posters/a.jpg', total: 12, epKey: '20', epLabel: '第21集' },
+      }),
+      'kj-ios-downloads': JSON.stringify(librarySeed),
+    },
+  });
+  state.ready();
+  state.click(state.document.querySelector('[data-action="settings"]'));
+  const running = state.document.getElementById('iosDlRunning');
+  assert.ok(running, '正在下载的那一集要有一行');
+  assert.equal(running.hidden, false);
+  assert.match(running.textContent, /正在下载/);
+  assert.match(running.textContent, /百日谎言/, '要说是哪部剧');
+  assert.match(running.textContent, /第21集/, '还要说是哪一集');
+  assert.match(running.textContent, /42%/, '进度要实时');
+
+  state.window.__zhuijuDownload({ id: 'dl9', event: 'progress', received: 60, total: 100 });
+  assert.match(state.document.getElementById('iosDlRunning').textContent, /60%/);
+
+  state.window.__zhuijuDownload({ id: 'dl9', event: 'done', path: '/tmp/a21.mp4', name: '追剧AI_第21集.mp4', size: 3 });
+  const saved = JSON.parse(state.storage['kj-ios-downloads']);
+  const show = saved.shows.find((entry) => entry.title === '百日谎言');
+  assert.equal(show.total, 12, '站点给过的总集数不能被一次完成事件抹掉');
+  assert.deepEqual(show.eps.map((entry) => entry.label), ['第19集', '第20集', '第21集'], '按集号排队，不丢旧记录');
+});
+
+/* ---------- REG-007 后台下载：网页要把「哪部剧的哪一集」交给原生 ---------- */
+
+test('the download request carries the show info the native side needs after a relaunch', () => {
+  const state = fixture({ signedIn: true, episodes: ['18'] });
+  state.ready();
+  state.click(state.document.getElementById('ppToolDownload'));
+  const message = state.messages.at(-1);
+  assert.equal(message.action, 'download');
+  assert.ok(message.meta, '下载请求要带剧名/封面/总集数：换页或重启后原生才知道这一集属于哪部剧');
+  assert.equal(message.meta.title, '测试剧');
+  assert.equal(message.meta.cover, 'https://zhuiju.dpdns.org/posters/fixture.jpg');
+  assert.equal(String(message.meta.total), '1', '总集数来自选集按钮，不能编');
+  assert.equal(message.meta.epLabel, '第19集');
+  assert.equal(String(message.meta.epKey), '18');
 });

@@ -17,6 +17,8 @@ final class WebViewController: UIViewController {
         /// 下载一集到沙盒（网页已做过登录门控，这里再核一次）。
         case download
         case cancelDownload
+        /// 网页回到前台/刚加载：把后台会话里的最新状态和终态补给它。
+        case downloadSync
         /// 下载完成后用系统应用列表打开本地文件。
         case openLocal
     }
@@ -62,6 +64,8 @@ final class WebViewController: UIViewController {
                 target?.presentExternalShare(url: body["url"] as? String, title: body["title"] as? String)
             case PlayerAction.download.rawValue:
                 target?.beginDownload(body)
+            case PlayerAction.downloadSync.rawValue:
+                target?.flushDownloadEvents()
             case PlayerAction.cancelDownload.rawValue:
                 target?.cancelDownload()
             case PlayerAction.openLocal.rawValue:
@@ -77,7 +81,7 @@ final class WebViewController: UIViewController {
     private let errorLabel = UILabel()
     private let retryButton = UIButton(type: .system)
     private var progressObservation: NSKeyValueObservation?
-    private let downloader = MediaDownloader()
+    private let downloader = MediaDownloader.shared
     private var lastFailedURL: URL?
     private var safeAreaConstraints: [NSLayoutConstraint] = []
     private var fullscreenConstraints: [NSLayoutConstraint] = []
@@ -141,7 +145,23 @@ final class WebViewController: UIViewController {
         configureLayout()
         configureErrorView()
         observeProgress()
+        /* 从后台回来时把后台会话的最新进度/终态补到网页上：
+           切出去下载时网页是挂起的，收不到 delegate 回调。 */
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(appDidBecomeActive),
+            name: UIApplication.didBecomeActiveNotification,
+            object: nil
+        )
         loadHome()
+    }
+
+    @objc private func appDidBecomeActive() {
+        flushDownloadEvents()
+    }
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
     }
 
     override var preferredStatusBarStyle: UIStatusBarStyle {
@@ -245,6 +265,7 @@ final class WebViewController: UIViewController {
             id: id,
             url: link,
             name: name,
+            meta: body["meta"] as? [String: Any],
             onProgress: { [weak self] received, total in
                 self?.sendDownloadEvent([
                     "event": "progress", "id": id,
@@ -267,6 +288,16 @@ final class WebViewController: UIViewController {
 
     fileprivate func cancelDownload() {
         downloader.cancel()
+    }
+
+    /// 把后台会话里的状态补回网页：进度每次都可以重发，完成/失败/取消只发一次。
+    fileprivate func flushDownloadEvents() {
+        downloader.restore { [weak self] in
+            guard let self = self else { return }
+            for event in self.downloader.eventsForPage() {
+                self.sendDownloadEvent(event)
+            }
+        }
     }
 
     /// 把下载好的本地文件交给系统：文件类型（public.movie / public.mpeg-4）是

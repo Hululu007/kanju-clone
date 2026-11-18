@@ -144,6 +144,93 @@ node --test --test-name-pattern='landscape playback goes immersive again' ios/Te
 - **验证边界**：按钮位置与状态文案已在模拟器真读 `getComputedStyle` 确认；真实传输进度仍依赖原生
   `MediaDownloader`，靠真机看百分比是否跟着走。
 
+## REG-005 横屏全屏上方那条 60px 深灰遮罩；控制栏一直挂着
+
+- **现象**：横屏全屏播放时画面上方压着一条约 60px 高的深灰色渐变带，把画面顶部整段挡住
+  （真机截图 11:12 里就是它）。底部控制栏一直显示并带着黑色渐变底，即使正在播放也不收起。
+- **复现步骤**：
+  1. 进任意剧集播放页，点播放。
+  2. 点底部「全屏」进横屏全屏。
+  3. 观察：画面上方有一条深灰带；底部控制栏常显。
+  4. 点一下画面：没有任何反应（既不会收起也不会再出现）。
+- **根因**（`ios/ZhuijuAI/AppBootstrap.js` + 站点 `src/styles.css`）：
+  1. 站点移动端把滚动容器写成 `.main{margin-top:60px;height:calc(100vh - 60px)}`，注入层又给
+     `.main` 加了 `-webkit-overflow-scrolling:touch`。WebKit 会把容器里的 `position:fixed`
+     收编成相对这个滚动容器定位，于是 `#player` 的 `inset:0` 只铺满了 `.main` 那一块
+     （高度正好是 `100vh - 60px`），顶部 60px 漏出 `html` 的渐变背景 —— 就是那条遮罩。
+  2. `#ppCtrl` 只有「始终显示」一种状态：点画面不会切换，也没有自动收起，底部渐变一直在。
+- **修复**：
+  - 沉浸态把 `.main` 本身铺满整屏（`position:fixed;inset:0;height:100%;margin:0;overflow:hidden;
+    -webkit-overflow-scrolling:auto`）：不管 fixed 以视口还是以它为参照，`#player` 都正好盖住屏幕。
+  - 控制栏新增 `pc-hidden`（整条 `opacity:0;visibility:hidden;pointer-events:none`，不留渐变/遮罩）：
+    进全屏且正在播放直接收起；点一下画面叫出来；3 秒不动自动收起；再点一下立即收起；暂停时留着；
+    退出全屏恢复常显。
+- **测试名**（模拟器，真 WKWebView）：
+  - `InjectedUITests.testFullscreenCoversTheWholeScreenAndHidesItsControls`
+    （读 `getBoundingClientRect` 确认 `#player` 和 `.main` 都是 0,0,844,390；`elementFromPoint` 确认
+    屏幕最上面一行已经是视频、底部没有残留底栏；再验点一下出现 / 再点收起 / 3 秒自动收起 / 退出恢复）
+- **修复版本**：0.1.12
+- **验证边界**：模拟器里 `position:fixed` **不会**被 `.main` 收编（`#player` 一直是 0,0,844,390），所以真机那条
+  60px 遮罩在模拟器上复现成「容器仍是 0,60,844,330 + 控制栏不收」。也就是说这条用例钉住的是修复本身
+  （滚动容器必须铺满 + 控制栏收起），不是真机 WebKit 的具体行为了；真机仍需确认顶部没有残留。
+
+## REG-006 设置里的下载只有一条进度，看不到下了哪些剧
+
+- **现象**：设置面板里只有「下载进度：63%」一根条；下过哪些剧、每部下了哪几集、共几集都看不到。
+- **复现步骤**：
+  1. 下载某一集的 MP4 直链，完成后再换一集、甚至可以换一部剧。
+  2. 回首页点顶栏设置图标（或播放页的「显示设置」）。
+  3. 观察：只有最近一条进度，没有任何片库信息。
+- **根因**：下载状态只有 `kj-ios-download` 这一条「当前任务」；完成事件只更新它，不记录剧名 / 封面 /
+  集号 / 总集数；设置面板也只渲染这一个进度块。原生下载一次一集，网页侧没有别的地方能知道下过什么。
+- **修复**：新增 `kj-ios-downloads` 片库（按站点媒体 id 分组，拿不到 id 时退回剧名，同一部剧不会碎成两条）。
+  下载开始时用 `showMeta()` 记下剧名 / 封面 / 总集数（总集数来自 `#epGrid .ep` 数量或「显示全部 N 集」，
+  电影/单集记 1，取不到就记 0），完成时把集号 / 集名 / 路径 / 大小写进去。设置面板按剧渲染：
+  封面 + 片名 + 「已下载 N/M 集」+ 每集小签，最上面还有正在下载那一集的剧名 / 集号 / 百分比。
+  **总集数未知时只写「已下载 N 集」，不编分母**；没有封面的片子不摆假图。
+- **测试名**（Node 夹具）：
+  - `the settings sheet lists downloaded shows with covers, episodes and totals`
+  - `the download library stays out of the way when nothing was downloaded`
+  - `a finished download joins the library with its show, episode and total`（含换页/重启后仍在）
+  - `the running download shows its show, episode and percent in the library`
+- **测试名**（模拟器）：`InjectedUITests.testSettingsSheetListsDownloadedShowsAndTheRunningTask`
+- **修复版本**：0.1.12
+- **验证边界**：封面是站点海报 URL，离线时需要联网才显示（离线就是底色块）；真实下载进度仍靠原生回传。
+
+## REG-007 下载一离开前台就停
+
+- **现象**：点下载后切到别的 App 或锁屏，下载停在原处，回来才继续；App 被系统回收后连进度都没了。
+- **复现步骤**：
+  1. 播放一集 MP4 直链，点「下载本集」。
+  2. 立刻回主屏（或锁屏）停留半分钟。
+  3. 回到 App：进度没有前进（0.1.11 用的是前台 `URLSession`）。
+- **根因**：`MediaDownloader` 用 `URLSessionConfiguration.default`，会话只在 App 前台跑；
+  任务和状态只在内存里，进程被回收就全丢；`AppDelegate` 也没有实现后台会话回调，
+  后台跑完的事件交不回网页。
+- **修复**：
+  - 改用 `URLSessionConfiguration.background(withIdentifier: "org.dpdns.zhuiju.ios.downloads")`
+    （`isDiscretionary=false`、`sessionSendsLaunchEvents=true`）。
+  - 任务 / 进度 / 终态落 `kj-ios-download-tasks`（UserDefaults），`taskDescription` = 网页给的下载 id。
+  - `AppDelegate` 实现 `application(_:handleEventsForBackgroundURLSession:completionHandler:)`；
+    回到前台（`didBecomeActive`）或网页发 `downloadSync` 时重放状态：进度可重复，完成/失败/取消只交一次。
+  - 后台跑完发本地通知（首次下载时请求授权，**拒绝授权不影响下载**）。
+  - 进程被回收后重新拉起：`getAllTasks` 对账，任务已经不在了就如实标「下载被系统中断」，
+    绝不标完成。取消/失败也不会写成完成。
+- **支持范围**：MP4 / M4V / MOV / MKV / TS 的 https 直链可下；HLS（`.m3u8`）仍然如实拒绝、不会标完成。
+- **测试名**（模拟器 XCTest，真的 URLSession + 本地 http 服务）：
+  - `DownloadBackgroundTests.testAppDelegateAnswersTheBackgroundSessionCallback`
+  - `DownloadBackgroundTests.testStartingADownloadPersistsTheTaskSoItCanBeRecovered`
+  - `DownloadBackgroundTests.testCompletedDownloadIsRecordedAsDoneWithTheRealFile`
+  - `DownloadBackgroundTests.testCancelledDownloadIsRecordedAsCancelledNotDone`
+  - `DownloadSessionTests.testDownloadSessionIsBackgroundAndNamedForRelaunch`
+  - `DownloadSessionTests.testRelaunchMarksOrphanedTasksAsInterruptedInsteadOfDone`
+  - `DownloadSessionTests.testFinishedDownloadIsReplayedToThePageOnlyOnce`
+  - `DownloadSessionTests.testRunningDownloadKeepsReportingProgress`
+  - `DownloadSessionTests.testCompletionDoesNotDependOnNotificationPermission`
+- **修复版本**：0.1.12
+- **验证边界**（交 phone-test 真机）：锁屏/切后台是否真的继续传、系统给的后台时长、本地通知在真实通知
+  中心的样子、用户强杀 App 后的表现。模拟器证明的是「用了后台会话、状态能持久化并对账」，不是「永久后台运行」。
+
 ## 模拟器验收记录
 
 `InjectedUITests` 在 GitHub Actions 的 `macos-15` + iOS 模拟器上跑（`ios-unsigned.yml` 的
@@ -155,6 +242,7 @@ node --test --test-name-pattern='landscape playback goes immersive again' ios/Te
 | [44214561047](https://github.com/kenzhao11/kanju-clone/actions/runs/44214561047) | 本分支（0.1.10） | 7 条全绿 + Node 接口测试全绿 + Release 包编译通过 |
 | [44222400396](https://github.com/kenzhao11/kanju-clone/actions/runs/44222400396) | 0.1.10 的 `AppBootstrap.js`（对照分支，已删） | 头栏那条**红**：`replayed=true/none/none/block`（片名小签收起了，顶上头栏还是 block）；工具条下载按钮那条也红（按钮不存在） |
 | [44221519568](https://github.com/kenzhao11/kanju-clone/actions/runs/44221519568) | 本分支（0.1.11） | 模拟器 26 条全绿 + Node 76 项全绿 + Release 包编译通过 |
+| [44233858043](https://github.com/kenzhao11/kanju-clone/actions/runs/44233858043) | **只含新测试**的 0.1.12 分支（修复前） | 模拟器 32 条里 **16 条红**：`main=[0,60,844,330]`、`barHidden=false`、`missing-library`、后台任务没有落盘、AppDelegate 不接后台会话 |
 
 0.1.9 那次的具体失败（可直接对照现象）：
 
