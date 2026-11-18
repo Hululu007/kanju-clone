@@ -806,7 +806,8 @@ final class InjectedUITests: XCTestCase, WKNavigationDelegate {
           return JSON.stringify(seen);
         })();
         """)
-        let seen = try XCTUnwrap(cycled as? [String])
+        let seenText = try XCTUnwrap(cycled as? String)
+        let seen = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(seenText.utf8)) as? [String])
         XCTAssertEqual(seen.count, 3)
         XCTAssertEqual(seen[0], "裁剪|cover|cover|cover", "第二档是等比裁边：\(seen)")
         XCTAssertEqual(seen[1], "拉伸|fill|fill|fill", "第三档是不等比填满：\(seen)")

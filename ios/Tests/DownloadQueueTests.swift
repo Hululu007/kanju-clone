@@ -156,6 +156,8 @@ final class DownloadQueueTests: XCTestCase {
         XCTAssertNotNil(reason("http://media.example/19.mp4"), "明文 http 不在支持范围")
         XCTAssertNotNil(reason("blob:https://media.example/abc"))
         XCTAssertNotNil(reason("https://media.example/19.png"), "图片不是视频")
+        XCTAssertNil(reason("http://127.0.0.1:8765/sample.mp4"),
+                     "受控源是本机回环：CI 的真实后台传输就跑在这个地址上")
     }
 
     // MARK: - 暂停 / 继续 / 取消

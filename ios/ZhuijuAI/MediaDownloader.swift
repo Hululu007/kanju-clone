@@ -112,7 +112,11 @@ final class MediaDownloader: NSObject {
     /// 把播放网页当成视频下下来的，是一张 HTML 而不是剧集。
     static func rejection(of url: URL) -> String? {
         let scheme = (url.scheme ?? "").lowercased()
-        if scheme != "https" {
+        let host = (url.host ?? "").lowercased()
+        /* 受控源（CI 的真实后台传输、本地夹具）跑在本机回环的 http 服务上。
+           只放行回环地址；真实片源仍然必须是 https。 */
+        let loopback = ["127.0.0.1", "localhost", "::1"].contains(host)
+        if scheme != "https" && !(scheme == "http" && loopback) {
             return "只支持 https 直链下载，这条线路是 \(scheme.isEmpty ? "未知协议" : scheme)"
         }
         if url.host?.isEmpty != false { return "这条线路没有有效的主机名" }
@@ -121,6 +125,11 @@ final class MediaDownloader: NSObject {
             return "HLS 分片线路没法整集下载；换一条 MP4 线路再试。"
         }
         if path.hasSuffix(".html") || path.hasSuffix(".htm") {
+            return "这是播放网页，不是视频文件，不能下载"
+        }
+        /* 站点自己的播放页/详情页是没有扩展名的路由：不能拿来当视频下。 */
+        let pageMarkers = ["/player", "/watch", "/detail", "/show/", "/episode"]
+        if path.hasSuffix("/") || pageMarkers.contains(where: { path.contains($0) }) {
             return "这是播放网页，不是视频文件，不能下载"
         }
         let videoExtensions = [".mp4", ".m4v", ".mov", ".mkv", ".ts"]
