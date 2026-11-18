@@ -83,6 +83,23 @@ final class EpisodeDownloadSheetUITests: XCTestCase {
         NSPredicate(format: "label BEGINSWITH %@", label + " ")
     }
 
+    /// 列表在折叠线以下时先滚动再点：直接 tap 会报 "not hittable"，
+    /// 失败信息里只有坐标，看不出是滚动问题还是入口没挂上。
+    private func tapWhenVisible(_ app: XCUIApplication, _ element: XCUIElement, _ web: XCUIElement) {
+        for _ in 0..<4 {
+            if element.isHittable {
+                element.tap()
+                return
+            }
+            web.swipeUp()
+            RunLoop.current.run(until: Date().addingTimeInterval(0.4))
+        }
+        let frame = element.frame
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0, dy: 0))
+            .withOffset(CGVector(dx: frame.midX, dy: frame.midY))
+            .tap()
+    }
+
     // MARK: - 入口：投屏换成了下载
 
     func testTheCastEntryNextToTheEpisodesIsADownloadButtonThatExpandsInPlace() throws {
@@ -150,14 +167,14 @@ final class EpisodeDownloadSheetUITests: XCTestCase {
             _ = fail(app, "sheet-row-20", "展开的列表里没有第20集那一条")
             return
         }
-        row20.tap()
+        tapWhenVisible(app, row20, web)
         RunLoop.current.run(until: Date().addingTimeInterval(0.4))
         XCTAssertNotNil(element(web, containing: "已选 1 集", timeout: 10),
                         "单选一集之后计数没变")
 
         // 全选
         let selectAll = requireElement(app, web, "全选", "select-all", timeout: 10)
-        selectAll.tap()
+        tapWhenVisible(app, selectAll, web)
         RunLoop.current.run(until: Date().addingTimeInterval(0.6))
         XCTAssertNotNil(element(web, containing: "已选 5 集", timeout: 10),
                         "点全选之后没有选中全部 5 集")
@@ -165,7 +182,7 @@ final class EpisodeDownloadSheetUITests: XCTestCase {
 
         // 入队：走的是 0.1.14 那条共享队列（原生并发上限 2）
         let start = requireElement(app, web, "下载已选", "start-batch", timeout: 10)
-        start.tap()
+        tapWhenVisible(app, start, web)
         XCTAssertNotNil(element(web, containing: "下载中", timeout: 60)
                         ?? element(web, containing: "排队", timeout: 60),
                         "点了下载已选之后没有看到任何一集进入下载中/排队")
