@@ -74,6 +74,15 @@ final class LibraryDoneTests: XCTestCase, WKNavigationDelegate {
 
         _ = try await javaScript("""
         (function () {
+          /* 片库/队列/批量记忆都存在 localStorage，测试类之间会互相污染：
+             这里清空，保证每个用例从「什么都没下过」开始（不是放宽断言）。 */
+          try {
+            localStorage.removeItem('kj-ios-downloads');
+            localStorage.removeItem('kj-ios-download');
+            localStorage.removeItem('kj-ios-queue');
+            localStorage.removeItem('kj-ios-batch');
+          } catch (error) { return 'blocked:' + (error && error.name); }
+
           localStorage.setItem('kj-auth-token', 'fixture-token');
           window.fetch = function (input) {
             var address = typeof input === 'string' ? input : (input && input.url) || '';

@@ -104,6 +104,18 @@ final class DownloadQueueUITests: XCTestCase, WKNavigationDelegate {
         await fulfillment(of: [loaded!], timeout: 60)
 
         /* 下载门控读的是站点自己的登录 token（和真机同一条路） */
+        /* 片库/队列/批量记忆都在 localStorage，测试类之间会互相污染：先清空再注入。 */
+        _ = try await javaScript("""
+        (function () {
+          try {
+            localStorage.removeItem('kj-ios-downloads');
+            localStorage.removeItem('kj-ios-download');
+            localStorage.removeItem('kj-ios-queue');
+            localStorage.removeItem('kj-ios-batch');
+            return true;
+          } catch (error) { return false; }
+        })();
+        """)
         _ = try await javaScript("localStorage.setItem('kj-auth-token', 'fixture-token'); true;")
 
         /* 站点会用自己的 /api/play 解析每一集的真实片源。这里换成受控应答：
