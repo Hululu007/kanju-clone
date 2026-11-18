@@ -31,9 +31,10 @@ final class BatchDownloadSmokeUITests: XCTestCase {
         guard web.waitForExistence(timeout: timeout) else { return nil }
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
-            let all = web.descendants(matching: .any)
-            for index in 0..<all.count {
-                let text = labels(of: all.element(boundBy: index))
+            /* 一次取一个快照：网页 DOM 一直在变，element(boundBy:) 逐条解析会报
+               「No matches found for Element at index N」（run44277992694 就是这么错的）。 */
+            for element in web.descendants(matching: .any).allElementsBoundByIndex {
+                let text = labels(of: element)
                 if accept(text) { return text }
             }
             RunLoop.current.run(until: Date().addingTimeInterval(0.4))
