@@ -24,19 +24,27 @@ final class BatchDownloadSmokeUITests: XCTestCase {
         [element.label, element.value as? String ?? "", element.identifier].joined(separator: " | ")
     }
 
-    /// 在页面里轮询任意满足条件的可访问性文案。
+    /// 把网页的可访问性树一次性拍成文本（不再逐条解析元素）。
+    /// 逐条 `element(boundBy:)` / `allElementsBoundByIndex` 在 DOM 变化时会抛
+    /// 「No matches found for Element at index N」——那是测试自己的脆弱，不是产品问题。
+    private func labelTexts(_ app: XCUIApplication) -> [String] {
+        let web = app.webViews.firstMatch
+        guard web.exists, let snapshot = try? web.snapshot() else { return [] }
+        var texts: [String] = []
+        func walk(_ node: XCUIElementSnapshot) {
+            texts.append([node.label, node.value as? String ?? "", node.identifier].joined(separator: " | "))
+            for child in node.children { walk(child) }
+        }
+        walk(snapshot)
+        return texts
+    }
+
     private func waitForLabel(_ app: XCUIApplication, timeout: TimeInterval,
                               _ accept: (String) -> Bool) -> String? {
-        let web = app.webViews.firstMatch
-        guard web.waitForExistence(timeout: timeout) else { return nil }
+        guard app.webViews.firstMatch.waitForExistence(timeout: timeout) else { return nil }
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
-            /* 一次取一个快照：网页 DOM 一直在变，element(boundBy:) 逐条解析会报
-               「No matches found for Element at index N」（run44277992694 就是这么错的）。 */
-            for element in web.descendants(matching: .any).allElementsBoundByIndex {
-                let text = labels(of: element)
-                if accept(text) { return text }
-            }
+            for text in labelTexts(app) where accept(text) { return text }
             RunLoop.current.run(until: Date().addingTimeInterval(0.4))
         }
         return nil
