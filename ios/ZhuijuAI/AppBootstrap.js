@@ -844,6 +844,9 @@
     var info = meta || {};
     var title = String(info.title || '').trim();
     if (!title) return;
+    /* 不伪造完成：只有原生真的把文件落到沙盒、回传了 path 才记进片库 */
+    var savedPath = String((payload && payload.path) || '');
+    if (!savedPath) return;
     var id = String(info.id || title);
     var library = readLibrary();
     var shows = library.shows;
@@ -860,15 +863,21 @@
     var key = info.epKey === undefined || info.epKey === null ? '' : String(info.epKey);
     var record = {
       key: key,
-      label: String(info.epLabel || ''),
+      label: String(info.epLabel || (payload && payload.ep) || ''),
       name: String((payload && payload.name) || ''),
-      path: String((payload && payload.path) || ''),
+      path: savedPath,
       size: Number(payload && payload.size) || 0,
       at: Date.now(),
     };
     var replaced = false;
     for (var e = 0; e < show.eps.length; e++) {
-      if (show.eps[e].key === record.key) { show.eps[e] = record; replaced = true; break; }
+      if (show.eps[e].key === record.key) {
+        /* 重复回传（换页/重启/again）只更新一次：同集同路径同大小直接跳过 */
+        if (show.eps[e].path === record.path && Number(show.eps[e].size) === record.size) return;
+        show.eps[e] = record;
+        replaced = true;
+        break;
+      }
     }
     if (!replaced) show.eps.push(record);
     show.eps.sort(function (a, b) {
@@ -2188,11 +2197,43 @@
     return nodes.slice(start);
   }
 
+  /* 原生 done 事件自带 showId / 集号 / 剧名；旧版事件没有剧名时，
+     从「一键全集」记住的剧信息和最近一次队列快照里补齐，绝不靠当前页面猜。 */
+  function metaFromDone(payload) {
+    var batch = null;
+    var batches = readBatchShows();
+    for (var b = 0; b < batches.length; b++) {
+      if (String(batches[b].id) === String(payload.showId || '')) batch = batches[b];
+    }
+    var task = null;
+    for (var t = 0; t < queueTasks.length; t++) {
+      if (String(queueTasks[t].id) === String(payload.id || '')) task = queueTasks[t];
+    }
+    var meta = showMeta();
+    return {
+      id: String(payload.showId || (batch && batch.id) || meta.id || ''),
+      title: String(payload.title || (batch && batch.title) || (task && task.title) || meta.title || ''),
+      cover: String(payload.cover || (batch && batch.cover) || (task && task.cover) || meta.cover || ''),
+      total: Number(payload.showTotal) || (batch && Number(batch.total)) || (task && Number(task.total)) || Number(meta.total) || 0,
+      epKey: String(payload.epKey || (task && task.epKey) || ''),
+      epLabel: String(payload.ep || (task && task.epLabel) || '')
+    };
+  }
+
   /* 原生层回传：同一个 id 才认，避免换集之后旧任务改乱新状态 */
   window.__zhuijuDownload = function (payload) {
-    /* 换页后本地状态是从 localStorage 恢复的，id 对得上就接着更新 */
-    if (!payload || !downloadState.id || payload.id !== downloadState.id) return;
+    if (!payload) return;
     var event = payload.event;
+    /* 批量任务的 id 和「当前单集」不是同一个：完成事件仍要写进片库。
+       只认带真实落盘路径的 done，按 showId + 集号去重且幂等。 */
+    if (event === 'done' && payload.path && (payload.showId || payload.epKey)) {
+      recordDownloaded(payload, metaFromDone(payload));
+    }
+    /* 单集进度条只对当前这一集响应；其它任务照常入库，不改本集状态 */
+    if (!downloadState.id || payload.id !== downloadState.id) {
+      if (event === 'done') syncDownloadRow();
+      return;
+    }
     if (event === 'progress') {
       var total = Number(payload.total) || 0;
       var received = Number(payload.received) || 0;
@@ -2202,7 +2243,8 @@
       return;
     }
     if (event === 'done') {
-      recordDownloaded(payload, pendingMeta);
+      /* 没有 showId/集号的老式单集事件走原来的 pendingMeta 路径 */
+      if (!payload.showId && !payload.epKey) recordDownloaded(payload, pendingMeta);
       pendingMeta = null;
       downloadState.busy = false;
       downloadState.percent = 100;

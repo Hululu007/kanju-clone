@@ -604,8 +604,13 @@ final class MediaDownloader: NSObject {
             if record.delivered { continue }
             switch record.status {
             case "done":
-                events.append(["event": "done", "id": record.id, "path": record.path, "name": record.name, "size": record.size,
-                               "showId": record.showId ?? "", "epKey": record.epKey ?? "", "ep": record.ep])
+                events.append([
+                    "event": "done", "id": record.id, "path": record.path, "name": record.name, "size": record.size,
+                    "showId": record.showId ?? "", "epKey": record.epKey ?? "", "ep": record.ep,
+                    /* 网页片库靠这些字段把完成项并回同一部剧（重启后也不依赖当前页面） */
+                    "title": record.title, "epLabel": record.ep,
+                    "cover": record.meta["cover"] ?? "", "showTotal": record.meta["total"] ?? "",
+                ])
             case "cancelled":
                 events.append(["event": "cancelled", "id": record.id,
                                "showId": record.showId ?? "", "epKey": record.epKey ?? ""])
@@ -665,6 +670,10 @@ final class MediaDownloader: NSObject {
                 "name": record.name,
                 "path": record.path,
                 "size": record.size,
+                "title": record.title,
+                "epLabel": record.ep,
+                "cover": record.meta["cover"] ?? "",
+                "showTotal": record.meta["total"] ?? "",
             ]
             if record.status == "done" || record.status == "failed" || record.status == "cancelled" { item["event"] = record.status }
             payload.append(item)

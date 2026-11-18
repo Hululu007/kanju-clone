@@ -448,6 +448,38 @@ node --test --test-name-pattern='landscape playback goes immersive again' ios/Te
   晚到」这条路径由确定性状态机测试钉住，真实传输那条只断言「没被污染」。真机上长时间暂停、
   系统杀掉 App 后再续传仍要肉眼验收。
 
+## REG-013 批量全部完成时片库仍是「已下载 0/N 集」
+
+- **现象**：模拟器 09 显示队列 5/5、总进度 100%，但设置里的片库写着「已下载 0/5 集」，
+  下载进度行还是「尚未下载」；5 集明明都落盘了，列表里一部剧都找不到。
+- **复现步骤**：
+  1. 登录，进有 5 集的详情页，点「一键全集」。
+  2. 等 5 条任务全部 `done`（原生记录里 5 条都有真实 path）。
+  3. 打开首页设置 → 下载列表：仍是空的。
+- **根因**：
+  1. `window.__zhuijuDownload` 开头就 `if (!downloadState.id || payload.id !== downloadState.id) return;`
+     批量任务的 id 和「当前单集」的 `downloadState.id` 不是一个，5 条 `done` 全在入口被丢掉；
+  2. 即使收到，`recordDownloaded(payload, pendingMeta)` 用的 `pendingMeta` 只在单集
+     `startDownload()` 里赋值，批量路径没有设置它 → `title` 为空直接 `return`；
+  3. 原生 `done` 事件只带 path/name/size/showId/epKey/ep，不带剧名/总集数/封面，
+     换页或重启后网页侧无从把完成项并回同一部剧。
+- **修复**：
+  - 原生：两条下发路径（`eventsForPage` 与 `emitStateEvents`）的 `done` 事件补上
+    `title / epLabel / cover / showTotal`（总集数用独立字段，不占用字节 `total`）。
+  - 网页：所有 `done`（包括 id 与当前单集不匹配的批量任务）只要带真实 `path`，就经
+    `metaFromDone()` 从事件字段 → 「一键全集」记住的剧信息 → 队列快照补齐元数据，
+    再调用同一个 `recordDownloaded()` 写片库；没有 path 一律不记，绝不伪造完成文件。
+  - `recordDownloaded()` 按 `showId + epKey` 去重；同集同 path 同 size 的重复回传直接跳过，
+    换页/重启/重复 backfill 都幂等，不会重复通知或重复写盘。
+  - 单集老路径（无 showId/epKey 的 done）仍走 `pendingMeta`，REG-009 不回退。
+- **测试名**（模拟器，真 WKWebView + 原生真实 done 事件）：
+  `LibraryDoneTests.testAllFiveFinishedBatchEpisodesAppearInTheDownloadLibrary`
+  （真点一键全集 → 写 5 条真实落盘记录 → 用 `MediaDownloader.eventsForPage()` 生成的 done 事件
+  交给网页 → 断言设置面板「已下载 5/5 集」、剧名与 5 个集号齐全）
+- **修复版本**：0.1.14（build 15）
+- **验证边界**：断言的是网页片库与原生完成事件的绑定；真实片源下载与后台传输由
+  `BackgroundTransferIntegrationTests` 覆盖，真机锁屏/通知仍属真机项。
+
 ## 模拟器验收记录
 
 `InjectedUITests` 在 GitHub Actions 的 `macos-15` + iOS 模拟器上跑（`ios-unsigned.yml` 的
