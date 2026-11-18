@@ -91,8 +91,11 @@ final class MediaDownloader: NSObject {
         var name = fallback.trimmingCharacters(in: .whitespacesAndNewlines)
         /* 调用方给的通常就是「真实剧名 第X集.mp4」，它优先：
            站点直链最后一段往往只是 `19.mp4`，拿它顶掉会把剧名丢掉（REG-009）。
-           只有调用方没给名字时才退回链接里的文件名。 */
-        if name.isEmpty || !videoExtensions.contains(where: { name.lowercased().hasSuffix($0) }) {
+           只有调用方没给名字（或只给了 `video.mp4` 这类占位名）时才退回链接里的文件名。 */
+        let genericNames = ["video", "download", "movie"]
+        let stem = (name as NSString).deletingPathExtension.lowercased()
+        let genericName = name.isEmpty || genericNames.contains(stem)
+        if genericName || !videoExtensions.contains(where: { name.lowercased().hasSuffix($0) }) {
             if let raw = raw, let parsed = URL(string: raw) {
                 let last = parsed.lastPathComponent
                 if !last.isEmpty, videoExtensions.contains(where: { last.lowercased().hasSuffix($0) }) {

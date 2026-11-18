@@ -648,6 +648,8 @@ final class InjectedUITests: XCTestCase, WKNavigationDelegate {
         _ = try await awaitValue("!!document.getElementById('ppToolDownload')")
         let raw = try await javaScript("""
         (function () {
+          /* 先收掉 setUp 里那条占位任务，否则点下去只会取消它 */
+          window.__zhuijuDownload({ id: 'dl1', event: 'cancelled' });
           document.getElementById('video').src = 'https://media.example/19.mp4';
           document.getElementById('ppToolDownload').click();
           var session = navigator.mediaSession || null;
