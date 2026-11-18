@@ -444,7 +444,9 @@ extension MediaDownloader: URLSessionDownloadDelegate {
             if error.domain == NSURLErrorDomain && error.code == NSURLErrorCancelled {
                 Self.fail(id: id, failure: .cancelled)
             } else {
-                Self.fail(id: id, failure: .network(error.localizedDescription))
+                /* 带上 domain/code：模拟器里 4097（nsurlsessiond 没起来）和真正的网络错误
+                   在设置面板里长得一样，排查时必须有据可依。 */
+                Self.fail(id: id, failure: .network("网络中断（\(error.domain) \(error.code)）: \(error.localizedDescription)"))
             }
             return
         }

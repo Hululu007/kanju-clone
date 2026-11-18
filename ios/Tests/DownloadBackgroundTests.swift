@@ -66,9 +66,10 @@ final class DownloadBackgroundTests: XCTestCase {
         XCTAssertEqual(record?["url"] as? String, sampleURL.absoluteString)
     }
 
-    /// 收尾链路：真实临时文件 + 真实的「移进沙盒 / 记大小 / 落盘 / 只回调一次」。
-    /// 不依赖网络，所以模拟器里也稳定；后台会话「锁屏继续传」那一半只能真机验收。
-    func testCompletedDownloadIsMovedIntoTheSandboxAndRecordedAsDone() throws {
+    /// **单元测试**：只验 delegate 收尾那几步（移进沙盒 / 记大小 / 落盘 / 只回调一次）。
+    /// 这里手工调用 delegate，**不是**后台传输的集成验证 —— 真实后台会话的传输、任务 id、
+    /// 文件 hash 与重连一致性由 `BackgroundTransferIntegrationTests` 覆盖。
+    func testDelegateTailMovesTheFileAndRecordsDoneUnit() throws {
         let downloader = MediaDownloader()
         let done = expectation(description: "download finished")
         var failure: String?

@@ -217,10 +217,23 @@ node --test --test-name-pattern='landscape playback goes immersive again' ios/Te
   - 进程被回收后重新拉起：`getAllTasks` 对账，任务已经不在了就如实标「下载被系统中断」，
     绝不标完成。取消/失败也不会写成完成。
 - **支持范围**：MP4 / M4V / MOV / MKV / TS 的 https 直链可下；HLS（`.m3u8`）仍然如实拒绝、不会标完成。
-- **测试名**（模拟器 XCTest，真的 URLSession + 本地 http 服务）：
+- **后台传输由谁执行**：`URLSessionConfiguration.background` 的任务由系统的
+  `com.apple.nsurlsessiond` 执行。headless CI 的模拟器里这个 XPC 服务偶尔没有就绪，
+  后台会话会立刻以 `NSCocoaErrorDomain 4097`（connection to service named
+  com.apple.nsurlsessiond）失败 —— **不是 localhost 不可达**（同一地址前台请求正常）。
+  工作流现在会先 kickstart 该服务并打印 `launchctl print`，测试里也用前台预检把
+  「环境没起来」和「传输真的错了」分开。
+- **测试名**（模拟器 XCTest，**真实后台会话**，系统触发 delegate）：
+  - `BackgroundTransferIntegrationTests.testBackgroundSessionTransfersTheControlledFileAndRecordsItConsistently`
+    （从 CI 的受控 http 源下载 `sample.mp4`：校验任务 id 来自系统、媒体元数据保留、文件大小与
+    SHA-256 和受控源一致、完成记录落盘为 done、重连对账不改状态、终态只交给网页一次）
+  - `BackgroundTransferIntegrationTests.testBackgroundSessionReportsProgressBeforeItFinishes`
+    （进度由系统回调驱动，最终字节数等于文件大小）
+- **测试名**（模拟器 XCTest，单元/状态机）：
   - `DownloadBackgroundTests.testAppDelegateAnswersTheBackgroundSessionCallback`
   - `DownloadBackgroundTests.testStartingADownloadPersistsTheTaskSoItCanBeRecovered`
-  - `DownloadBackgroundTests.testCompletedDownloadIsRecordedAsDoneWithTheRealFile`
+  - `DownloadBackgroundTests.testDelegateTailMovesTheFileAndRecordsDoneUnit`
+    （**只是收尾逻辑的单元测试**，手工调用 delegate；不充当后台传输的集成验证）
   - `DownloadBackgroundTests.testCancelledDownloadIsRecordedAsCancelledNotDone`
   - `DownloadSessionTests.testDownloadSessionIsBackgroundAndNamedForRelaunch`
   - `DownloadSessionTests.testRelaunchMarksOrphanedTasksAsInterruptedInsteadOfDone`
@@ -228,8 +241,9 @@ node --test --test-name-pattern='landscape playback goes immersive again' ios/Te
   - `DownloadSessionTests.testRunningDownloadKeepsReportingProgress`
   - `DownloadSessionTests.testCompletionDoesNotDependOnNotificationPermission`
 - **修复版本**：0.1.12
-- **验证边界**（交 phone-test 真机）：锁屏/切后台是否真的继续传、系统给的后台时长、本地通知在真实通知
-  中心的样子、用户强杀 App 后的表现。模拟器证明的是「用了后台会话、状态能持久化并对账」，不是「永久后台运行」。
+- **验证边界**（交 phone-test 真机）：模拟器证明了「真后台会话从受控源把文件传完、delegate 由系统触发、
+  内容 hash 对得上、完成记录与重连一致」；仍未证明的是锁屏/切后台时系统给多少时间、本地通知在真实通知
+  中心的样子、用户强杀 App 后的表现 —— 这些继续列真机项，不能用模拟器结果代替。
 
 ## 模拟器验收记录
 

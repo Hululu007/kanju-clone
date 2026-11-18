@@ -33,6 +33,27 @@ jobs:
           /usr/libexec/PlistBuddy -c 'Add :NSAppTransportSecurity:NSAllowsLocalNetworking bool true' FixtureInfo.plist
           xcodegen generate
 
+      # 后台下载的集成测试由系统的 nsurlsessiond 执行传输。headless 模拟器里这个服务
+      # 偶尔没有就绪，后台会话会直接以 NSCocoaErrorDomain 4097（XPC 连不上）失败 —— 那是
+      # 环境问题，不是本地网络或产品逻辑（同一地址前台请求正常）。这里把它叫起来并留下状态，
+      # 测试本身也会区分「环境没起来」和「传输真的错了」。
+      - name: Wake the simulator background networking daemon
+        run: |
+          set -uo pipefail
+          DEVICE=$(xcrun simctl list devices available -j | python3 -c 'import json,sys; d=json.load(sys.stdin); print(next(x["udid"] for group in d["devices"].values() for x in group if x["name"].startswith("iPhone")))')
+          echo "device=$DEVICE" > nsurlsessiond.log
+          xcrun simctl bootstatus "$DEVICE" -b >> nsurlsessiond.log 2>&1 || true
+          echo "--- before ---" >> nsurlsessiond.log
+          xcrun simctl spawn "$DEVICE" launchctl print system/com.apple.nsurlsessiond >> nsurlsessiond.log 2>&1 || true
+          xcrun simctl spawn "$DEVICE" launchctl kickstart -k system/com.apple.nsurlsessiond >> nsurlsessiond.log 2>&1 || true
+          xcrun simctl spawn "$DEVICE" launchctl bootstrap system /System/Library/LaunchDaemons/com.apple.nsurlsessiond.plist >> nsurlsessiond.log 2>&1 || true
+          open -a Simulator --args -CurrentDeviceUDID "$DEVICE" >> nsurlsessiond.log 2>&1 || true
+          sleep 5
+          echo "--- after ---" >> nsurlsessiond.log
+          xcrun simctl spawn "$DEVICE" launchctl print system/com.apple.nsurlsessiond >> nsurlsessiond.log 2>&1 || true
+          xcrun simctl spawn "$DEVICE" launchctl list >> nsurlsessiond.log 2>&1 || true
+          cat nsurlsessiond.log
+
       # The playback tests only use the Objective-C WKWebView APIs (see PlaybackTests.javaScript),
       # so no WebKit Swift overlay (libswiftWebKit.dylib) is needed at runtime. Do not reintroduce
       # a manual copy of that dylib: it does not exist in the Xcode 16.x simulator toolchain.
