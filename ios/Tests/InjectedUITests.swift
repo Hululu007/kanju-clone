@@ -267,10 +267,12 @@ final class InjectedUITests: XCTestCase, WKNavigationDelegate {
           return label;
         })();
         """)
-        XCTAssertEqual(afterDone as? String, "用播放器打开", "下完就地变成交给播放器 App 的入口：\(String(describing: afterDone))")
+        /* 0.1.12 这里断言的是「变成用播放器打开」，那正是 REG-008 的真机回归，不是需求。
+           这一格必须一直是下载入口：下完再点会重新下载，而不是把文件交给播放器。 */
+        XCTAssertEqual(afterDone as? String, "下载本集", "下完一集之后这一格还是下载入口：\(String(describing: afterDone))")
         message = try await awaitPlayerMessage()
-        XCTAssertEqual(message["action"] as? String, "openLocal", "点一下就交给系统播放器列表：\(message)")
-        XCTAssertEqual(message["path"] as? String, "/tmp/追剧AI_第19集.mp4")
+        XCTAssertEqual(message["action"] as? String, "download", "下完再点还是下载，不是交给播放器：\(message)")
+        XCTAssertNil(message["path"], "这里不能是 openLocal 的本地文件路径")
     }
 
     // MARK: - REG-002 首页设置面板里的下载进度

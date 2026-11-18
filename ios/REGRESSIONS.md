@@ -134,7 +134,8 @@ node --test --test-name-pattern='landscape playback goes immersive again' ios/Te
 - **根因**：0.1.10 为了「点一下就换播放器」把菜单收进了长按，下载作为菜单第三行被一起藏了；
   工具条那排是站点模板渲染的，注入层只挂了控制栏，没有往工具条里加下载入口。
 - **修复**：按用户要求把「弹幕」那一格换成下载 —— 隐藏站点 `#dmBtn`（不删除节点），在同位置插入
-  `#ppToolDownload`：`下载本集` → `下载 43%` → `用播放器打开`（点一下就是交给播放器 App）。
+  `#ppToolDownload`：`下载本集` → `下载 43%` → （0.1.11/0.1.12 曾在这里变成「用播放器打开」，
+  把下载入口弄丢了 —— 见 REG-008；0.1.13 起这一格只做下载/取消）。
   未登录点它仍然只弹站点登录提示；下载中再点是取消（和菜单行为一致）。
 - **测试名**（Node 夹具）：
   - `the toolbar download button takes the danmaku slot and drives the transfer`
@@ -246,6 +247,37 @@ node --test --test-name-pattern='landscape playback goes immersive again' ios/Te
 - **验证边界**（交 phone-test 真机）：模拟器证明了「真后台会话从受控源把文件传完、delegate 由系统触发、
   内容 hash 对得上、完成记录与重连一致」；仍未证明的是锁屏/切后台时系统给多少时间、本地通知在真实通知
   中心的样子、用户强杀 App 后的表现 —— 这些继续列真机项，不能用模拟器结果代替。
+
+## REG-008 工具条上的「下载」被换成了「用播放器打开」
+
+- **现象**（真机原话：「TMD 下载按钮怎么给我换成用播放器打开了！我在哪里下载呢！」）：
+  下载完一集之后，播放器下方工具条里原本写着「下载本集」的那一格变成「用播放器打开」，
+  点下去是把本地文件交给播放器 App，而不是下载。用户下一次想下载（下一集或重下）时，
+  在详情/选集区找不到任何下载入口。
+- **复现步骤**：
+  1. 登录，进任意剧集播放页，点工具条的「下载本集」下一集 MP4 直链，等它完成。
+  2. 回这一集的选集区，看那一格：文字变成「用播放器打开」。
+  3. 换一集想再下载：点这一格只会打开播放器，没有下载。
+- **引入提交**：`2a2ea5a`（0.1.11「Hide the site page header in fullscreen and put download on
+  the tool row」）新增了这一格，`syncToolDownload()` 里 `else if (downloadState.path)` 把文案改成
+  「用播放器打开」，点击分支 `if (downloadState.path) openLocal(); else startDownload();` 跟着改道。
+  0.1.11 当时把「下完直接给播放器」当成了便利，实际是把下载入口弄丢了。
+- **根因**（`ios/ZhuijuAI/AppBootstrap.js`）：同一格承担了两个互斥语义 —— 没有文件时是下载，
+  有文件时是「打开」。`downloadState.path` 是「最近一次下载完成」，不是「当前这一集已下载」，
+  于是下完一集之后，后面每一集这一格都变成播放器入口。站点详情页历史上**没有**其它下载控件
+  （`git log -S"data-download" -- src player` 无结果，批量/全集下载从未实现过），所以这一格就是
+  唯一的下载入口，丢了就真的没地方下载。
+- **修复**：这一格只做下载（`下载本集` → `下载 N%`，下载中再点=取消），不再随 `downloadState.path`
+  变成播放器入口；「用其他播放器播放」保留在「外放」菜单（`#ppOpenLocal`）和设置面板
+  （`#iosOpenDownloaded`），不占用下载那一格。
+- **测试名**（模拟器，真 WKWebView + 原生桥接）：
+  `InjectedUITests.testToolbarDownloadStaysADownloadEntryAfterAFinishedDownload`
+  （先用原生回传的 done 造出「已下完」状态，断言文案仍是「下载本集」、位置还在弹幕那一格、
+  点击发出 `download` 消息而不是 `openLocal`/`share`、下载中/完成后按钮仍是下载、
+  设置-下载列表出现剧名/集号/进度且播放器入口仍单独存在）
+- **测试名**（Node 夹具）：`the toolbar download button never turns into the player entry`
+- **修复版本**：0.1.13（build 14）
+- **验证边界**：真机仍需肉眼确认这一格的位置与点击手感；下载本身的后台行为见 REG-007。
 
 ## 模拟器验收记录
 

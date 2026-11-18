@@ -1283,10 +1283,12 @@ test('the toolbar download button takes the danmaku slot and drives the transfer
   assert.equal(button.textContent, '下载 43%', '进度要显示在按钮上，用户点一下就知道在跑');
 
   state.window.__zhuijuDownload({ id: message.id, event: 'done', path: '/tmp/追剧AI_第19集.mp4', name: '追剧AI_第19集.mp4', size: 10485760 });
-  assert.equal(button.textContent, '用播放器打开', '下完就地变成交给播放器的入口');
+  /* 0.1.12 这里断言的是「变成用播放器打开」——那正是 REG-008 的真机回归，不是需求。
+     这一格必须一直是下载入口；播放器入口在「外放」菜单和设置面板里。 */
+  assert.equal(button.textContent, '下载本集', '下完一集之后这一格还是下载入口');
   state.click(button);
-  assert.equal(state.messages.at(-1).action, 'openLocal');
-  assert.equal(state.messages.at(-1).path, '/tmp/追剧AI_第19集.mp4');
+  assert.equal(state.messages.at(-1).action, 'download', '下完再点也是下载，不是交给播放器');
+  assert.equal(state.messages.at(-1).path, undefined);
 });
 
 test('the toolbar download button asks for login instead of transferring', () => {
@@ -1429,4 +1431,25 @@ test('the download request carries the show info the native side needs after a r
   assert.equal(String(message.meta.total), '1', '总集数来自选集按钮，不能编');
   assert.equal(message.meta.epLabel, '第19集');
   assert.equal(String(message.meta.epKey), '18');
+});
+
+/* ---------- REG-008 工具条那一格永远是下载，不变播放器入口 ---------- */
+
+test('the toolbar download button never turns into the player entry', () => {
+  const state = fixture({ signedIn: true, episodes: ['18'] });
+  state.ready();
+  const button = state.document.getElementById('ppToolDownload');
+  assert.equal(button.textContent, '下载本集');
+
+  state.click(button);
+  const message = state.messages.at(-1);
+  assert.equal(message.action, 'download');
+  state.window.__zhuijuDownload({ id: message.id, event: 'done', path: '/tmp/x.mp4', name: '追剧AI_第19集.mp4', size: 10 });
+  assert.equal(button.textContent, '下载本集', '下完一集之后这一格还要是下载入口');
+
+  /* 再点一次仍然是下载（会开一条新任务），不是把文件交给播放器 */
+  state.click(button);
+  assert.equal(state.messages.at(-1).action, 'download', '下完再点也是下载，不是 openLocal');
+  assert.equal(state.messages.at(-1).path, undefined);
+  assert.equal(button.textContent, '下载 0%');
 });

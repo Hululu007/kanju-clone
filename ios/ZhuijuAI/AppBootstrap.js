@@ -1469,13 +1469,13 @@
     if (downloadState.busy) {
       button.textContent = '下载 ' + (downloadState.percent ? downloadState.percent + '%' : '0%');
       button.className = 'pp-tool on';
-    } else if (downloadState.path) {
-      button.textContent = '用播放器打开';
-      button.className = 'pp-tool on';
-    } else {
-      button.textContent = '下载本集';
-      button.className = 'pp-tool';
+      return;
     }
+    /* 这一格永远是「下载本集」：已经下过一集也不能变成「用播放器打开」，
+       否则下一集就再也找不到下载入口（0.1.12 的真机回归，REG-008）。
+       「用其他播放器播放」继续留在「外放」菜单和设置面板里。 */
+    button.textContent = '下载本集';
+    button.className = 'pp-tool';
   }
 
   function downloadProgressNote() {
@@ -1787,8 +1787,8 @@
     if (hit(target, 'ppToolDownload')) {
       event.preventDefault();
       event.stopImmediatePropagation();
-      if (downloadState.path) openLocal();
-      else startDownload();
+      /* 这一格只做下载/取消下载；把文件交给播放器是菜单里那一行和设置里的按钮。 */
+      startDownload();
       return true;
     }
     if (hit(target, 'ppOpenLocal')) {
