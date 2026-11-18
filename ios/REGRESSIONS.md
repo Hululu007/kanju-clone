@@ -294,6 +294,8 @@ node --test --test-name-pattern='landscape playback goes immersive again' ios/Te
 | [44236687669](https://github.com/kenzhao11/kanju-clone/actions/runs/44236687669) | 本分支（0.1.12 / build 13） | 模拟器 **37 条全绿** + Node **81 项全绿** + Release 包编译通过；`ZhuijuAI-unsigned.ipa` sha256 `0704361af0cb12020d132de893de666fe861569cefd8d55059ccc6df2bd96604` |
 | [44238897789](https://github.com/kenzhao11/kanju-clone/actions/runs/44238897789) | 加上真后台传输集成测试（未签名宿主） | **红**：后台会话 XPC 4097，传输根本没开始（前台预检通过，说明不是本地网络） |
 | [44241110324](https://github.com/kenzhao11/kanju-clone/actions/runs/44241110324) | 本分支第 1 轮整改（ad-hoc 签名的模拟器宿主） | 模拟器 **39 条全绿**（含两条真后台会话传输）+ Node **81 项全绿** + Release 包编译通过；IPA sha256 `caa9e64009be9fa16e238d27008e77b568789257dee320200309d35dd44171a5` |
+| [44247573395](https://github.com/kenzhao11/kanju-clone/actions/runs/44247573395) | 0.1.13 只含新回调测试（修复前） | **红**：`text=用播放器打开`、点击发出 `openLocal` 而不是 `download`（REG-008） |
+| [44248933173](https://github.com/kenzhao11/kanju-clone/actions/runs/44248933173) | 本分支（0.1.13 / build 14） | 模拟器 **40 条全绿** + Node **82 项全绿** + Release 包编译通过；IPA sha256 `abca8058b32931e7e0ad18fa213a45dc49a9ecf619fca3671e3586e2130d66a6` |
 
 0.1.9 那次的具体失败（可直接对照现象）：
 
