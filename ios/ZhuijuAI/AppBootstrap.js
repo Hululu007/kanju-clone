@@ -1186,8 +1186,9 @@
     bar.appendChild(seek);
     barButton('ppCast', '外放', '用其他 App 播放或投屏');
     barButton('ppRate', '1×', '倍速');
-    barButton('ppFull', '全屏', '全屏播放');
+    /* 画面档位放在全屏左边：全屏仍然是控制栏最右端那一个（真机上习惯的位置）。 */
     barButton('ppFit', '适应', '画面比例：适应，点击切换');
+    barButton('ppFull', '全屏', '全屏播放');
 
     /* 外放菜单：分享直链 / 复制直链 / 下载（登录后）/ 用其他播放器打开（下载后） */
     var castMenu = document.createElement('div');
