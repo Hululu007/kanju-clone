@@ -183,15 +183,26 @@ final class EpisodeDownloadSheetUITests: XCTestCase {
         // 入队：走的是 0.1.14 那条共享队列（原生并发上限 2）
         let start = requireElement(app, web, "下载已选", "start-batch", timeout: 10)
         tapWhenVisible(app, start, web)
-        XCTAssertNotNil(element(web, containing: "下载中", timeout: 60)
-                        ?? element(web, containing: "排队", timeout: 60),
-                        "点了下载已选之后没有看到任何一集进入下载中/排队")
+
+        /* 这一批片源就在本机、单集只有几百 KB，5 集几秒钟就跑完：
+           「下载中 / 排队」是瞬时的，单靠它做断言会在慢的机器上漏掉、在快的机器上偶发失败。
+           所以先抓一次瞬时状态（抓到就立刻截图），再用**持久**的证据确认它真的进了共享队列：
+           设置里的下载列表会写「任务 x/y 集」，那是队列快照，不会一闪而过。 */
+        let transient = element(web, containing: "下载中", timeout: 8)
+            ?? element(web, containing: "排队", timeout: 8)
         attach(app, "013-download-queue-states")
 
-        // 队列真的在跑：至少一集是「下载中 N%」或者已完成显示「已下载」
-        let progressed = element(web, containing: "下载中", timeout: 120)
-            ?? element(web, containing: "已下载", timeout: 120)
-        XCTAssertNotNil(progressed, "队列跑了几分钟，仍然没有任何一集显示下载中或已下载")
-        attach(app, "014-download-final-states")
+        let settings = requireElement(app, web, "设置", "settings-entry", timeout: 20)
+        settings.tap()
+        RunLoop.current.run(until: Date().addingTimeInterval(0.8))
+        let queueRow = web.descendants(matching: .any)
+            .matching(NSPredicate(format: "label CONTAINS %@ AND label CONTAINS %@", "任务", "/5 集"))
+            .firstMatch
+        let sawQueue = queueRow.waitForExistence(timeout: 30)
+        attach(app, "014-download-queue-in-settings")
+        XCTAssertTrue(sawQueue,
+                      "点了下载已选之后，设置里没有出现「任务 x/5 集」的队列记录 —— 这一批没有进共享队列")
+        XCTAssertNotNil(transient ?? element(web, containing: "已下载", timeout: 30),
+                        "队列跑完之后每一集都没有显示已下载")
     }
 }
