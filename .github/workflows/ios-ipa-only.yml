@@ -9,6 +9,11 @@ name: Package the unsigned IPA only
 # 构建的代码由 `code_ref` 决定（默认 main），因此可以精确地从某一个已提交的 SHA 出包，
 # 不必把任何改动推到 main。产物名带 commit 前 7 位，便于核对是哪一次提交出的包。
 on:
+  # push 触发器只用于让 GitHub 注册这份工作流（它只需要在默认分支以外存在也能被
+  # workflow_dispatch 调用，但注册发生在 push 事件里）。路径过滤保证它不会因普通提交自动出包。
+  push:
+    paths:
+      - '.github/workflows/ios-ipa-only.yml'
   workflow_dispatch:
     inputs:
       code_ref:
