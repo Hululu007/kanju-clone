@@ -199,8 +199,10 @@ final class InjectedUITests: XCTestCase, WKNavigationDelegate {
     func testToolbarDownloadButtonReplacesTheDanmakuSlot() async throws {
         let raw = try await javaScript("""
         (function () {
-          /* 夹具里预置了一条「正在下载 42%」：先收尾回空闲态，再验按钮本身。 */
+          /* 夹具里预置了一条「正在下载 42%」：先收尾回空闲态，再验按钮本身。
+             下载要一个真实直链，否则注入层会如实拒绝（「还没拿到直链」）。 */
           window.__zhuijuDownload({ id: 'dl1', event: 'cancelled' });
+          document.getElementById('video').src = 'https://media.example/19.mp4';
           var tools = document.getElementById('playTools');
           var dm = document.getElementById('dmBtn');
           var button = document.getElementById('ppToolDownload');
