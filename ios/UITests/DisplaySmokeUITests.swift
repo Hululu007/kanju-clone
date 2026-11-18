@@ -127,7 +127,11 @@ final class DisplaySmokeUITests: XCTestCase {
             if text.contains("中断") || text.contains("失败") || text.contains("不可下载") { return false }
             // 真在下载时：工具条那一格变成「下载 N%」，面板那行是「下载进度：N% / 正在连接」
             if text.contains("%") && (text.contains("下载 ") || text.contains("下载进度：")) { return true }
-            return text.contains("下载进度：") && (text.contains("正在连接") || text.contains("已完成"))
+            if text.contains("下载进度：") && (text.contains("正在连接") || text.contains("已完成")) { return true }
+            // 受控片源只有 6 秒（几百 KB），后台会话可能在我们第一次轮询之前就下完了：
+            // 这时页面会把「用其他播放器播放」那一行放出来并标「已下载」——
+            // 它只在真的有完成文件时才存在，所以也是真实入队/完成的证据，不是常驻文案。
+            return text.contains("用其他播放器播放") && text.contains("已下载")
         }
         let progressText = waitForLabel(app, timeout: 60, enqueued)
         XCTAssertNotNil(progressText,
