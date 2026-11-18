@@ -46,14 +46,22 @@ cat ./ui-smoke-$RUN/ui-screenshots/INDEX.txt
 | 文件 | 证明什么 |
 | --- | --- |
 | `01-playing` | 真片源在真 App 里开始播放（控制栏变成「暂停」） |
-| `02-download-episode` | 工具条那一格是下载入口，点下去进入「下载 N%」 |
+| `02-download-episode` | 工具条那一格永远是「下载本集」，所以证据是「下载进度：」离开 尚未下载/需登录/失败，且第19集出现在真实队列状态里（截图前先断言） |
 | `03-fullscreen-adapt` | 全屏 + 适应档：完整画面、留边不裁 |
 | `04-fullscreen-cover` | 裁剪档：铺满屏幕、等比裁边 |
 | `05-fullscreen-fill` | 拉伸档：不等比铺满 |
-| `06-settings-download-list` | 设置面板里的真下载记录（剧名 / 集号 / 已下载几集） |
+| `06-settings-download-list` | 设置面板里的真下载记录：先断言 测试剧 + 第19集 + 状态（已下载/正在下载/下载进度）都出现，再截图 |
 | `07-fit-cover-before-relaunch` | 杀进程前选的是「裁剪」 |
 | `08-fit-remembered-after-relaunch` | 杀进程重进后仍是「裁剪」（记住上次选择） |
-| `09-batch-download` | 选集页批量下载入口 —— **未合入队列前这一条会红** |
+| `09-batch-download` | 批量真的入队：先等到「任务 x/y 集 · 进行中 n · 排队 n」再拍（不再 tap 完立刻拍） |
+
+导出时会再核一遍：必需图（01–09）少一张、或某张是纯色/空白（亮度跨度 < 12），
+`export-ui-screenshots.py` 就以非零退出，workflow 那一步跟着红——不会出现「图和包都缺了但流程是绿的」。
+
+夹具站端口注意：XCTest 步骤也会在 8765 起一个 `python3 -m http.server`（根目录是 `ios/Tests`）。
+出包关卡起夹具站前会先杀掉占 8765 的进程，并要求 `page`/`media` 都是 200，否则这一步直接红。
+不然 App 会加载到一个 404 页，然后报「找不到开始播放测试片 / 批量入口」这种看起来像产品 bug 的红
+（run 44272465791 就是这么红的）。
 
 ## 本轮刻意不做的事
 

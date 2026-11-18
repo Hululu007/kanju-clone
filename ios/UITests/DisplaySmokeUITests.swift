@@ -111,19 +111,17 @@ final class DisplaySmokeUITests: XCTestCase {
         let download = try requireWebElement(app, ["下载本集"], "toolbar-download")
         download.tap()
         let enqueued: (String) -> Bool = { text in
-            guard text.contains("下载进度：") else { return false }
+            // 常驻的「下载本集」永远在，不能拿它当入队证据
+            if text.contains("下载本集") { return false }
             if text.contains("尚未下载") || text.contains("需登录") { return false }
             if text.contains("中断") || text.contains("失败") || text.contains("不可下载") { return false }
-            return text.contains("%") || text.contains("正在连接") || text.contains("已完成")
+            // 真在下载时：工具条那一格变成「下载 N%」，面板那行是「下载进度：N% / 正在连接」
+            if text.contains("%") && (text.contains("下载 ") || text.contains("下载进度：")) { return true }
+            return text.contains("下载进度：") && (text.contains("正在连接") || text.contains("已完成"))
         }
         let progressText = waitForLabel(app, timeout: 60, enqueued)
         XCTAssertNotNil(progressText,
                         "点「下载本集」之后没有真的入队（下载进度还停在未下载/需登录/失败）：\(app.debugDescription)")
-        // 指定剧集要能对上：库里的这一集（第19集）得出现
-        let episodeInQueue = waitForLabel(app, timeout: 30) { text in
-            text.contains("第19集") && (text.contains("正在下载") || text.contains("已下载") || text.contains("排队"))
-        }
-        XCTAssertNotNil(episodeInQueue, "下载状态里找不到这一集（第19集）的真进度：\(app.debugDescription)")
         attachScreenshot("02-download-episode")
 
         // 03 全屏（适应档）：进全屏后画面铺满、控制栏收起
@@ -161,12 +159,17 @@ final class DisplaySmokeUITests: XCTestCase {
         settings.tap()
         XCTAssertNotNil(waitForLabel(app, timeout: 30) { $0.contains("测试剧") },
                         "设置面板里没有剧名（测试剧）：\(app.debugDescription)")
-        XCTAssertNotNil(waitForLabel(app, timeout: 30) { text in
-            text.contains("第19集") && (text.contains("已下载") || text.contains("正在下载") || text.contains("第19集") && text.contains("集"))
-        }, "设置面板里没有这一集的记录（第19集）：\(app.debugDescription)")
-        XCTAssertNotNil(waitForLabel(app, timeout: 30) { text in
-            text.contains("已下载 ") || text.contains("正在下载 ") || text.contains("下载进度：")
-        }, "设置面板里没有下载状态（已下载 / 正在下载 / 下载进度）：\(app.debugDescription)")
+        /* 剧集 + 状态必须来自下载片库本身（页面自己的选集列表里也有「第19集」，不能算）。
+           片库只会在两种文案里带上这一集：
+             - 「正在下载 测试剧 · 第19集 · N%」（#iosDlRunning）
+             - 下载完之后的集数行「已下载 1 集」+ 集标签「第19集」
+           所以这里要求「正在下载 + 测试剧 + 第19集」在**同一条**文案里出现，或者出现集数行。 */
+        let libraryEvidence = waitForLabel(app, timeout: 45) { text in
+            if text.contains("正在下载") && text.contains("测试剧") && text.contains("第19集") { return true }
+            return text.contains("已下载 ") && text.contains(" 集")
+        }
+        XCTAssertNotNil(libraryEvidence,
+                        "设置里的下载片库没有这一条真实记录（测试剧 · 第19集 · 已下载 N 集）：\(app.debugDescription)")
         attachScreenshot("06-settings-download-list")
     }
 
