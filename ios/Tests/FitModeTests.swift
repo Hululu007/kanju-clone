@@ -75,7 +75,7 @@ final class FitModeTests: XCTestCase, WKNavigationDelegate {
 
         loaded = expectation(description: "fixture loaded")
         webView.loadHTMLString(Self.fixtureHTML, baseURL: URL(string: "https://zhuiju.dpdns.org/player/?id=fixture"))
-        await fulfillment(of: [XCTUnwrap(loaded)], timeout: 60)
+        await fulfillment(of: [try XCTUnwrap(loaded)], timeout: 60)
 
         if let rememberedFit {
             _ = try await javaScript("localStorage.setItem('kj-ios-fit', '\(rememberedFit)');")
