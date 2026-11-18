@@ -192,8 +192,14 @@ final class EpisodeDownloadSheetUITests: XCTestCase {
             ?? element(web, containing: "排队", timeout: 8)
         attach(app, "013-download-queue-states")
 
-        let settings = requireElement(app, web, "设置", "settings-entry", timeout: 20)
-        settings.tap()
+        /* 必须点顶栏那个「设置」：工具条上还有一个「显示设置」，它开的是播放器面板，
+           下载队列在设置抽屉里（#iosSettingsSheet），点错就什么也看不到。 */
+        let settings = web.buttons.matching(NSPredicate(format: "label == %@", "设置")).firstMatch
+        guard settings.waitForExistence(timeout: 20) else {
+            _ = fail(app, "settings-entry", "顶栏没有可点的「设置」入口")
+            return
+        }
+        tapWhenVisible(app, settings, web)
         RunLoop.current.run(until: Date().addingTimeInterval(0.8))
         let queueRow = web.descendants(matching: .any)
             .matching(NSPredicate(format: "label CONTAINS %@ AND label CONTAINS %@", "任务", "/5 集"))
