@@ -9,8 +9,6 @@ import { authReady, fetchShowProgress, flushSavedProgress, saveProgress } from '
 import { openSettings } from '../settings-panel.js'
 import {
   FILL_MODES,
-  SPEED_MIN,
-  SPEED_MAX,
   clampRate,
   getSetting,
   onSettingChange,
@@ -102,24 +100,21 @@ const body = `<section class="page-body"><div class="wrap page pw" style="--h:${
   <div class="pw-grid" id="pwGrid">
     <div class="pw-stage">
       <div class="pl" id="player" data-controls="on">
-        <video id="video" playsinline preload="metadata" poster="${show.poster || ''}"></video>
-        <div class="dm-layer" id="dmLayer"></div>
-        <div class="pl-mask"></div>
-
         <div class="pl-top">
-          <div class="pl-speed" role="group" aria-label="播放速度">
-            <span class="pl-rate" id="rateNum">1.00</span>
-            <button class="pl-rb" type="button" data-rate="min" aria-label="最慢速度" title="最慢">«</button>
-            <button class="pl-rb" type="button" data-rate="-0.25" aria-label="减速 0.25" title="减速">−</button>
-            <button class="pl-rb" type="button" data-rate="+0.25" aria-label="加速 0.25" title="加速">+</button>
-            <button class="pl-rb" type="button" data-rate="max" aria-label="最快速度" title="最快">»</button>
-          </div>
+          <span class="pl-rate" id="rateNum" aria-label="播放速度">1.00</span>
+          <button class="pl-quality pl-quality-pill" id="qualityPill" type="button" aria-label="线路与清晰度">
+            <span class="pl-quality-dot" aria-hidden="true"></span><span data-quality-text>1080P-官方R</span><span class="pl-quality-auto">自动</span>
+          </button>
         </div>
 
-        <button class="pl-bigplay" id="bigPlay" type="button" aria-label="播放">${icon('play', 30)}</button>
-
-        <button class="pl-epov" id="epOverlay" type="button">≡▷ <span id="playerLabel">${epLabel(startIdx)}</span> ›</button>
-        <p class="pl-status" id="playStatus" role="status" aria-live="polite" hidden></p>
+        <div class="pl-picture">
+          <video id="video" playsinline preload="metadata" poster="${show.poster || ''}"></video>
+          <div class="dm-layer" id="dmLayer"></div>
+          <button class="pl-bigplay" id="bigPlay" type="button" aria-label="播放">${icon('play', 30)}</button>
+          <button class="pl-epov" id="epOverlay" type="button">≡▷ <span id="playerLabel">${epLabel(startIdx)}</span> ›</button>
+          <p class="pl-status" id="playStatus" role="status" aria-live="polite" hidden></p>
+          <button class="pw-handle" id="pwHandle" type="button" aria-label="收起侧栏" title="收起侧栏">‹</button>
+        </div>
 
         <div class="pl-ctrl" id="plCtrl">
           <div class="pl-seek" id="plSeek" role="slider" tabindex="0" aria-label="播放进度" aria-valuemin="0" aria-valuemax="0" aria-valuenow="0">
@@ -145,7 +140,7 @@ const body = `<section class="page-body"><div class="wrap page pw" style="--h:${
               </div>
             </div>
             <div class="pl-btns-r">
-              <button class="pl-quality" id="qualityPill" type="button" aria-label="线路与清晰度"><span id="qualityText">1080P-官方R</span></button>
+              <button class="pl-quality pl-quality-inline" id="qualityInline" type="button" aria-label="线路与清晰度"><span data-quality-text>1080P-官方R</span></button>
               <button class="plb" id="btnGear" type="button" aria-label="播放设置">${icon('settings', 20)}</button>
               <button class="plb" id="btnPip" type="button" aria-label="画中画">${icon('pip', 20)}</button>
               <button class="plb" id="btnWebFull" type="button" aria-label="网页全屏">${icon('webfull', 20)}</button>
@@ -265,7 +260,6 @@ const body = `<section class="page-body"><div class="wrap page pw" style="--h:${
       </div>
     </aside>
 
-    <button class="pw-handle" id="pwHandle" type="button" aria-label="收起侧栏" title="收起侧栏">›</button>
   </div>
 
   <section class="row pw-related" id="pwRelated" style="margin-top:26px">
@@ -309,8 +303,7 @@ const btnPip = document.getElementById('btnPip')
 const btnWebFull = document.getElementById('btnWebFull')
 const btnFull = document.getElementById('btnFull')
 const rateNum = document.getElementById('rateNum')
-const qualityPill = document.getElementById('qualityPill')
-const qualityText = document.getElementById('qualityText')
+const qualityButtons = player.querySelectorAll('.pl-quality')
 const epOverlay = document.getElementById('epOverlay')
 const gear = document.getElementById('plGear')
 const linePop = document.getElementById('plLines')
@@ -352,7 +345,7 @@ function showControls({ keep = false } = {}) {
   player.dataset.controls = 'on'
   ppCtrl?.classList.add('on')
   clearTimeout(hideTimer)
-  if (keep || !playing()) return
+  if (keep || !playing() || !player.matches('.is-webfull, .is-fullscreen')) return
   hideTimer = setTimeout(() => {
     if (!playing() || video.seeking) return
     if (ppCtrl && document.activeElement && ppCtrl.contains(document.activeElement)) return
@@ -527,15 +520,6 @@ function setRate(value, { persist = true } = {}) {
   showToast(`播放速度 ${rateText(rate)}×`)
 }
 
-document.querySelectorAll('[data-rate]').forEach((button) => {
-  button.addEventListener('click', () => {
-    const dir = button.dataset.rate
-    if (dir === 'min') setRate(SPEED_MIN)
-    else if (dir === 'max') setRate(SPEED_MAX)
-    else setRate(rate + Number(dir))
-  })
-})
-
 /* ---------------- 画质增强 / 画面填充 ---------------- */
 
 function applyHQ() {
@@ -549,7 +533,7 @@ function applyHQ() {
 
 function applyFill() {
   const value = getSetting('fill')
-  video.style.objectFit = value === 'fill' ? 'fill' : 'cover'
+  video.classList.toggle('is-stretched', value === 'fill')
   const label = (FILL_MODES.find(([mode]) => mode === value) || FILL_MODES[0])[1]
   const pgFill = document.getElementById('pgFill')
   if (pgFill) pgFill.textContent = label
@@ -696,9 +680,11 @@ btnGear.addEventListener('click', () => {
   togglePop(gear)
   syncGear()
 })
-qualityPill.addEventListener('click', () => {
-  togglePop(linePop)
-  renderLineList()
+qualityButtons.forEach((button) => {
+  button.addEventListener('click', () => {
+    togglePop(linePop)
+    renderLineList()
+  })
 })
 btnDmSet.addEventListener('click', () => {
   togglePop(dmPop)
@@ -706,7 +692,7 @@ btnDmSet.addEventListener('click', () => {
 })
 document.addEventListener('pointerdown', (event) => {
   if (!POPS.some((pop) => pop && !pop.hidden)) return
-  if (event.target.closest('.pl-pop') || event.target.closest('#btnGear, #qualityPill, #btnDmSet')) return
+  if (event.target.closest('.pl-pop, #btnGear, .pl-quality, #btnDmSet')) return
   closePops()
 })
 
@@ -786,8 +772,10 @@ function lineOptions(epIdx) {
 function updateQuality() {
   const options = lineOptions(currentEpIdx())
   const hit = options.find((o) => o.provider === currentProvider) || options[0]
-  qualityText.textContent = hit ? hit.label : '1080P-官方R'
-  qualityPill.title = hit ? hit.label : ''
+  qualityButtons.forEach((button) => {
+    button.querySelector('[data-quality-text]').textContent = hit ? hit.label : '1080P-官方R'
+    button.title = hit ? hit.label : ''
+  })
 }
 
 function renderLineList() {
@@ -933,7 +921,7 @@ const pwGrid = document.getElementById('pwGrid')
 const pwHandle = document.getElementById('pwHandle')
 pwHandle?.addEventListener('click', () => {
   const collapsed = pwGrid.classList.toggle('collapsed')
-  pwHandle.textContent = collapsed ? '‹' : '›'
+  pwHandle.textContent = collapsed ? '›' : '‹'
   pwHandle.setAttribute('aria-label', collapsed ? '展开侧栏' : '收起侧栏')
   pwHandle.title = collapsed ? '展开侧栏' : '收起侧栏'
   try {
@@ -944,7 +932,7 @@ try {
   if (localStorage.getItem('kj-pw-collapsed') === '1') {
     pwGrid.classList.add('collapsed')
     if (pwHandle) {
-      pwHandle.textContent = '‹'
+      pwHandle.textContent = '›'
       pwHandle.setAttribute('aria-label', '展开侧栏')
       pwHandle.title = '展开侧栏'
     }
@@ -958,7 +946,8 @@ function setWebFull(on) {
   webFull = on
   document.documentElement.classList.toggle('pl-webfull', on)
   player.classList.toggle('is-webfull', on)
-  showControls({ keep: true })
+  btnWebFull.setAttribute('aria-label', on ? '退出网页全屏' : '网页全屏')
+  showControls()
 }
 btnWebFull?.addEventListener('click', () => setWebFull(!webFull))
 
@@ -983,10 +972,13 @@ btnFull?.addEventListener('click', () => {
     window.webkit?.messageHandlers?.iosPlayer?.postMessage({ action: 'fullscreen' })
   } catch {}
 })
-document.addEventListener('fullscreenchange', () => {
+function syncFullscreen() {
+  const isFullscreen = (document.fullscreenElement || document.webkitFullscreenElement) === player
   player.classList.toggle('is-fullscreen', !!document.fullscreenElement)
-  showControls({ keep: true })
-})
+  showControls()
+}
+document.addEventListener('fullscreenchange', syncFullscreen)
+document.addEventListener('webkitfullscreenchange', syncFullscreen)
 
 btnPip?.addEventListener('click', async () => {
   try {
