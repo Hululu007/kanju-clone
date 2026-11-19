@@ -752,6 +752,7 @@
     try { localStorage.setItem(FIT_PREF, mode); } catch (error) { /* 存不了就只在本次生效 */ }
     fitMode = mode;
     applyFitGeometry();
+    syncFitBar();
     announce('画面：' + (FIT_LABELS[mode] || '默认'));
   }
 
@@ -1377,16 +1378,6 @@
       }
     }
     return null;
-  }
-
-  function openMinePage() {
-    var page = document.getElementById('iosMinePage') || (typeof ensureMinePage === 'function' ? ensureMinePage() : null);
-    if (!page) return false;
-    page.hidden = false;
-    if (page.removeAttribute) page.removeAttribute('hidden');
-    renderMinePage();
-    storageText();
-    return true;
   }
 
   function hit(node, id) {
@@ -2386,7 +2377,7 @@
       var head = document.createElement('div');
       head.id = 'iosEpHead';
       head.innerHTML = '<button class="ioseh-title" type="button" data-ios-act="expand-eps" id="iosEpHeadBtn"></button>';
-      host.insertBefore(head, document.getElementById('iosDlEntry') || grid);
+      host.insertBefore(head, grid);
     }
     var headBtn = document.getElementById('iosEpHeadBtn');
     if (headBtn) headBtn.textContent = '选集 全' + (Number(meta.total) || epNodes().length) + '集 ›';
@@ -2741,8 +2732,9 @@
     event.preventDefault();
     event.stopImmediatePropagation();
     if (act === 'back' || act === 'dl-back' || act === 'mine-back') {
-      if (document.getElementById('iosMinePage') && !document.getElementById('iosMinePage').hidden) closeMinePage();
-      else if (document.getElementById('iosDlPage') && !document.getElementById('iosDlPage').hidden) closeDownloadPage();
+      if (document.getElementById('iosMinePage') && !document.getElementById('iosMinePage').hidden) {
+        closeMinePage();
+      } else if (document.getElementById('iosDlPage') && !document.getElementById('iosDlPage').hidden) closeDownloadPage();
       else if (immersiveNow()) setUserFullscreen(false);
       else if (window.history && window.history.length > 1) window.history.back();
       return true;
@@ -2791,7 +2783,7 @@
       return true;
     }
     if (act === 'ps-eptitle') { epTitleOn = !epTitleOn; savePlayPrefs(); syncPlaySettings(); var lbl = document.getElementById('playerLabel'); if (lbl) lbl.hidden = !epTitleOn; return true; }
-    if (act === 'open-mine') { closeDownloadPage(); openMinePage(); return true; }
+    if (act === 'open-mine') { openMinePage(); return true; }
     if (act === 'mine-download') { closeMinePage(); openDownloadPage(); return true; }
     if (act === 'mine-edit') { announce('左滑任意一集即可删除'); return true; }
     return false;
@@ -2855,6 +2847,28 @@
   function handleCtrlClick(event) {
     var target = event.target;
     if (!target) return false;
+    if (hit(target, 'iosFsFitBtn')) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      var fitMenu = document.getElementById('iosFsMenu');
+      if (fitMenu) fitMenu.className = fitMenu.className === 'on' ? '' : 'on';
+      return true;
+    }
+    if (hit(target, 'iosFsMenu')) {
+      var fitOption = target;
+      while (fitOption) {
+        var fitModeOption = fitOption.getAttribute ? fitOption.getAttribute('data-fit') : '';
+        if (fitModeOption) {
+          event.preventDefault();
+          event.stopImmediatePropagation();
+          chooseFit(String(fitModeOption));
+          var openFitMenu = document.getElementById('iosFsMenu');
+          if (openFitMenu) openFitMenu.className = '';
+          return true;
+        }
+        fitOption = fitOption.parentNode;
+      }
+    }
     if (handleTencentUI(target, event)) return true;
     /* 选集页「选择」模式：点选集卡片是选中/取消，不再跳集 */
     if (hit(target, 'iosTitleDownload')) {
@@ -2910,19 +2924,6 @@
       event.stopImmediatePropagation();
       toggleFullscreen();
       return true;
-    }
-    if (hit(target, 'iosFitBar')) {
-      var modeNode = target;
-      while (modeNode && modeNode !== event.currentTarget) {
-        var mode = modeNode.getAttribute ? modeNode.getAttribute('data-fit') : '';
-        if (mode) {
-          event.preventDefault();
-          event.stopImmediatePropagation();
-          chooseFit(String(mode));
-          return true;
-        }
-        modeNode = modeNode.parentNode;
-      }
     }
     if (hit(target, 'ppCast')) {
       event.preventDefault();
@@ -3208,6 +3209,11 @@
       for (var i = 0; i < nodes.length; i++) {
         if (nodes[i].textContent !== pairs[p][1]) nodes[i].textContent = pairs[p][1];
       }
+    }
+    var episodeCast = document.querySelectorAll ? document.querySelectorAll('.ep-head [data-action="cast"]') : [];
+    for (var c = 0; c < episodeCast.length; c++) {
+      episodeCast[c].hidden = true;
+      if (episodeCast[c].setAttribute) episodeCast[c].setAttribute('aria-hidden', 'true');
     }
   }
 
