@@ -1591,7 +1591,7 @@ body:has(.page-head) .main {
   position: absolute;
   inset: 0;
   border-radius: var(--radius-l);
-  background: linear-gradient(180deg, rgba(6, 10, 12, 0.18) 0%, rgba(6, 10, 12, 0) 32%, rgba(6, 10, 12, 0.55) 74%, rgba(6, 10, 12, 0.92) 100%);
+  background: linear-gradient(180deg, rgba(6, 10, 12, 0.18) 0%, transparent 32%, rgba(0, 0, 0, 0.76) 74%, rgba(0, 0, 0, 0.94) 100%);
   pointer-events: none;
 }
 .p-badge {
@@ -1602,19 +1602,18 @@ body:has(.page-head) .main {
   height: 20px;
   padding: 0 7px;
   border-radius: var(--radius-s);
-  background: rgba(7, 13, 16, 0.68);
+  background: rgba(0, 0, 0, 0.72);
   border: 1px solid rgba(255, 255, 255, 0.1);
   font-size: 11px;
   font-weight: 600;
   line-height: 18px;
-  color: var(--ink-86);
+  color: #fff;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
   backdrop-filter: blur(6px);
 }
 .p-badge.gold {
-  color: #fef9c3eb;
   border-color: rgba(253, 230, 138, 0.28);
 }
 .p-heat {
@@ -1653,7 +1652,7 @@ body:has(.page-head) .main {
   bottom: 10px;
   font-size: 12px;
   line-height: 16px;
-  color: var(--ink-66);
+  color: rgba(255, 255, 255, 0.82);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;

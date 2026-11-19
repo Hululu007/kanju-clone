@@ -276,8 +276,9 @@ document.getElementById('app').innerHTML = shell({
   active: '',
   tabActive: '首页',
   top: false,
-  head: pageHead({ title: show.title, nav: '', back: u('/') }),
+  head: pageHead({ title: show.title, subtitle: [show.year, show.area].filter(Boolean).join(' · '), nav: '', back: u('/') }),
 })
+document.body.classList.add('player-page')
 bindShell()
 
 const $ = (sel) => document.querySelector(sel)

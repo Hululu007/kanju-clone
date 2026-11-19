@@ -2,6 +2,14 @@
    播放页（对齐原站）：左播放器 / 右侧栏、播放器内控制层、选集抽屉
    ============================================================ */
 .pw { padding-bottom: 40px; }
+.player-page .sb-name { color: var(--ink); }
+.player-page .sb-sub { color: var(--ink-66); }
+.player-page .ph-title { max-width: calc(100% - 112px); text-align: center; overflow: hidden; text-overflow: ellipsis; }
+.ph-subtitle { display: block; color: var(--ink-66); font-size: 12px; font-weight: 400; line-height: 1.4; overflow: hidden; text-overflow: ellipsis; }
+@media (min-width: 1100px) {
+  .player-page .page-head { left: var(--sb); }
+  .player-page .page-head .ph-left { margin-left: 16px; }
+}
 .pw-grid { position: relative; display: grid; grid-template-columns: minmax(0, 65fr) minmax(300px, 35fr); gap: 16px; align-items: start; }
 .pw-grid.collapsed { grid-template-columns: minmax(0, 1fr) 0; gap: 0; }
 .pw-grid.collapsed .pw-side { display: none; }
@@ -146,6 +154,7 @@
 .pw-more { flex: 0 0 auto; padding: 4px 0; border: 0; background: transparent; color: rgba(255,255,255,.62); font-size: 12px; cursor: pointer; }
 .pw-more:hover { color: #16e09d; }
 
+
 .pw-acts { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; margin: 14px 0 12px; }
 .pw-act { display: flex; flex-direction: column; align-items: center; gap: 5px; padding: 9px 0 7px; border: 0; border-radius: 10px; background: rgba(255,255,255,.07); color: rgba(255,255,255,.86); font-size: 11px; cursor: pointer; }
 .pw-act:hover { background: rgba(22,224,157,.18); color: #16e09d; }
@@ -199,6 +208,7 @@ html.pl-webfull .pl { position: fixed; inset: 0; z-index: 9000; border-radius: 0
   .pl-picture .pw-handle { display: none; }
   .pw-pane { max-height: none; }
 }
+
 @media (max-width: 639px) {
   .pl:not(.is-fullscreen):not(.is-webfull) { border-radius: 10px; }
   .pl-bigplay { width: 54px; height: 54px; }

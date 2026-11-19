@@ -196,7 +196,7 @@ export function mobileTop() {
   </header>`
 }
 
-export function pageHead({ title, nav = null, back = null, big = false }) {
+export function pageHead({ title, subtitle = '', nav = null, back = null, big = false }) {
   return `<header class="page-head${big ? ' big' : ''}">
     <div class="ph-left">
       ${
@@ -207,7 +207,7 @@ export function pageHead({ title, nav = null, back = null, big = false }) {
           : ''
       }
     </div>
-    <h1 class="ph-title">${title}</h1>
+    <h1 class="ph-title">${title}${subtitle ? '<span class="ph-subtitle">' + esc(subtitle) + '</span>' : ''}</h1>
     <div class="ph-right">
       <button class="ph-menu ph-theme" type="button" data-theme-cycle aria-label="切换主题" title="切换主题">
         <span class="tt-dark">${icon('moon', 18)}</span>
