@@ -184,6 +184,7 @@
   document.addEventListener('canplay', startPending, true);
   document.addEventListener('loadedmetadata', startPending, true);
   document.addEventListener('click', function (event) {
+    if (!event.target) return;
     var target = event.target.closest ? event.target : event.target.parentElement;
     if (!target) return;
     /* 站点的设置按钮只会弹「设置面板即将上线」：换成注入层的设置面板，
@@ -1040,7 +1041,7 @@
     if (saved.meta && typeof saved.meta === 'object' && saved.meta.title) pendingMeta = saved.meta;
   }
 
-  /* ---------- 已下载的片库：设置里按剧列出「下了哪几集 / 共几集」 ----------
+  /* ---------- 已下载片库数据 ----------
      原生下载一次只跑一集，网页侧拿不到文件夹列表；所以每次下载完成就把
      「剧名 / 封面 / 这一集」记到 localStorage。分组用站点自己的媒体 id
      （播放页地址的 ?id=），拿不到 id 时退回剧名，同一部剧不会碎成两条。 */
@@ -1193,10 +1194,6 @@
     var box = document.createElement('div');
     box.id = 'iosDownloadLibrary';
     box.className = 'ios-dl-lib';
-    var heading = document.createElement('div');
-    heading.className = 'ios-dl-heading';
-    heading.textContent = '下载';
-    box.appendChild(heading);
     var running = document.createElement('div');
     running.id = 'iosDlRunning';
     running.className = 'ios-dl-running';
@@ -1223,8 +1220,12 @@
     return parts.join(';');
   }
 
-  /* 已下载片库 + 正在下载的那一集：设置面板打开时就能看清「下了哪些、下到哪」。 */
   function renderDownloadLibrary() {
+    var page = document.getElementById('iosMinePage');
+    if (page && !page.hidden) renderMinePage();
+    return true;
+  }
+  function renderLegacyDownloadLibrary() {
     var root = downloadRoot();
     if (!root || typeof root.appendChild !== 'function') return false;
     var box = downloadLibraryElement();
@@ -1554,12 +1555,12 @@
     settingsSheet.className = 'ios-settings-sheet';
   }
 
-  function settingValue(key) {
+  var settingValue = function (key) {
     var value = readStore(key);
     return value === null || value === '' ? SETTING_DEFAULTS[key] : value;
   }
 
-  function setSettingValue(key, value) {
+  var setSettingValue = function (key, value) {
     writeStore(key, String(value));
     applySettingChange(key);
   }
@@ -1582,7 +1583,7 @@
     var speed = document.getElementById('iosSettingSpeed');
     if (speed) speed.value = String(savedSpeed());
     var themes = body.querySelectorAll('[data-theme-setting]');
-    var theme = document.documentElement.getAttribute('data-theme') || 'dark';
+    var theme = document.documentElement.getAttribute ? (document.documentElement.getAttribute('data-theme') || 'dark') : 'dark';
     for (var i = 0; i < themes.length; i++) themes[i].className = themes[i].getAttribute('data-theme-setting') === theme ? 'on' : '';
     var toggles = body.querySelectorAll('[data-setting-toggle]');
     for (var t = 0; t < toggles.length; t++) {
@@ -1692,21 +1693,13 @@
       var body = document.getElementById('iosSettingsBody');
       if (body) return body;
     }
-    return document.getElementById('settingsPanel') || document.getElementById('iosSettingsBody');
+    return null;
   }
 
   /* 播放器页塞进站点自己的「显示设置」面板；首页没有那个面板，塞进注入层的设置面板。 */
   function mountDownloadPanel() {
-    var container = downloadRoot();
-    if (!container || typeof container.appendChild !== 'function') return false;
-    /* 先片库（下了哪些剧、哪几集），再正在下载的进度条：从上往下读就是用户想问的顺序。 */
-    var lib = downloadLibraryElement();
-    if (lib.parentNode !== container) container.appendChild(lib);
-    var box = downloadBoxElement();
-    if (box.parentNode !== container) container.appendChild(box);
-    downloadPanelMounted = true;
-    renderDownloadLibrary();
-    return true;
+    downloadPanelMounted = false;
+    return false;
   }
 
   function hit(node, id) {
@@ -1810,10 +1803,6 @@
     castMenu.appendChild(castRow('ppPlayExternal', '用第三方播放器播放', '当前线路'));
     castMenu.appendChild(castRow('ppShareLink', '分享播放地址', '系统面板'));
     castMenu.appendChild(castRow('ppCopyLink', '复制播放地址', '手动粘贴'));
-    castMenu.appendChild(castRow('ppDownload', '下载本集', '需登录'));
-    var progressRow = castRow('ppDownloadProgress', '下载进度', '尚未下载');
-    progressRow.setAttribute('aria-live', 'polite');
-    castMenu.appendChild(progressRow);
     var localRow = castRow('ppOpenLocal', '用其他播放器播放', '已下载');
     if (typeof localRow.setAttribute === 'function') localRow.setAttribute('hidden', '1');
     localRow.hidden = true;
@@ -2131,17 +2120,6 @@
     }
     noteOf('ppDownload', downloadNote());
     noteOf('ppDownloadProgress', downloadProgressNote());
-    var downloadLabel = document.getElementById('iosDownloadLabel');
-    var downloadFill = document.getElementById('iosDownloadFill');
-    var downloadOpen = document.getElementById('iosOpenDownloaded');
-    if (downloadLabel) downloadLabel.textContent = '下载进度：' + downloadProgressNote();
-    if (downloadFill) downloadFill.style.width = (downloadState.busy ? downloadState.percent : (downloadState.path ? 100 : 0)) + '%';
-    if (downloadOpen) {
-      downloadOpen.hidden = !downloadState.path;
-      if (typeof downloadOpen.removeAttribute === 'function' && downloadState.path) downloadOpen.removeAttribute('hidden');
-      else if (typeof downloadOpen.setAttribute === 'function') downloadOpen.setAttribute('hidden', '');
-    }
-    syncToolDownload();
     renderDownloadLibrary();
     saveDownload();
   }
@@ -2151,30 +2129,8 @@
   var toolDownloadMounted = false;
 
   function mountToolDownload() {
-    var tools = document.getElementById('playTools');
-    if (!tools) return false;
-    var dm = document.getElementById('dmBtn');
-    if (dm) {
-      /* 弹幕按钮让位：宝免占着那行的位置，但不能删除站点节点 */
-      dm.hidden = true;
-      if (dm.style) dm.style.display = 'none';
-    }
-    if (document.getElementById('ppToolDownload')) {
-      toolDownloadMounted = true;
-      syncToolDownload();
-      return true;
-    }
-    if (typeof tools.appendChild !== 'function') return false;
-    var button = document.createElement('button');
-    button.id = 'ppToolDownload';
-    button.type = 'button';
-    button.className = 'pp-tool';
-    button.textContent = '下载本集';
-    if (dm && dm.parentNode === tools && typeof tools.insertBefore === 'function') tools.insertBefore(button, dm);
-    else tools.appendChild(button);
-    toolDownloadMounted = true;
-    syncToolDownload();
-    return true;
+    toolDownloadMounted = false;
+    return false;
   }
 
   function syncToolDownload() {
@@ -3019,37 +2975,7 @@
 
   /// 把「下载」按钮挂到投屏入口原来的位置；找不到投屏入口就退回选集区上方。
   function mountDlEntry() {
-    if (document.getElementById('iosDlEntry')) { syncDlSheet(); return true; }
-    var body = document.body;
-    if (!body || typeof body.insertBefore !== 'function') return false;
-    var cast = castEntryNode();
-    if (cast) {
-      cast.hidden = true;
-      if (cast.style) cast.style.display = 'none';
-      if (typeof cast.setAttribute === 'function') cast.setAttribute('data-ios-hidden', 'cast');
-    }
-    /* 入口挂在**选集网格正上方**：投屏按钮所在的那一行是站点自己的 flex 标题行，
-       把整块列表塞进去会把「选集」标题挤成竖排。投屏按钮仍然在原处隐藏（让位），
-       下载入口落在选集标题下面、选集网格上面 —— 也就是用户说的「视频下方选集旁」。 */
-    var grid = document.getElementById('epGrid');
-    var host = grid && grid.parentNode ? grid.parentNode : (cast && cast.parentNode ? cast.parentNode : null);
-    if (!host) return false;
-    var entry = document.createElement('div');
-    entry.id = 'iosDlEntry';
-    var button = document.createElement('button');
-    button.id = 'iosDlButton';
-    button.type = 'button';
-    button.textContent = '下载';
-    entry.appendChild(button);
-    var panel = document.createElement('div');
-    panel.id = 'iosDlPanel';
-    panel.hidden = true;
-    if (typeof panel.setAttribute === 'function') panel.setAttribute('hidden', '');
-    entry.appendChild(panel);
-    /* 选集网格前面就是「选集旁」；拿不到网格时才退回投屏入口原位 */
-    host.insertBefore(entry, grid && grid.parentNode === host ? grid : (cast && cast.parentNode === host ? cast : null));
-    syncDlSheet();
-    return true;
+    return false;
   }
 
   function toggleDlSheet() {
@@ -3369,11 +3295,12 @@
       var status = String(task && task.status || '');
       if (status === 'running' || status === 'queued') running.push(task);
     }
-    if (running.length) {
+    if (running.length || downloadState.busy) {
       var row = document.createElement('div');
       row.id = 'iosMineRunning';
-      var total = Number(running[0].total) || 0;
-      var received = Number(running[0].received) || 0;
+      var currentTask = running.length ? running[0] : downloadState;
+      var total = Number(currentTask.total) || 0;
+      var received = Number(currentTask.received) || 0;
       var percent = total > 0 ? Math.min(100, Math.round(received / total * 100)) : 0;
       row.innerHTML = ''
         + '<div class="imr-main">'
@@ -3381,11 +3308,11 @@
         + '  <div class="imr-meta" id="iosMineRunningMeta"></div>'
         + '</div>';
       var badge = document.createElement('span');
-      badge.textContent = '正在下载 ' + running.length + ' 集';
+      badge.textContent = '正在下载 ' + Math.max(running.length, 1) + ' 集';
       row.appendChild(badge);
       body.appendChild(row);
       var t = document.getElementById('iosMineRunningTitle');
-      if (t) t.textContent = (running[0].title || showMeta().title || '') + ' ' + (running[0].epLabel || '');
+      if (t) t.textContent = (currentTask.title || currentTask.show || showMeta().title || '') + ' ' + (currentTask.epLabel || currentTask.ep || '');
       var m = document.getElementById('iosMineRunningMeta');
       if (m) {
         m.textContent = (total > 0 ? percent + '% · ' : '接收中 · ')
@@ -3708,7 +3635,7 @@
         return true;
       }
     }
-    if (hit(target, 'iosDlButton') || hit(target, 'iosTitleDownload')) {
+    if (hit(target, 'iosTitleDownload')) {
       event.preventDefault();
       event.stopImmediatePropagation();
       openDownloadPage();
@@ -3808,19 +3735,6 @@
       event.preventDefault();
       event.stopImmediatePropagation();
       copyLink();
-      return true;
-    }
-    if (hit(target, 'ppDownload')) {
-      event.preventDefault();
-      event.stopImmediatePropagation();
-      startDownload();
-      return true;
-    }
-    if (hit(target, 'ppToolDownload')) {
-      event.preventDefault();
-      event.stopImmediatePropagation();
-      /* 这一格只做下载/取消下载；把文件交给播放器是菜单里那一行和设置里的按钮。 */
-      startDownload();
       return true;
     }
     if (hit(target, 'ppOpenLocal')) {
