@@ -109,10 +109,13 @@ function fixture({ origin = 'https://zhuiju.dpdns.org', storageThrows = false, l
   const attributes = {};
   const selected = { dataset: { ep: '18' }, textContent: '第19集' };
   let videoRate = 1;
-  const video = { id: 'video', tagName: 'VIDEO', readyState: 2, currentSrc: 'https://media.example/19.mp4',
-    controls: true, paused: true, duration: 120, currentTime: 0, removed: [],
+  const video = { id: 'video', tagName: 'VIDEO', style: {}, readyState: 2, currentSrc: 'https://media.example/19.mp4',
+    controls: true, paused: true, duration: 120, currentTime: 0, videoWidth: 1920, videoHeight: 1080, removed: [],
+    attributes: {},
+    setAttribute(name, value) { video.attributes[name] = String(value); },
+    getAttribute(name) { return video.attributes[name]; },
     load() {}, querySelectorAll() { return []; },
-    removeAttribute(name) { video.removed.push(name); },
+    removeAttribute(name) { video.removed.push(name); delete video.attributes[name]; },
     pause() { video.paused = true; },
     play() { video.started = (video.started || 0) + 1; video.paused = false; return Promise.resolve(); },
     webkitEnterFullscreen() { video.nativeFullscreen = (video.nativeFullscreen || 0) + 1; } };
@@ -123,6 +126,8 @@ function fixture({ origin = 'https://zhuiju.dpdns.org', storageThrows = false, l
   });
   const player = node('section');
   player.id = 'player';
+  player.style.aspectRatio = '16 / 9';
+  player.getBoundingClientRect = () => ({ width: 390, height: 219 });
   player.appendChild(video);
   const head = node('head');
   const toolbar = node('div');
@@ -275,9 +280,18 @@ function fixture({ origin = 'https://zhuiju.dpdns.org', storageThrows = false, l
     return child;
   };
   body.appendChild(epGrid);
+  const episodeHead = node('div');
+  episodeHead.className = 'ep-head';
+  const episodeCast = node('button');
+  episodeCast.dataset = { action: 'cast' };
+  episodeCast.textContent = '投屏';
+  episodeHead.appendChild(episodeCast);
+  body.appendChild(episodeHead);
   const document = { readyState: 'loading', visibilityState: 'visible', head, body,
     title: '测试剧 - 看剧AI',
-    addEventListener(name, listener) { (listeners[name] ||= []).push(listener); },
+    addEventListener(name, listener, capture) {
+      (listeners[name] ||= []).push(name === 'click' ? { listener, capture: capture === true } : listener);
+    },
     removeEventListener(name, listener) {
       const list = listeners[name] || [];
       const index = list.indexOf(listener);
@@ -344,6 +358,7 @@ function fixture({ origin = 'https://zhuiju.dpdns.org', storageThrows = false, l
       if (selector === '.detail-info h1') return homePage ? [] : [detailTitle];
       if (selector === '.detail-poster img') return homePage ? [] : [posterImage];
       if (selector === '.pp-tabs') return [tabRow];
+      if (selector === '.ep-head [data-action="cast"]') return [episodeCast];
       if (selector === '.pp-tab') return tabButtons;
       if (selector === '.sb-name') return [sbName];
       if (selector === '.sb-sub') return [sbSub];
@@ -381,6 +396,8 @@ function fixture({ origin = 'https://zhuiju.dpdns.org', storageThrows = false, l
       return [];
     },
     documentElement: {
+      style: { setProperty() {} },
+      getBoundingClientRect() { return { width: window.innerWidth || 390, height: window.innerHeight || 844 }; },
       setAttribute(name) { attributes[name] = true; },
       removeAttribute(name) { delete attributes[name]; },
       hasAttribute(name) { return !!attributes[name]; },
@@ -391,7 +408,9 @@ function fixture({ origin = 'https://zhuiju.dpdns.org', storageThrows = false, l
     innerWidth: landscape ? 844 : 390,
     innerHeight: landscape ? 390 : 844,
     matchMedia(query) { return { matches: isLandscape && /landscape/.test(query) }; },
-    addEventListener(name, listener) { (listeners[name] ||= []).push(listener); },
+    addEventListener(name, listener, capture) {
+      (listeners[name] ||= []).push(name === 'click' ? { listener, capture: capture === true } : listener);
+    },
     webkit: bridge ? { messageHandlers: { iosPlayer: { postMessage(body) { messages.push(body); } } } } : {},
     HTMLMediaElement: { prototype: mediaProto },
     async fetch(input, options) {
@@ -456,8 +475,13 @@ function fixture({ origin = 'https://zhuiju.dpdns.org', storageThrows = false, l
     },
     ready() { for (const listener of listeners['DOMContentLoaded'] || []) listener({}); },
     click(target) {
-      const event = { target, preventDefault() {}, stopImmediatePropagation() {} };
-      for (const listener of listeners['click'] || []) listener(event);
+      let stopped = false;
+      const event = { target, preventDefault() {}, stopImmediatePropagation() { stopped = true; } };
+      const clickListeners = listeners['click'] || [];
+      for (const entry of [...clickListeners].sort((left, right) => Number(right.capture) - Number(left.capture))) {
+        (typeof entry === 'function' ? entry : entry.listener)(event);
+        if (stopped) break;
+      }
     },
     emit(name, event) { for (const listener of listeners[name] || []) listener(event); } };
 }
@@ -530,6 +554,16 @@ test('layout fallback carries fullscreen, light tabbar and category-card rules',
   const style = state.head.children.find((child) => child.id === 'iosShellStyle');
   assert.ok(style, 'injected style is missing');
   assert.match(style.textContent, /html\[data-ios-immersive\] #player\{position:fixed/);
+  assert.match(style.textContent, /html\[data-ios-immersive\] #player video\[data-ios-fit-box\]/,
+    '视频像素几何和绝对定位只能在全屏启用');
+  assert.match(style.textContent, /html\[data-ios-immersive\] #player video:not\(\[data-ios-fit-box\]\)/,
+    '视频铺满规则只在全屏生效');
+  assert.doesNotMatch(style.textContent, /#player>:not\(video\)/,
+    '不能用宽泛的子元素选择器误隐藏播放器容器');
+  assert.match(style.textContent, /\.topbar \.tb-right>\*\{display:none!important\}/,
+    'iOS 顶栏右侧恢复到 0.1.17 的空白布局');
+  assert.doesNotMatch(style.textContent, /\.page-head \[data-action="settings"\]/,
+    '其他页面原有的菜单设置入口不能被误隐藏');
   assert.match(style.textContent, /html\[data-theme='light'\] \.tabbar \.tab\{color:rgba\(15,20,24/);
   assert.match(style.textContent, /grid-auto-columns:168px/);
   assert.match(style.textContent, /html\[data-ios-immersive\] #playTools\{display:none!important\}/,
@@ -988,6 +1022,38 @@ test('entering fullscreen closes the top toolbar panels', () => {
   assert.equal(state.settingsPanel.hidden, true, '退出全屏不该自己把面板弹回来');
 });
 
+test('fullscreen fit dropdown selects and remembers the requested mode', () => {
+  const state = fixture(); state.ready();
+  state.click(state.document.getElementById('ppFull'));
+  state.emit('pause', { target: state.video });
+  const button = state.document.getElementById('iosFsFitBtn');
+  const menu = state.document.getElementById('iosFsMenu');
+  state.click(button);
+  assert.equal(menu.className, 'on');
+  state.click(menu.children.find((option) => option.getAttribute('data-fit') === 'cover'));
+  assert.equal(state.storage['kj-ios-fit'], 'cover');
+  assert.equal(state.document.getElementById('iosFsFitBtn').textContent, '平铺 ▾');
+});
+
+test('portrait playback keeps video sizing untouched and immersive fit geometry is restored', () => {
+  const state = fixture(); state.ready();
+  assert.equal(state.video.style.width, undefined);
+  state.click(state.document.getElementById('ppFull'));
+  assert.equal(state.attributes['data-ios-immersive'], true);
+  assert.equal(state.video.style.width, '389px');
+  state.click(state.document.getElementById('ppFull'));
+  assert.equal(state.video.style.width, '');
+  assert.equal(state.video.getAttribute('data-ios-fit-box'), undefined);
+});
+
+test('returning from my downloads reveals the episode download page', () => {
+  const state = fixture({ episodes: [18] }); state.ready();
+  state.click(state.document.getElementById('iosTitleDownload'));
+  state.click(state.document.getElementById('iosDlListBtn'));
+  state.click(state.document.getElementById('iosMinePage').children[0].children[0]);
+  assert.equal(state.document.getElementById('iosDlPage').hidden, false);
+});
+
 test('cast menu lists playback actions without download or local-player entries', () => {
   const state = fixture(); state.ready();
   const menu = state.document.getElementById('ppCastMenu');
@@ -1046,7 +1112,15 @@ test('download progress appears in the download page and a completed episode joi
     { id: 'task-a', showId: 'fixture', epKey: '0', epLabel: '第1集', title: '测试剧', status: 'running', received: 43, total: 100 },
   ]);
   assert.equal(state.document.getElementById('iosDlCell6-0').__iosState.textContent, '下载中 43%');
+  assert.equal(state.document.getElementById('iosDlCell6-0').__iosProgress.hidden, false);
+  assert.equal(state.document.getElementById('iosDlCell6-0').__iosProgress.value, 43);
+  assert.equal(state.document.getElementById('iosDlCell6-0').__iosProgress.max, 100);
+  state.window.__zhuijuDownload({ id: 'task-a', event: 'progress', showId: 'fixture', epKey: '0', epLabel: '第1集', title: '测试剧', received: 60, total: 100 });
+  assert.equal(state.document.getElementById('iosDlCell6-0').__iosProgress.value, 60);
+  assert.equal(state.document.getElementById('iosDlCell6-0').__iosState.textContent, '下载中 60%');
   state.click(state.document.getElementById('iosDlListBtn'));
+  assert.equal(state.document.getElementById('iosMineRunningProgress').value, 60);
+  assert.match(state.document.getElementById('iosMineRunningMeta').textContent, /60%/);
   assert.equal(state.document.getElementById('iosMinePage').hidden, false);
   assert.match(state.document.getElementById('iosMineRunning').textContent, /测试剧/);
   state.window.__zhuijuDownload({ id: 'task-a', event: 'done', showId: 'fixture', epKey: '0', ep: '第1集', epLabel: '第1集', title: '测试剧', path: '/tmp/追剧AI_第1集.mp4', name: '测试剧 第1集.mp4', size: 104857600 });
@@ -1199,7 +1273,7 @@ test('a running download restores its state and appears in my downloads', () => 
   state.window.__zhuijuDownloads('snapshot', [
     { id: 'dl9', showId: 'fixture', epKey: '2', epLabel: '第3集', title: '测试剧', status: 'running', received: 60, total: 100 },
   ]);
-  assert.equal(state.document.getElementById('iosMineRunningMeta').textContent.startsWith('60%'), true);
+  assert.match(state.document.getElementById('iosMineRunningMeta').textContent, /接收中 · 60%/);
   state.window.__zhuijuDownloads('snapshot', [
     { id: 'dl9', showId: 'fixture', epKey: '2', epLabel: '第3集', title: '测试剧', status: 'done', received: 100, total: 100, path: '/tmp/追剧AI_第3集.mp4', size: 104857600 },
   ]);

@@ -286,13 +286,13 @@
       'html[data-ios-immersive] #pwGrid,html[data-ios-immersive] .pw-grid,html[data-ios-immersive] .pw-stage{position:fixed!important;inset:0!important;width:100vw!important;height:100vh!important;height:100dvh!important;max-width:none!important;margin:0!important;padding:0!important;overflow:hidden!important;z-index:9997!important;background:#000!important}',
       'html[data-ios-immersive] #player{position:fixed!important;inset:0!important;width:100vw!important;height:100vh!important;height:100dvh!important;max-width:none!important;aspect-ratio:auto!important;z-index:10000!important;border-radius:0!important;margin:0!important;padding:0!important;background:#000!important;overflow:hidden!important;display:block!important}',
       'html[data-ios-immersive] #player video:not([data-ios-fit-box]){position:absolute!important;inset:0!important;width:100%!important;height:100%!important;max-width:none!important;max-height:none!important;aspect-ratio:auto!important;object-fit:contain!important;background:#000}',
-      '#player>:not(video):not(.dm-layer):not(#iosTopBar):not(#iosFsTop):not(#iosFsMenu):not(#iosFsSide):not(#iosFsRow2):not(#ppCtrl):not(#iosPlaySettings):not(#iosTopBar):not(#iosFsTop),#playTools,.pp-toolbar,#plCtrl,.pl-top,.pl-ctrl,.pl-epov,.pl-bigplay,#btnWebFull,#btnFull,#btnGear,#btnPip{display:none!important;visibility:hidden!important;pointer-events:none!important}',
+      '#player #plCtrl,#player .pl-top,#player .pl-ctrl,#player .pl-epov,#player .pl-bigplay{display:none!important}',
       /* 画面档位：三条写在沉浸态那条之后，同样的优先级下由它们覆盖 contain。
          适应=完整画面（可留边），裁剪=等比铺满（裁边），拉伸=不等比铺满。 */
       /* 画面填充不走 object-fit：真机上站点给 video 的盒子和内联样式会把它盖掉，
          用户看到的就是「点了没反应」。三档改成按 videoWidth/videoHeight 直接算元素
          几何（见 applyFitGeometry），渲染层必须照做，没有第二条样式可以顶掉它。 */
-      '#player video[data-ios-fit-box]{position:absolute!important;left:50%!important;top:50%!important;inset:auto!important;transform:translate(-50%,-50%)!important;max-width:none!important;max-height:none!important;object-fit:fill!important;background:#000}',
+      'html[data-ios-immersive] #player video[data-ios-fit-box]{position:absolute!important;inset:auto!important;left:50%!important;top:50%!important;transform:translate(-50%,-50%)!important;max-width:none!important;max-height:none!important;object-fit:fill!important;background:#000}',
       'html[data-ios-immersive],html[data-ios-immersive] body{overflow:hidden!important}',
       /* 全屏：上方那一排「显示设置 / 线路 / 弹幕 / 画中画 / 下一集」整条收起。
          它原本被固定到右上角，正好压在画面上，是真机上最挡视线的一排；
@@ -417,6 +417,9 @@
       '.ios-page #iosDlGrid6{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:8px;margin-top:10px}',
       '.ios-page .ip-cell{appearance:none;border:1px solid rgba(255,255,255,.16);border-radius:8px;background:rgba(255,255,255,.06);color:#e8f1f5;font-size:12px;font-weight:700;min-height:44px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;padding:4px}',
       '.ios-page .ip-cell .ip-cell-state{font-size:9px;font-weight:600;color:rgba(232,241,245,.62)}',
+      '.ios-page .ip-cell progress{display:block;width:100%;height:4px;accent-color:#16e09d}',
+      '.ios-page .ip-cell progress[hidden]{display:none}',
+      '.ios-page .ip-cell progress:not([hidden]){display:block}',
       '.ios-page .ip-cell.busy,.ios-page .ip-cell.done{border-color:rgba(22,224,157,.6);background:rgba(22,224,157,.18);color:#16e09d}',
       '.ios-page .ip-cell.busy .ip-cell-state,.ios-page .ip-cell.done .ip-cell-state{color:#16e09d}',
       '.ios-page #iosDlListBtn{flex:1 1 auto;appearance:none;border:0;border-radius:10px;background:#16e09d;color:#04241a;font-size:14px;font-weight:800;padding:12px;min-height:46px}',
@@ -528,6 +531,7 @@
       /* App 内场景：固定/粘性顶栏的 backdrop-filter 在 iOS 的 WebKit 里滚动时每帧重算，
          长列表明显掉帧。换成等效的半透明底色（观感基本不变）。 */
       '.topbar,.page-head{-webkit-backdrop-filter:none!important;backdrop-filter:none!important;background:linear-gradient(180deg,rgba(10,20,28,.97),rgba(10,20,28,.9))!important}',
+      '.topbar .tb-right>*{display:none!important}',
       'html[data-theme=\'light\'] .topbar,html[data-theme=\'light\'] .page-head{background:linear-gradient(180deg,rgba(255,255,255,.97),rgba(255,255,255,.92))!important}',
       '.tabbar{-webkit-backdrop-filter:none!important;backdrop-filter:none!important}',
       /* 首页一屏有大量海报角标；逐卡 backdrop-filter 会让 WebKit 在惯性滚动中反复重算模糊。 */
@@ -735,10 +739,21 @@
     var player = document.getElementById('player');
     if (!video || !player || !video.style) return;
     fitMode = readFitPref();
+    if (!immersiveNow()) {
+      if (video.__iosInlineSize) {
+        video.style.width = video.__iosInlineSize.width;
+        video.style.height = video.__iosInlineSize.height;
+        if (typeof video.removeAttribute === 'function') video.removeAttribute('data-ios-fit-box');
+        video.__iosInlineSize = null;
+      }
+      return;
+    }
+    if (!video.__iosInlineSize) {
+      video.__iosInlineSize = { width: video.style.width || '', height: video.style.height || '' };
+    }
     var vw = Number(video.videoWidth) || 0;
     var vh = Number(video.videoHeight) || 0;
-    var boundsNode = immersiveNow() ? document.documentElement : player;
-    var rect = boundsNode && boundsNode.getBoundingClientRect ? boundsNode.getBoundingClientRect() : null;
+    var rect = player.getBoundingClientRect ? player.getBoundingClientRect() : null;
     var cw = rect ? Number(rect.width) || 0 : 0;
     var ch = rect ? Number(rect.height) || 0 : 0;
     /* 还没拿到画面尺寸就先按容器铺满，等 loadedmetadata 再算 */
@@ -1969,14 +1984,26 @@
 
   function updateQueueProgress(payload) {
     if (!payload || !payload.id) return;
+    var task = null;
     for (var index = 0; index < queueTasks.length; index++) {
       if (String(queueTasks[index].id) !== String(payload.id)) continue;
-      queueTasks[index].status = 'running';
-      queueTasks[index].total = Number(payload.total) || 0;
-      queueTasks[index].received = Number(payload.received) || 0;
-      saveQueue();
-      return;
+      task = queueTasks[index];
+      break;
     }
+    if (!task) {
+      task = { id: String(payload.id) };
+      queueTasks.push(task);
+    }
+    task.status = 'running';
+    task.total = Number(payload.total) || 0;
+    task.received = Number(payload.received) || 0;
+    if (payload.showId) task.showId = String(payload.showId);
+    if (payload.epKey !== undefined) task.epKey = String(payload.epKey);
+    if (payload.epLabel) task.epLabel = String(payload.epLabel);
+    if (payload.title) task.title = String(payload.title);
+    saveQueue();
+    syncDownloadPage();
+    renderMinePageIfOpen();
   }
 
   function updateMineProgress(total, received) {
@@ -2189,6 +2216,7 @@
         updateMineProgress(Number(payload.total) || 0, Number(payload.received) || 0);
         var downloadPage = document.getElementById('iosDlPage');
         if (downloadPage && !downloadPage.hidden) syncDownloadPage();
+        renderMinePageIfOpen();
       }
       if (event === 'done' || event === 'failed' || event === 'cancelled') removeQueueTask(payload.id);
       if (event === 'done') { syncDownloadRow(); renderMinePageIfOpen(); }
@@ -2207,6 +2235,7 @@
       updateMineProgress(total, received);
       var downloadPage = document.getElementById('iosDlPage');
       if (downloadPage && !downloadPage.hidden) syncDownloadPage();
+      renderMinePageIfOpen();
       return;
     }
     if (event === 'done') {
@@ -2551,9 +2580,26 @@
         stateNode.className = 'ip-cell-state';
         cell.appendChild(stateNode);
         cell.__iosState = stateNode;
+        var progressNode = document.createElement('progress');
+        progressNode.hidden = true;
+        progressNode.max = 1;
+        cell.appendChild(progressNode);
+        cell.__iosProgress = progressNode;
         grid.appendChild(cell);
       }
+      cell.__iosLabel = label;
       if (cell.__iosState) cell.__iosState.textContent = state === '已下载' ? '已下载' : state;
+      var task = dlTaskState(showId, key);
+      var total = Number(task && task.total) || 0;
+      var received = Number(task && task.received) || 0;
+      if (cell.__iosProgress) {
+        cell.__iosProgress.hidden = !task || task.status !== 'running' || total <= 0;
+        cell.__iosProgress.max = total || 1;
+        cell.__iosProgress.value = total > 0 ? Math.min(received, total) : 0;
+        cell.__iosProgress.setAttribute('aria-label', total > 0
+          ? '下载进度 ' + Math.min(100, Math.round(received / total * 100)) + '%'
+          : '正在下载');
+      }
       cell.className = 'ip-cell'
         + (state === '已下载' ? ' done' : '')
         + (state.indexOf('下载中') === 0 || state === '排队中' ? ' busy' : '');

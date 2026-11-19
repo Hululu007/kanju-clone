@@ -242,6 +242,33 @@ final class DownloadQueueTests: XCTestCase {
         XCTAssertEqual(saved("new-1")?["status"] as? String, "running")
         downloader.cancel(silent: true)
     }
+
+    func testPersistedRunningProgressIsSentToThePageEventSink() throws {
+        let showId = "progress-show"
+        let episodeKey = "4"
+        try write([record("progress-event", showId: showId, epKey: episodeKey, status: "running")])
+
+        let downloader = MediaDownloader.shared
+        let progress = try XCTUnwrap(downloader.eventsForPage().first)
+        XCTAssertEqual(progress["event"] as? String, "progress")
+        XCTAssertEqual(progress["id"] as? String, "progress-event")
+        XCTAssertEqual(progress["showId"] as? String, showId)
+        XCTAssertEqual(progress["epKey"] as? String, episodeKey)
+    }
+
+    func testRunningDownloadsStayInThePageSnapshotUntilTheyFinish() throws {
+        try write([
+            record("running-page", showId: "page-show", epKey: "7", status: "running", received: 45, total: 100),
+        ])
+
+        let task = try XCTUnwrap(MediaDownloader.shared.snapshotForPage().first)
+
+        XCTAssertEqual(task["status"] as? String, "running")
+        XCTAssertEqual(task["showId"] as? String, "page-show")
+        XCTAssertEqual(task["epKey"] as? String, "7")
+        XCTAssertEqual(task["received"] as? Int64, 45)
+        XCTAssertEqual(task["total"] as? Int64, 100)
+    }
 }
 
 // MARK: - REG-012 暂停 / 继续的异步竞态（真实后台 task + 进程外受控慢速源）

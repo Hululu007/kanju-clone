@@ -337,12 +337,7 @@ final class WebViewController: UIViewController {
             url: link,
             name: name,
             meta: body["meta"] as? [String: Any],
-            onProgress: { [weak self] received, total in
-                self?.sendDownloadEvent([
-                    "event": "progress", "id": id,
-                    "received": received, "total": total,
-                ])
-            },
+            onProgress: { _, _ in },
             onFinish: { _ in /* 状态由 eventSink + snapshot 统一回传，避免同一条终态投两遍 */ }
         )
         sendDownloadSnapshot()

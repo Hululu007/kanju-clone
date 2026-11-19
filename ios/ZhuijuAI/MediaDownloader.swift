@@ -113,6 +113,7 @@ final class MediaDownloader: NSObject {
     private static var tasks: [String: URLSessionDownloadTask] = [:]
     private static var finishedTasks: Set<Int> = []
     private static var movedFiles: [Int: [String: Any]] = [:]
+    private static var lastProgressEventAt: [String: TimeInterval] = [:]
     private static var lastPersistAt: TimeInterval = 0
 
     var isBusy: Bool {
@@ -802,13 +803,26 @@ extension MediaDownloader: URLSessionDownloadDelegate {
         totalBytesWritten: Int64,
         totalBytesExpectedToWrite: Int64
     ) {
-        guard let id = downloadTask.taskDescription else { return }
+        guard let id = downloadTask.taskDescription, Self.record(id)?.status == "running" else { return }
         Self.update(id, force: false) { record in
-            guard record.status == "running" else { return }
             record.received = totalBytesWritten
             record.total = totalBytesExpectedToWrite > 0 ? totalBytesExpectedToWrite : record.total
         }
         Self.progressHandlers[id]?(totalBytesWritten, totalBytesExpectedToWrite)
+        let now = Date().timeIntervalSince1970
+        let isLastChunk = totalBytesExpectedToWrite > 0 && totalBytesWritten >= totalBytesExpectedToWrite
+        let shouldSendEvent = isLastChunk || now - (Self.lastProgressEventAt[id] ?? 0) >= 0.25
+        if shouldSendEvent, let record = Self.record(id) {
+            Self.lastProgressEventAt[id] = now
+            var event: [String: Any] = [
+                "event": "progress", "id": id, "showId": record.showId ?? "",
+                "epKey": record.epKey ?? "", "epLabel": record.ep, "title": record.title,
+                "received": record.received, "total": record.total,
+            ]
+            event["cover"] = record.meta["cover"] ?? ""
+            event["showTotal"] = record.meta["total"] ?? ""
+            Self.eventSink?([event])
+        }
     }
 
     func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
