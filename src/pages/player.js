@@ -114,41 +114,41 @@ const body = `<section class="page-body"><div class="wrap page pw" style="--h:${
             <button class="pl-rb" type="button" data-rate="+0.25" aria-label="加速 0.25" title="加速">+</button>
             <button class="pl-rb" type="button" data-rate="max" aria-label="最快速度" title="最快">»</button>
           </div>
-          <button class="pl-quality" id="qualityPill" type="button" aria-label="线路与清晰度">
-            <i class="pl-dot" aria-hidden="true"></i>
-            <span id="qualityText">1080P · 官方线路</span>
-            <b>自动</b>
-          </button>
         </div>
 
         <button class="pl-bigplay" id="bigPlay" type="button" aria-label="播放">${icon('play', 30)}</button>
 
-        <button class="pl-epov" id="epOverlay" type="button">≡ <span id="playerLabel">${epLabel(startIdx)}</span> ›</button>
-        <p class="pl-hint" id="playHint"></p>
+        <button class="pl-epov" id="epOverlay" type="button">≡▷ <span id="playerLabel">${epLabel(startIdx)}</span> ›</button>
 
-        <div class="pl-ctrl" id="ppCtrl">
+        <div class="pl-ctrl" id="plCtrl">
           <div class="pl-seek" id="plSeek" role="slider" tabindex="0" aria-label="播放进度" aria-valuemin="0" aria-valuemax="0" aria-valuenow="0">
             <i class="pl-buf" id="plBuf"></i>
             <i class="pl-played" id="plPlayed"></i>
-            <b class="pl-knob" id="plKnob"></b>
           </div>
           <div class="pl-btns">
             <div class="pl-btns-l">
-              <button class="plb" id="btnPlay" type="button" aria-label="播放 / 暂停">${icon('play', 18)}</button>
-              <button class="plb" id="btnNext" type="button" aria-label="下一集">${icon('chevronRight', 18)}<i class="plb-bar"></i></button>
+              <button class="plb" id="btnPlay" type="button" aria-label="播放 / 暂停">${icon('play', 20)}</button>
+              <button class="plb" id="btnNext" type="button" aria-label="下一集">${icon('next', 20)}</button>
               <div class="pl-vol">
-                <button class="plb" id="btnVol" type="button" aria-label="静音">${icon('volume', 18)}</button>
+                <button class="plb" id="btnVol" type="button" aria-label="静音">${icon('volume', 20)}</button>
                 <input class="pl-vol-range" id="volRange" type="range" min="0" max="1" step="0.05" value="1" aria-label="音量" />
               </div>
-              <span class="pl-time" id="plTime">00:00 / 00:00</span>
+              <span class="pl-time" id="plTime">03:06 / 45:45</span>
+            </div>
+            <div class="pl-btns-m">
+              <button class="dm-icon" id="btnDm" type="button" aria-label="弹幕开关" aria-pressed="true">弹</button>
+              <button class="dm-icon" id="btnDmSet" type="button" aria-label="弹幕设置">弹<i>⚙</i></button>
+              <div class="dm-input">
+                <input id="dmText" type="text" maxlength="60" placeholder="发个友善的弹幕见证当下" autocomplete="off" aria-label="弹幕内容" />
+                <button id="dmSend" type="button">发送</button>
+              </div>
             </div>
             <div class="pl-btns-r">
-              <button class="plb plb-text" id="btnDm" type="button" aria-label="弹幕开关">弹幕 开</button>
-              <button class="plb" id="btnDmSet" type="button" aria-label="弹幕设置">${icon('chat', 18)}</button>
-              <button class="plb" id="btnGear" type="button" aria-label="播放设置">${icon('settings', 18)}</button>
-              <button class="plb" id="btnPip" type="button" aria-label="画中画">${icon('grid', 18)}</button>
-              <button class="plb" id="btnWebFull" type="button" aria-label="网页全屏">${icon('monitor', 18)}</button>
-              <button class="plb" id="btnFull" type="button" aria-label="全屏">${icon('external', 18)}</button>
+              <button class="pl-quality" id="qualityPill" type="button" aria-label="线路与清晰度"><span id="qualityText">1080P-官方R</span></button>
+              <button class="plb" id="btnGear" type="button" aria-label="播放设置">${icon('settings', 20)}</button>
+              <button class="plb" id="btnPip" type="button" aria-label="画中画">${icon('pip', 20)}</button>
+              <button class="plb" id="btnWebFull" type="button" aria-label="网页全屏">${icon('webfull', 20)}</button>
+              <button class="plb" id="btnFull" type="button" aria-label="全屏">${icon('fullscreen', 20)}</button>
             </div>
           </div>
         </div>
@@ -188,10 +188,6 @@ const body = `<section class="page-body"><div class="wrap page pw" style="--h:${
               <option value="25">1/4 画面</option><option value="50">1/2 画面</option><option value="75">3/4 画面</option><option value="100">全画面</option>
             </select>
           </p>
-          <div class="pl-dmsend">
-            <input id="dmText" type="text" maxlength="60" placeholder="发条弹幕…" autocomplete="off" />
-            <button type="button" id="dmSend">发送</button>
-          </div>
         </div>
 
         <div class="pl-eps" id="plEps" hidden>
@@ -293,13 +289,11 @@ const $ = (sel) => document.querySelector(sel)
 const player = document.getElementById('player')
 const video = document.getElementById('video')
 const label = document.getElementById('playerLabel')
-const hint = document.getElementById('playHint')
 const dmLayer = document.getElementById('dmLayer')
-const ppCtrl = document.getElementById('ppCtrl')
+const ppCtrl = document.getElementById('plCtrl')
 const seekBar = document.getElementById('plSeek')
 const seekBuf = document.getElementById('plBuf')
 const seekPlayed = document.getElementById('plPlayed')
-const seekKnob = document.getElementById('plKnob')
 const btnPlay = document.getElementById('btnPlay')
 const bigPlay = document.getElementById('bigPlay')
 const btnNext = document.getElementById('btnNext')
@@ -397,7 +391,6 @@ function paintProgress() {
   const t = video.currentTime || 0
   const ratio = d > 0 ? Math.min(1, Math.max(0, t / d)) : 0
   seekPlayed.style.width = (ratio * 100).toFixed(3) + '%'
-  seekKnob.style.left = (ratio * 100).toFixed(3) + '%'
   let buffered = 0
   try {
     if (video.buffered && video.buffered.length) buffered = video.buffered.end(video.buffered.length - 1)
@@ -538,7 +531,7 @@ function applyHQ() {
 
 function applyFill() {
   const value = getSetting('fill')
-  video.style.objectFit = value === 'fill' ? 'fill' : value === 'cover' ? 'cover' : 'contain'
+  video.style.objectFit = value === 'fill' ? 'fill' : 'cover'
   const label = (FILL_MODES.find(([mode]) => mode === value) || FILL_MODES[0])[1]
   const pgFill = document.getElementById('pgFill')
   if (pgFill) pgFill.textContent = label
@@ -562,8 +555,8 @@ let dmLane = 0
 
 function applyDm() {
   dmOn = getSetting('danmaku')
-  btnDm.textContent = dmOn ? '弹幕 开' : '弹幕 关'
-  btnDm.classList.toggle('on', dmOn)
+  btnDm.textContent = '弹'
+  btnDm.classList.toggle('off', !dmOn)
   btnDm.setAttribute('aria-pressed', String(dmOn))
   if (!dmOn) dmLayer.innerHTML = ''
 }
@@ -632,7 +625,6 @@ async function sendDm() {
   const t = video.currentTime || 0
   const ok = await sendDanmaku(show.id, currentEpIdx(), t, text)
   if (!ok) {
-    hint.textContent = '弹幕发送失败，稍后再试'
     return
   }
   dmText.value = ''
@@ -776,7 +768,7 @@ function lineOptions(epIdx) {
 function updateQuality() {
   const options = lineOptions(currentEpIdx())
   const hit = options.find((o) => o.provider === currentProvider) || options[0]
-  qualityText.textContent = hit ? hit.label : '官方线路'
+  qualityText.textContent = hit ? hit.label : '1080P-官方R'
   qualityPill.title = hit ? hit.label : ''
 }
 
@@ -1030,19 +1022,16 @@ function attach(url) {
   }
   if (!url) return
   if (isHlsUrl(url) && typeof window.MediaSource !== 'undefined') {
-    hint.textContent = '正在加载 HLS 线路…'
     loadHls()
       .then((Hls) => {
         hls = new Hls({ maxBufferLength: 30 })
         hls.on(Hls.Events.ERROR, (_e, data) => {
           if (!data?.fatal) return
-          hint.textContent = '这条 HLS 线路播不动，换一集或稍后再试。'
         })
         hls.loadSource(url)
         hls.attachMedia(video)
       })
       .catch(() => {
-        hint.textContent = 'HLS 线路加载失败。'
       })
     return
   }
@@ -1092,25 +1081,20 @@ async function play(idx, autoplay = true, preferred = '') {
   playRetried = false
   skipDone = { intro: false, outro: false }
   paintEpSelection(ep.idx)
-  hint.textContent = '正在换取片源…'
   await ensureLines(ep.idx)
   if (!preferred) preferred = currentProvider
   const fresh = await resolvePlay(show.id, ep.idx, preferred).catch(() => null)
   if (!fresh) {
-    hint.textContent = '片源服务响应超时或未连接，请稍后重试本集。'
     return
   }
   if (fresh?.error === 'login_required') {
-    hint.textContent = '这一集在原站是会员片源，匿名拿不到地址。换一部标着「可播放」的片子就能直接看。'
     return
   }
   const url = fresh?.url || ep.url
   if (fresh?.error) {
-    hint.textContent = '这一集的片源暂时取不到（线路维护或需要会员），换一集或换一部试试。'
     return
   }
   if (!url) {
-    hint.textContent = '这一集暂时取不到片源（可能是会员片源或线路维护），换一集或换一部试试。'
     return
   }
   if (fresh?.provider) currentProvider = fresh.provider
@@ -1120,7 +1104,6 @@ async function play(idx, autoplay = true, preferred = '') {
   attach(url)
   skipInfo = fresh?.skip || null
   loadDm(ep.idx)
-  hint.textContent = fresh
     ? `正在播放 ${epLabel(ep.idx)} · 线路 ${fresh.line || '官方'} · ${fresh.kind === 'hls' ? 'HLS' : 'MP4'}${fresh.verified ? ' · 内容指纹已校验' : ''}`
     : '使用缓存的片源线路（可能已过期）'
   if (resumeTime > 0 && Number(ep.idx) === Number(resumeIdx)) {
@@ -1150,24 +1133,19 @@ function startPlayback() {
         document.removeEventListener('pointerup', retry, true)
         document.removeEventListener('touchend', retry, true)
         const again = video.play()
-        if (again && again.catch) again.catch(() => (hint.textContent = '播放器没有开始播放（' + name + '），请再点一次本集或换一条线路。'))
       }
       document.addEventListener('pointerup', retry, true)
       document.addEventListener('touchend', retry, true)
-      hint.textContent = '播放器还没开始播放，点一下画面重试。'
       return
     }
-    hint.textContent = '播放器没有开始播放（' + name + '），请再点一次本集或换一条线路。'
   })
 }
 
 video.addEventListener('error', () => {
-  hint.textContent = '这条线路在浏览器里播不动。请再点一次本集（会自动换线），或换一条线路。'
 })
 video.addEventListener('loadedmetadata', () => {
   applyRate()
   paintProgress()
-  hint.textContent = video.duration ? `时长 ${Math.round(video.duration / 60)} 分钟 · 当前线路可直接播放` : '当前线路可直接播放'
 })
 video.addEventListener('pause', () => {
   const active = currentEpIdx()
@@ -1246,7 +1224,6 @@ paintProgress()
 paintEpSelection(startIdx)
 
 if (!eps.length) {
-  hint.textContent = '这部暂时没有可播放文件。'
 }
 
 if (eps.length) {
