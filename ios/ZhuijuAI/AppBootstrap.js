@@ -502,22 +502,6 @@
       /* 选集旁的下载入口与它下面就地展开的列表（0.1.15）。
          列表是普通文档流里的一块，不是浮层：它把下方面板推开，不会盖住画面。 */
       '#iosDlEntry{display:block;margin:8px 0 0;padding:0 12px}',
-      '#iosDlEntry #iosDlButton{appearance:none;width:100%;border:1px solid rgba(22,224,157,.45);border-radius:10px;padding:11px 12px;font-size:13px;font-weight:700;background:rgba(22,224,157,.16);color:#16e09d;min-height:44px}',
-      '#iosDlPanel{margin-top:8px;padding:10px;border-radius:12px;background:rgba(255,255,255,.06)}',
-      '#iosDlPanel[hidden]{display:none!important}',
-      '#iosDlPanel .ios-dl-head{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:8px}',
-      '#iosDlPanel .ios-dl-head span{flex:1 1 100%;font-size:12px;font-weight:700;color:rgba(244,247,248,.9)}',
-      '#iosDlPanel button{border:0;border-radius:8px;padding:9px 11px;font-size:12px;font-weight:700;background:rgba(255,255,255,.14);color:#f4f7f8;min-height:38px}',
-      '#iosDlPanel #iosDlStart{background:#16e09d;color:#04241a}',
-      '#iosDlPanel .ios-dl-row{display:flex;align-items:center;gap:8px;width:100%;margin-top:6px;text-align:left}',
-      '#iosDlPanel .ios-dl-row .ios-dl-name{flex:1 1 auto;font-size:13px;font-weight:600}',
-      '#iosDlPanel .ios-dl-row .ios-dl-state{flex:0 0 auto;font-size:11px;font-weight:600;color:rgba(244,247,248,.7)}',
-      '#iosDlPanel .ios-dl-row.on{outline:2px solid #16e09d;outline-offset:-2px}',
-      '#iosDlPanel .ios-dl-row .ios-dl-tick{flex:0 0 auto;width:16px;text-align:center;color:#16e09d}',
-      "html[data-theme='light'] #iosDlPanel{background:rgba(15,20,24,.06)}",
-      "html[data-theme='light'] #iosDlPanel button{background:rgba(15,20,24,.1);color:#141a1e}",
-      "html[data-theme='light'] #iosDlPanel .ios-dl-row .ios-dl-state{color:rgba(15,20,24,.66)}",
-      "html[data-theme='light'] #iosDlEntry #iosDlButton{background:rgba(18,153,111,.14);color:#0b8a5f}", 
       '#epGrid .ep.ios-pick{outline:2px solid #16e09d!important;outline-offset:-2px}',
       'html[data-theme=\'light\'] #iosBatchBar{background:rgba(15,20,24,.06)}',
       'html[data-theme=\'light\'] #iosBatchBar button{background:rgba(15,20,24,.1);color:#141a1e}',
@@ -2154,24 +2138,8 @@
   function syncDownloadRow() {
     mountDownloadPanel();
     syncLegacyDownloadStatus();
-    var row = document.getElementById('ppDownload');
-    if (row) row.className = 'pc-menu-row' + (downloadState.busy ? ' busy' : '');
-    var open = document.getElementById('ppOpenLocal');
-    if (open) {
-      var has = !!downloadState.path;
-      if (typeof open.removeAttribute === 'function' && has) open.removeAttribute('hidden');
-      else if (typeof open.setAttribute === 'function') open.setAttribute('hidden', '');
-      open.hidden = !has;
-    }
-    var cast = document.getElementById('ppCast');
-    if (cast) {
-      cast.textContent = downloadState.busy
-        ? '下载 ' + (downloadState.percent ? downloadState.percent + '%' : '0%')
-        : '外放';
-    }
-    noteOf('ppDownload', downloadNote());
-    noteOf('ppDownloadProgress', downloadProgressNote());
     renderDownloadLibrary();
+    syncTencentUI();
     saveDownload();
   }
 
@@ -3028,25 +2996,10 @@
 
   /// 把「下载」按钮挂到投屏入口原来的位置；找不到投屏入口就退回选集区上方。
   function mountDlEntry() {
-    if (document.getElementById('iosDlEntry')) { syncDlSheet(); return true; }
-    var body = document.body;
-    var grid = document.getElementById('epGrid');
-    var host = grid && grid.parentNode ? grid.parentNode : body;
-    if (!host || typeof host.insertBefore !== 'function') return false;
-    var entry = document.createElement('div');
-    entry.id = 'iosDlEntry';
-    var button = document.createElement('button');
-    button.id = 'iosDlButton';
-    button.type = 'button';
-    button.textContent = '下载';
-    entry.appendChild(button);
-    var panel = document.createElement('div');
-    panel.id = 'iosDlPanel';
-    panel.hidden = true;
-    panel.setAttribute('hidden', '');
-    entry.appendChild(panel);
-    host.insertBefore(entry, grid && grid.parentNode === host ? grid : null);
-    syncDlSheet();
+    var tool = document.getElementById('ppToolDownload');
+    if (tool && tool.parentNode) tool.parentNode.removeChild(tool);
+    var legacy = document.getElementById('iosDlEntry');
+    if (legacy && legacy.parentNode) legacy.parentNode.removeChild(legacy);
     return true;
   }
 
@@ -3301,6 +3254,7 @@
         cell.type = 'button';
         cell.id = 'iosDlCell6-' + key;
         cell.className = 'ip-cell';
+        cell.setAttribute('data-ios-act', 'download-episode');
         cell.setAttribute('data-dl-ep', key);
         var nameNode = document.createElement('span');
         nameNode.textContent = /^第\d+集$/.test(label) ? label : label;
@@ -3594,6 +3548,8 @@
     if (act === 'cast') { postNative({ action: 'share', url: mediaUrl(), title: showMeta().title || '' }); return true; }
     if (act === 'share') { postNative({ action: 'share', url: mediaUrl(), title: showMeta().title || '' }); return true; }
     if (act === 'play-settings') { openPlaySettings(); return true; }
+    if (act === 'download-episode') { startEpisodeDownload(dlRowKeyOf(target)); return true; }
+    if (act === 'ps-download') { var currentNodes = epNodes(); if (currentNodes.length) startEpisodeDownload(epKeyOf(currentNodes[currentEpIndex()])); return true; }
     if (act === 'ps-close') { closePlaySettings(); return true; }
     if (act === 'intro') { announce(showMeta().title ? (showMeta().title + '：暂无更多简介') : '暂无简介'); return true; }
     if (act === 'expand-eps') { var btn = document.getElementById('iosEpMore'); if (btn && typeof btn.click === 'function') btn.click(); announce('已展开全部集数'); return true; }
@@ -3609,7 +3565,7 @@
       announce('下载画质：' + next);
       return true;
     }
-    if (act === 'episodes') { if (!dlSheetOpen) toggleDlSheet(); announce('选集中'); return true; }
+    if (act === 'episodes') { openDownloadPage(); return true; }
     if (act === 'next') { var nextBtn = document.getElementById('nextEpBtn'); if (nextBtn && typeof nextBtn.click === 'function') nextBtn.click(); else announce('已经是最后一集'); return true; }
     if (act === 'ps-fill') {
       var modes = FIT_MODES;
@@ -3698,12 +3654,6 @@
     var target = event.target;
     if (!target) return false;
     if (handleTencentUI(target, event)) return true;
-    if (hit(target, 'iosDlButton')) {
-      event.preventDefault();
-      event.stopImmediatePropagation();
-      toggleDlSheet();
-      return true;
-    }
     /* 选集页「选择」模式：点选集卡片是选中/取消，不再跳集 */
     if (batchSelecting) {
       var epNode = epNodeOf(target);
@@ -3717,7 +3667,7 @@
     if (hit(target, 'iosTitleDownload')) {
       event.preventDefault();
       event.stopImmediatePropagation();
-      toggleDlSheet();
+      openDownloadPage();
       return true;
     }
     if (target && target.getAttribute && String(target.getAttribute('data-dl-delete') || '') === '1') {

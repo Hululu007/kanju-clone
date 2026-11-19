@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       ui_smoke:
-        description: '跑出包关卡的 XCUITest 三项（真启动 App + 逐张截图），false 时只出 IPA'
+        description: '运行模拟器回归和截图关卡，false 时只运行 Node 回归并出 IPA'
         type: choice
         options: ['true', 'false']
         default: 'true'
@@ -44,6 +44,7 @@ jobs:
       # 环境问题，不是本地网络或产品逻辑（同一地址前台请求正常）。这里把它叫起来并留下状态，
       # 测试本身也会区分「环境没起来」和「传输真的错了」。
       - name: Wake the simulator background networking daemon
+        if: github.event_name != 'workflow_dispatch' || inputs.ui_smoke != 'false'
         run: |
           set -uo pipefail
           DEVICE=$(xcrun simctl list devices available -j | python3 -c 'import json,sys; d=json.load(sys.stdin); print(next(x["udid"] for group in d["devices"].values() for x in group if x["name"].startswith("iPhone")))')
@@ -64,6 +65,7 @@ jobs:
       # so no WebKit Swift overlay (libswiftWebKit.dylib) is needed at runtime. Do not reintroduce
       # a manual copy of that dylib: it does not exist in the Xcode 16.x simulator toolchain.
       - name: Run WKWebView playback regression on simulator
+        if: github.event_name != 'workflow_dispatch' || inputs.ui_smoke != 'false'
         working-directory: ios
         run: |
           set -euo pipefail
@@ -210,7 +212,7 @@ jobs:
           retention-days: 14
 
       - name: Upload playback test evidence
-        if: always()
+        if: always() && (github.event_name != 'workflow_dispatch' || inputs.ui_smoke != 'false')
         uses: actions/upload-artifact@v4
         with:
           name: ZhuijuAI-playback-tests
@@ -225,7 +227,7 @@ jobs:
       # Runs in its own step: a failing xcodebuild stops the script above (set -e),
       # so diagnostics must live where they still execute.
       - name: Export test diagnostics
-        if: failure()
+        if: failure() && (github.event_name != 'workflow_dispatch' || inputs.ui_smoke != 'false')
         working-directory: ios
         run: |
           set +e
