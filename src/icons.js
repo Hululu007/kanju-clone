@@ -53,6 +53,6 @@ const P = {
 export function icon(name, size = 16, cls = '') {
   const body = P[name] || P.info
   return `<svg class="i ${cls}" viewBox="0 0 24 24" width="${size}" height="${size}" fill="${
-    name === 'play' || name === 'bolt' ? 'currentColor' : 'none'
+    name === 'play' || name === 'bolt' || name === 'next' ? 'currentColor' : 'none'
   }" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${body}</svg>`
 }

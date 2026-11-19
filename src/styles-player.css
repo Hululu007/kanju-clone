@@ -61,8 +61,8 @@
 .dm-icon:hover { border-color: #16e09d; color: #16e09d; }
 .dm-icon.off::after { content: ''; position: absolute; left: 3px; right: 3px; top: 50%; height: 1.5px; background: #fff; transform: rotate(-45deg); }
 .dm-icon i { position: absolute; right: -5px; bottom: -5px; padding: 0 2px; border-radius: 5px; background: rgba(10,14,18,.9); font-size: 9px; font-style: normal; }
-.dm-input { display: flex; align-items: center; min-width: 0; }
-.dm-input input { width: clamp(150px, 19vw, 280px); min-width: 0; height: 34px; padding: 0 12px; border: 1px solid rgba(255,255,255,.16); border-radius: 5px 0 0 5px; background: rgba(255,255,255,.24); color: #fff; font-size: 13px; outline: none; }
+.dm-input { display: flex; align-items: center; gap: 0; flex: 0 1 auto; min-width: 0; }
+.dm-input input { flex: 0 1 auto; width: clamp(150px, 19vw, 280px); min-width: 0; height: 34px; padding: 0 12px; border: 1px solid rgba(255,255,255,.16); border-radius: 5px 0 0 5px; background: rgba(255,255,255,.24); color: #fff; font-size: 13px; outline: none; }
 .dm-input input::placeholder { color: rgba(255,255,255,.72); }
 .dm-input button { height: 34px; padding: 0 18px; border: 0; border-radius: 0 5px 5px 0; background: #16e09d; color: #06211a; font-size: 13px; font-weight: 700; cursor: pointer; }
 .dm-input button:hover { background: #2aefae; }
@@ -111,7 +111,7 @@
 
 /* 弹幕层：设置项生效于此 */
 .dm-layer { position: absolute; inset: 0; height: auto; overflow: hidden; pointer-events: none; z-index: 4; }
-.dm-item { position: absolute; right: 0; white-space: nowrap; font-size: var(--dm-size, 18px); color: #fff; text-shadow: 0 1px 2px rgba(0,0,0,.85); opacity: var(--dm-opacity, .9); animation: dmFly var(--dur, 8s) linear forwards; }
+.dm-item { position: absolute; left: auto; right: 0; width: max-content; white-space: nowrap; font-size: var(--dm-size, 18px); color: #fff; text-shadow: 0 1px 2px rgba(0,0,0,.85); opacity: var(--dm-opacity, .9); animation: dmFly var(--dur, 8s) linear forwards; }
 @keyframes dmFly { from { transform: translateX(100%); } to { transform: translateX(-140%); } }
 
 /* ---------- 右侧栏 ---------- */

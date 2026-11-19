@@ -339,6 +339,7 @@ function showControls({ keep = false } = {}) {
   if (keep || !playing()) return
   hideTimer = setTimeout(() => {
     if (!playing() || video.seeking) return
+    if (ppCtrl && document.activeElement && ppCtrl.contains(document.activeElement)) return
     if (gear && !gear.hidden) return
     if (linePop && !linePop.hidden) return
     if (dmPop && !dmPop.hidden) return
@@ -350,6 +351,7 @@ function showControls({ keep = false } = {}) {
 
 player.addEventListener('pointermove', () => showControls())
 player.addEventListener('pointerdown', () => showControls())
+player.addEventListener('focusin', () => showControls())
 player.addEventListener('pointerleave', () => {
   pointerInside = false
   showControls()
@@ -379,7 +381,7 @@ const clock = (value) => {
 
 function syncPlayButton() {
   const on = playing()
-  btnPlay.innerHTML = on ? icon('pause', 18) : icon('play', 18)
+  btnPlay.innerHTML = on ? icon('pause', 20) : icon('play', 20)
   btnPlay.setAttribute('aria-label', on ? '暂停' : '播放')
   bigPlay.classList.toggle('on', !on)
   bigPlay.setAttribute('aria-label', on ? '暂停' : '播放')
@@ -464,7 +466,7 @@ volRange.addEventListener('input', () => {
 })
 function syncVolumeIcon() {
   const muted = video.muted || video.volume === 0
-  btnVol.innerHTML = icon(muted ? 'volumeMute' : 'volume', 18)
+  btnVol.innerHTML = icon(muted ? 'volumeMute' : 'volume', 20)
   btnVol.setAttribute('aria-label', muted ? '取消静音' : '静音')
 }
 
@@ -1104,8 +1106,6 @@ async function play(idx, autoplay = true, preferred = '') {
   attach(url)
   skipInfo = fresh?.skip || null
   loadDm(ep.idx)
-    ? `正在播放 ${epLabel(ep.idx)} · 线路 ${fresh.line || '官方'} · ${fresh.kind === 'hls' ? 'HLS' : 'MP4'}${fresh.verified ? ' · 内容指纹已校验' : ''}`
-    : '使用缓存的片源线路（可能已过期）'
   if (resumeTime > 0 && Number(ep.idx) === Number(resumeIdx)) {
     const seekResume = () => {
       video.currentTime = Math.min(resumeTime, Math.max(0, video.duration - 1))
