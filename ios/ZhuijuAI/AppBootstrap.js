@@ -311,10 +311,88 @@
       '#ppCtrl #ppRate{background:rgba(255,255,255,.16)}',
       '#ppCtrl #ppFull{background:rgba(22,224,157,.92);color:#04241a}',
       /* 全屏 + 暂停时才在屏幕顶部出现的一排：默认 / 拉伸 / 平铺（规格 §1） */
-      '#iosFitBar{position:absolute;left:0;right:0;top:0;z-index:10005;display:none;justify-content:center;gap:8px;padding:calc(10px + env(safe-area-inset-top,0px)) 12px 10px;background:linear-gradient(to bottom,rgba(0,0,0,.75),rgba(0,0,0,0));pointer-events:none}',
-      '#iosFitBar.on{display:flex}',
-      '#iosFitBar button{pointer-events:auto;appearance:none;border:1px solid rgba(255,255,255,.28);border-radius:9px;padding:9px 14px;font-size:13px;font-weight:600;background:rgba(0,0,0,.45);color:#fff;min-height:40px}',
-      '#iosFitBar button.on{border-color:#16e09d;background:rgba(22,224,157,.9);color:#04241a}',
+      /* ---- 0.1.17 五屏规格（ios/UX_SPEC.md） ---- */
+      /* 全屏顶部栏：左 返回 + 剧名 + 画面模式下拉，右 投屏/分享/更多 */
+      '#iosFsTop{position:absolute;left:0;right:0;top:0;z-index:10006;display:none;align-items:center;gap:8px;padding:calc(8px + env(safe-area-inset-top,0px)) 12px 10px;background:linear-gradient(to bottom,rgba(0,0,0,.8),rgba(0,0,0,0))}',
+      '#iosFsTop.on{display:flex}',
+      '#iosFsTop .iosfs-btn{appearance:none;border:0;background:transparent;color:#fff;font-size:13px;font-weight:600;padding:8px 6px;min-height:40px;min-width:36px}',
+      '#iosFsTop .iosfs-title{flex:1 1 auto;min-width:0;font-size:13px;font-weight:600;color:#fff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
+      '#iosFsTop .iosfs-fit{border:1px solid rgba(255,255,255,.4);border-radius:8px;padding:7px 10px;background:rgba(0,0,0,.4);color:#fff;font-size:12px;font-weight:600;min-height:34px}',
+      '#iosFsMenu{position:absolute;z-index:10007;top:calc(52px + env(safe-area-inset-top,0px));left:12px;display:none;flex-direction:column;min-width:112px;padding:6px;border-radius:10px;background:rgba(12,18,22,.97);border:1px solid rgba(255,255,255,.16)}',
+      '#iosFsMenu.on{display:flex}',
+      '#iosFsMenu button{border:0;background:transparent;color:#fff;font-size:13px;font-weight:600;text-align:left;padding:11px 14px;border-radius:8px;min-height:42px}',
+      '#iosFsMenu button.on{background:rgba(22,224,157,.22);color:#16e09d}',
+      /* 全屏左右居中的锁屏 / 截图 */
+      '#iosFsSide{position:absolute;top:50%;transform:translateY(-50%);z-index:10005;display:none;flex-direction:column;gap:18px}',
+      '#iosFsSide.on{display:flex}',
+      '#iosFsSide.left{left:14px}',
+      '#iosFsSide.right{right:14px}',
+      '#iosFsSide button{appearance:none;border:0;border-radius:50%;width:44px;height:44px;background:rgba(0,0,0,.45);color:#fff;font-size:17px}',
+      /* 全屏第二排：字幕 / 倍速 / 画质 / 选集 / 下一集 */
+      '#iosFsRow2{position:absolute;left:0;right:0;bottom:0;z-index:10005;display:none;align-items:center;justify-content:flex-end;gap:4px;padding:0 10px calc(8px + env(safe-area-inset-bottom,0px))}',
+      '#iosFsRow2.on{display:flex}',
+      '#iosFsRow2 button{appearance:none;border:0;background:transparent;color:#fff;font-size:12px;font-weight:600;padding:9px 10px;min-height:40px}',
+      /* 播放页顶部（竖屏）：返回 + 投屏/分享/更多 */
+      '#iosTopBar{position:absolute;left:0;right:0;top:0;z-index:10006;display:flex;align-items:center;gap:6px;padding:8px 10px;background:linear-gradient(to bottom,rgba(0,0,0,.62),rgba(0,0,0,0))}',
+      '#iosTopBar button{appearance:none;border:0;background:transparent;color:#fff;font-size:13px;font-weight:600;padding:8px 9px;min-height:38px}',
+      '#iosTopBar .iostb-title{flex:1 1 auto;min-width:0;font-size:13px;color:#fff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
+      /* 播放器下方：剧名 + 追剧 / 下载；信息行；选集标题 */
+      '#iosTitleRow{display:flex;align-items:center;gap:10px;padding:12px 12px 0}',
+      '#iosTitleRow .iostr-name{flex:1 1 auto;min-width:0;font-size:19px;font-weight:800;color:inherit;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
+      '#iosTitleRow button{appearance:none;border:1px solid rgba(255,255,255,.18);background:rgba(255,255,255,.07);color:inherit;border-radius:10px;padding:9px 11px;font-size:12px;font-weight:700;min-height:40px;white-space:nowrap}',
+      '#iosTitleRow button.on{border-color:rgba(22,224,157,.6);color:#16e09d}',
+      '#iosInfoRow{display:flex;align-items:center;gap:6px;padding:8px 12px 0;font-size:12px;color:rgba(232,241,245,.72);flex-wrap:wrap}',
+      '#iosInfoRow .iosir-more{border:0;background:transparent;color:rgba(232,241,245,.72);font-size:12px;padding:2px 4px}',
+      '#iosEpHead{display:flex;align-items:center;gap:8px;padding:14px 12px 0}',
+      '#iosEpHead .ioseh-title{flex:1 1 auto;border:0;background:transparent;color:inherit;font-size:16px;font-weight:800;text-align:left;padding:0;min-height:32px}',
+      /* 整页推入的下载页 / 我的下载 */
+      '.ios-page{position:fixed;left:0;right:0;top:0;bottom:0;z-index:13000;display:flex;flex-direction:column;background:#0b1116;color:#e8f1f5}',
+      '.ios-page[hidden]{display:none!important}',
+      '.ios-page .ip-head{display:flex;align-items:center;gap:10px;padding:calc(10px + env(safe-area-inset-top,0px)) 14px 10px;border-bottom:1px solid rgba(255,255,255,.08)}',
+      '.ios-page .ip-head .ip-title{flex:1 1 auto;font-size:16px;font-weight:800}',
+      '.ios-page .ip-head button{appearance:none;border:0;background:transparent;color:#e8f1f5;font-size:14px;font-weight:600;padding:8px 6px;min-height:40px}',
+      '.ios-page .ip-body{flex:1 1 auto;overflow-y:auto;-webkit-overflow-scrolling:touch;padding:12px 14px 16px}',
+      '.ios-page .ip-foot{padding:10px 14px calc(12px + env(safe-area-inset-bottom,0px));border-top:1px solid rgba(255,255,255,.08);display:flex;align-items:center;gap:10px;font-size:12px;color:rgba(232,241,245,.66)}',
+      '.ios-page .ip-row{display:flex;align-items:center;gap:10px;padding:12px 0;border-bottom:1px solid rgba(255,255,255,.06);font-size:13px}',
+      '.ios-page .ip-row .ip-label{flex:1 1 auto;font-weight:600}',
+      '.ios-page .ip-row .ip-value{color:rgba(232,241,245,.7);font-weight:600}',
+      '.ios-page #iosDlQuality{border:0;background:transparent;color:rgba(232,241,245,.7);font-size:13px;font-weight:600;min-height:36px}',
+      '.ios-page #iosDlGrid6{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:8px;margin-top:10px}',
+      '.ios-page .ip-cell{appearance:none;border:1px solid rgba(255,255,255,.16);border-radius:8px;background:rgba(255,255,255,.06);color:#e8f1f5;font-size:12px;font-weight:700;min-height:44px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;padding:4px}',
+      '.ios-page .ip-cell .ip-cell-state{font-size:9px;font-weight:600;color:rgba(232,241,245,.62)}',
+      '.ios-page .ip-cell.busy,.ios-page .ip-cell.done{border-color:rgba(22,224,157,.6);background:rgba(22,224,157,.18);color:#16e09d}',
+      '.ios-page .ip-cell.busy .ip-cell-state,.ios-page .ip-cell.done .ip-cell-state{color:#16e09d}',
+      '.ios-page #iosDlListBtn{flex:1 1 auto;appearance:none;border:0;border-radius:10px;background:#16e09d;color:#04241a;font-size:14px;font-weight:800;padding:12px;min-height:46px}',
+      '.ios-page .ip-sub{font-size:12px;color:rgba(232,241,245,.62);margin:2px 0 10px}',
+      '.ios-page #iosMineRunning{display:flex;gap:10px;align-items:center;padding:10px;border-radius:10px;background:rgba(22,224,157,.12);margin-bottom:12px}',
+      '.ios-page #iosMineRunning .imr-main{flex:1 1 auto;min-width:0}',
+      '.ios-page #iosMineRunning .imr-title{font-size:13px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
+      '.ios-page #iosMineRunning .imr-meta{font-size:11px;color:rgba(232,241,245,.66)}',
+      '.ios-page .ip-show{display:flex;gap:10px;align-items:center;padding:12px 0;border-bottom:1px solid rgba(255,255,255,.06)}',
+      '.ios-page .ip-show img{width:44px;height:62px;border-radius:6px;object-fit:cover;background:#182028;flex:none}',
+      '.ios-page .ip-show .ips-main{flex:1 1 auto;min-width:0}',
+      '.ios-page .ip-show .ips-title{font-size:14px;font-weight:700}',
+      '.ios-page .ip-show .ips-meta{font-size:11px;color:rgba(232,241,245,.62);margin-top:3px}',
+      '.ios-page .ip-eprow{position:relative;overflow:hidden;border-radius:9px;margin-top:8px;background:rgba(255,255,255,.05)}',
+      '.ios-page .ip-eprow .ip-epbody{display:flex;align-items:center;gap:10px;padding:11px 12px;transition:transform .16s ease;will-change:transform;touch-action:pan-y}',
+      '.ios-page .ip-eprow .ip-eptitle{flex:1 1 auto;font-size:13px;font-weight:600}',
+      '.ios-page .ip-eprow .ip-epsize{font-size:11px;color:rgba(232,241,245,.6)}',
+      '.ios-page .ip-eprow .ip-epdel{position:absolute;right:0;top:0;bottom:0;width:82px;border:0;background:#e5484d;color:#fff;font-size:13px;font-weight:700}',
+      /* 播放设置面板：从右侧滑出 */
+      '#iosPlaySettings{position:fixed;left:0;right:0;top:0;bottom:0;z-index:13100;display:none;background:rgba(4,8,11,.5)}',
+      '#iosPlaySettings.on{display:block}',
+      '#iosPlaySettings .ips-card{position:absolute;right:0;top:0;bottom:0;width:min(320px,84vw);background:#0e151b;color:#e8f1f5;padding:calc(14px + env(safe-area-inset-top,0px)) 16px calc(16px + env(safe-area-inset-bottom,0px));overflow-y:auto;box-shadow:-8px 0 24px rgba(0,0,0,.5)}',
+      '#iosPlaySettings .ips-head{display:flex;align-items:center;margin-bottom:14px}',
+      '#iosPlaySettings .ips-head .ips-title{flex:1 1 auto;font-size:15px;font-weight:800}',
+      '#iosPlaySettings .ips-head button{appearance:none;border:0;background:transparent;color:#e8f1f5;font-size:17px;padding:6px}',
+      '#iosPlaySettings .ips-icons{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:16px}',
+      '#iosPlaySettings .ips-icons button{appearance:none;border:0;background:rgba(255,255,255,.07);color:#e8f1f5;border-radius:10px;padding:12px 4px;font-size:11px;font-weight:600;min-height:64px}',
+      '#iosPlaySettings .ips-list .ips-item{display:flex;align-items:center;gap:10px;padding:13px 0;border-bottom:1px solid rgba(255,255,255,.07);font-size:13px}',
+      '#iosPlaySettings .ips-list .ips-item .ips-name{flex:1 1 auto;font-weight:600}',
+      '#iosPlaySettings .ips-list .ips-item .ips-val{color:rgba(232,241,245,.66);font-size:12px}',
+      "html[data-theme='light'] .ios-page{background:#f6f7f9;color:#151b20}",
+      "html[data-theme='light'] .ios-page .ip-head button,html[data-theme='light'] .ios-page .ip-cell{color:#151b20}",
+      "html[data-theme='light'] #iosPlaySettings .ips-card{background:#fff;color:#151b20}", 
       /* 集数网格：一行 5–6 个，格子之间留正常间距（规格 §2） */
       '#iosDlGrid{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:8px;margin-top:8px}',
       '#iosDlGrid .ios-dl-cell{appearance:none;border:1px solid rgba(255,255,255,.16);border-radius:10px;background:rgba(255,255,255,.06);color:#e8f1f5;font-size:12px;font-weight:600;padding:10px 4px;min-height:56px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px}',
@@ -437,6 +515,7 @@
     mountDownloadPanel();
     mountDlEntry();
     mountFitBar();
+    mountTencentUI();
     applyImmersive();
     installPlaybackGuard();
   }
@@ -657,14 +736,7 @@
     video.style.width = Math.round(width) + 'px';
     video.style.height = Math.round(height) + 'px';
     if (typeof video.setAttribute === 'function') video.setAttribute('data-ios-fit-box', fitMode);
-    var bar = document.getElementById('iosFitBar');
-    if (bar) {
-      var buttons = bar.querySelectorAll ? bar.querySelectorAll('button') : [];
-      for (var i = 0; i < buttons.length; i++) {
-        var mode = buttons[i].getAttribute ? buttons[i].getAttribute('data-fit') : '';
-        buttons[i].className = mode === fitMode ? 'on' : '';
-      }
-    }
+    /* 下拉按钮的文字由 syncFitBar 统一维护（这里不再直接摸旧的三按钮） */
   }
 
   function chooseFit(mode) {
@@ -675,40 +747,102 @@
     announce('画面：' + (FIT_LABELS[mode] || '默认'));
   }
 
-  /// 顶部那排控件只在「全屏 + 暂停」时出现（规格 §1）
+  /// 全屏顶部栏与它的下拉、左右侧按钮、第二排：只在沉浸态出现，
+  /// 并且按规格「点屏幕或暂停时出现，播放几秒后自动隐藏」跟随控制栏一起收放。
   function syncFitBar() {
-    var bar = document.getElementById('iosFitBar');
-    if (!bar) return;
     var video = document.getElementById('video');
     var paused = !video || video.paused !== false;
-    var show = immersiveNow() && paused;
-    bar.className = show ? 'on' : '';
-    if (!show) return;
+    var visible = immersiveNow() && (paused || !ctrlHidden);
+    var top = document.getElementById('iosFsTop');
+    if (top) top.className = visible ? 'on' : '';
+    var side = document.getElementById('iosFsSide');
+    if (side) side.className = visible ? 'on' : '';
+    var left = document.getElementById('iosFsSideLeft');
+    if (left) left.className = 'left' + (visible ? ' on' : '');
+    var right = document.getElementById('iosFsSideRight');
+    if (right) right.className = 'right' + (visible ? ' on' : '');
+    var row2 = document.getElementById('iosFsRow2');
+    if (row2) row2.className = visible ? 'on' : '';
+    if (!visible) {
+      var menu = document.getElementById('iosFsMenu');
+      if (menu) menu.className = '';
+    }
+    /* 下拉按钮的文字就是当前档位（默认 ▾ / 拉伸 ▾ / 平铺 ▾） */
     fitMode = readFitPref();
-    var buttons = bar.querySelectorAll ? bar.querySelectorAll('button') : [];
-    for (var i = 0; i < buttons.length; i++) {
-      var mode = buttons[i].getAttribute ? buttons[i].getAttribute('data-fit') : '';
-      buttons[i].className = mode === fitMode ? 'on' : '';
+    var label = document.getElementById('iosFsFitBtn');
+    if (label) label.textContent = (FIT_LABELS[fitMode] || '默认') + ' ▾';
+    var menu = document.getElementById('iosFsMenu');
+    if (menu && menu.querySelectorAll) {
+      var options = menu.querySelectorAll('button');
+      for (var i = 0; i < options.length; i++) {
+        var mode = options[i].getAttribute ? options[i].getAttribute('data-fit') : '';
+        options[i].className = mode === fitMode ? 'on' : '';
+      }
+    }
+    /* 顶部剧名 = 剧名 + 第几集 */
+    var title = document.getElementById('iosFsTitle');
+    if (title) {
+      var meta = showMeta();
+      var ep = episodeLabel();
+      title.textContent = (meta.title || '正在播放') + (ep ? ' · ' + ep : '');
     }
   }
 
-  function mountFitBar() {
+  /// 全屏顶部栏：左 返回 + 剧名 + 画面模式下拉，右 投屏 / 分享 / 更多
+  function mountFsTop() {
     var player = document.getElementById('player');
     if (!player || typeof player.appendChild !== 'function') return false;
-    if (document.getElementById('iosFitBar')) { syncFitBar(); return true; }
-    var bar = document.createElement('div');
-    bar.id = 'iosFitBar';
+    if (document.getElementById('iosFsTop')) { syncFitBar(); return true; }
+    var top = document.createElement('div');
+    top.id = 'iosFsTop';
+    top.innerHTML = ''
+      + '<button class="iosfs-btn" type="button" data-ios-act="back" aria-label="返回">‹</button>'
+      + '<span class="iosfs-title" id="iosFsTitle"></span>'
+      + '<button class="iosfs-fit" type="button" id="iosFsFitBtn" aria-label="画面模式">默认 ▾</button>'
+      + '<button class="iosfs-btn" type="button" data-ios-act="cast" aria-label="投屏">投屏</button>'
+      + '<button class="iosfs-btn" type="button" data-ios-act="share" aria-label="分享">分享</button>'
+      + '<button class="iosfs-btn" type="button" data-ios-act="play-settings" aria-label="更多">···</button>';
+    player.appendChild(top);
+
+    var menu = document.createElement('div');
+    menu.id = 'iosFsMenu';
     for (var i = 0; i < FIT_MODES.length; i++) {
       (function (mode) {
-        var button = document.createElement('button');
-        button.type = 'button';
-        button.textContent = FIT_LABELS[mode];
-        button.setAttribute('data-fit', mode);
-        button.setAttribute('aria-label', '画面' + FIT_LABELS[mode]);
-        bar.appendChild(button);
+        var option = document.createElement('button');
+        option.type = 'button';
+        option.textContent = FIT_LABELS[mode];
+        option.setAttribute('data-fit', mode);
+        option.setAttribute('aria-label', '画面' + FIT_LABELS[mode]);
+        menu.appendChild(option);
       }(FIT_MODES[i]));
     }
-    player.appendChild(bar);
+    player.appendChild(menu);
+
+    var left = document.createElement('div');
+    left.id = 'iosFsSideLeft';
+    left.className = 'left';
+    left.innerHTML = '<button type="button" data-ios-act="lock" aria-label="锁屏">🔒</button>';
+    player.appendChild(left);
+
+    var right = document.createElement('div');
+    right.id = 'iosFsSideRight';
+    right.className = 'right';
+    right.innerHTML = '<button type="button" data-ios-act="shot" aria-label="截图">📷</button>';
+    player.appendChild(right);
+
+    var row2 = document.createElement('div');
+    row2.id = 'iosFsRow2';
+    row2.innerHTML = ''
+      + '<button type="button" data-ios-act="subtitle" aria-label="字幕">字幕</button>'
+      + '<button type="button" data-ios-act="rate" aria-label="倍速">倍速</button>'
+      + '<button type="button" data-ios-act="quality" aria-label="画质">720P</button>'
+      + '<button type="button" data-ios-act="episodes" aria-label="选集">选集</button>'
+      + '<button type="button" data-ios-act="next" aria-label="下一集">下一集 ⏭</button>';
+    player.appendChild(row2);
+
+    /* 侧栏两个元素共用 .on 控制显隐 */
+    left.id = 'iosFsSideLeft';
+    right.id = 'iosFsSideRight';
     syncFitBar();
     return true;
   }
@@ -2565,6 +2699,7 @@
     renderDownloadLibrary();
     syncBatchBar();
     syncDlSheet();
+    syncTencentUI();
   };
 
 
@@ -2823,9 +2958,606 @@
     return true;
   }
 
+
+  /* ==================== 0.1.17 五屏 UI（ios/UX_SPEC.md） ====================
+     只借布局与交互，图标全用文字/自绘；没有会员、广告、弹幕、二创、VIP 角标。
+     所有新节点都带 data-ios-act，点击统一走下面的 handleTencentUI 分发，
+     这样不用往原有那一长串 if 里再插分支。 */
+
+  var PLAY_PREF = 'kj-ios-play-settings';
+  var QUALITY_PREF = 'kj-ios-quality';
+  var FOLLOW_STORE = 'kj-ios-follow';
+  var loopMode = 'off';
+  var subtitleOn = false;
+  var skipIntro = false;
+  var epTitleOn = true;
+  var sleepTimer = '';
+
+  function readJSON(key, fallback) {
+    try {
+      var raw = localStorage.getItem(key);
+      if (!raw) return fallback;
+      var parsed = JSON.parse(raw);
+      return parsed === null || parsed === undefined ? fallback : parsed;
+    } catch (error) { return fallback; }
+  }
+  function writeJSON(key, value) {
+    try { localStorage.setItem(key, JSON.stringify(value)); } catch (error) { /* 存不了只影响记忆 */ }
+  }
+  function readPlayPrefs() {
+    var prefs = readJSON(PLAY_PREF, null) || {};
+    loopMode = prefs.loop || 'off';
+    subtitleOn = !!prefs.subtitle;
+    skipIntro = !!prefs.skipIntro;
+    epTitleOn = prefs.epTitle === undefined ? true : !!prefs.epTitle;
+  }
+  function savePlayPrefs() {
+    writeJSON(PLAY_PREF, { loop: loopMode, subtitle: subtitleOn, skipIntro: skipIntro, epTitle: epTitleOn });
+  }
+  function quality() {
+    var stored = '';
+    try { stored = String(localStorage.getItem(QUALITY_PREF) || ''); } catch (error) { stored = ''; }
+    return stored || '720P';
+  }
+  function setQuality(next) {
+    try { localStorage.setItem(QUALITY_PREF, next); } catch (error) { /* 忽略 */ }
+    var label = document.getElementById('iosFsQuality');
+    if (label) label.textContent = next;
+  }
+  function followed() {
+    var list = readJSON(FOLLOW_STORE, []) || [];
+    return list.indexOf(dlShowId()) >= 0;
+  }
+  function toggleFollow() {
+    var id = dlShowId();
+    var list = readJSON(FOLLOW_STORE, []) || [];
+    var at = list.indexOf(id);
+    if (at >= 0) list.splice(at, 1);
+    else list.push(id);
+    writeJSON(FOLLOW_STORE, list);
+    var button = document.getElementById('iosFollow');
+    if (button) {
+      button.className = at >= 0 ? '' : 'on';
+      button.textContent = at >= 0 ? '追剧' : '已追剧';
+    }
+    announce(at >= 0 ? '已取消追剧' : '已加入追剧');
+  }
+
+  /* ---- 剩余空间：真实取一次设备容量（拿不到就如实写「未知」，不编数字） ---- */
+  function storageText() {
+    var quota = navigator.storage && navigator.storage.estimate ? navigator.storage.estimate() : null;
+    if (!quota || typeof quota.then !== 'function') return { used: '', free: '剩余空间未知' };
+    var box = { used: '', free: '剩余空间未知' };
+    quota.then(function (info) {
+      var usage = Number(info && info.usage) || 0;
+      var total = Number(info && info.quota) || 0;
+      if (total > 0) {
+        box.used = '已使用 ' + megabyte(usage);
+        box.free = '剩余 ' + megabyte(Math.max(0, total - usage)) + ' 可用';
+      }
+      var footer = document.getElementById('iosDlFree');
+      if (footer) footer.textContent = box.free;
+      var footer2 = document.getElementById('iosMineUsage');
+      if (footer2) footer2.textContent = (box.used ? box.used + ' · ' : '') + box.free;
+    }).catch(function () { /* 保底文案已经写着「未知」 */ });
+    return box;
+  }
+
+  /* ---- ① 播放页：顶部 返回/投屏/分享/更多，剧名旁 追剧/下载，信息行，选集标题 ---- */
+  function mountPlayerChrome() {
+    var player = document.getElementById('player');
+    if (player && typeof player.appendChild === 'function' && !document.getElementById('iosTopBar')) {
+      var top = document.createElement('div');
+      top.id = 'iosTopBar';
+      top.innerHTML = ''
+        + '<button type="button" data-ios-act="back" aria-label="返回">‹</button>'
+        + '<span class="iostb-title" id="iosTopTitle"></span>'
+        + '<button type="button" data-ios-act="cast" aria-label="投屏">投屏</button>'
+        + '<button type="button" data-ios-act="share" aria-label="分享">分享</button>'
+        + '<button type="button" data-ios-act="play-settings" aria-label="更多">···</button>';
+      player.appendChild(top);
+    }
+    var grid = document.getElementById('epGrid');
+    var host = grid && grid.parentNode;
+    if (!host) return false;
+    var meta = showMeta();
+    /* 剧名 + 追剧 / 下载（点 ⬇ 打开整页的下载页，规格 §2） */
+    if (!document.getElementById('iosTitleRow')) {
+      var row = document.createElement('div');
+      row.id = 'iosTitleRow';
+      row.innerHTML = ''
+        + '<span class="iostr-name" id="iosTitleName"></span>'
+        + '<button type="button" id="iosFollow" aria-label="追剧">追剧</button>'
+        + '<button type="button" id="iosTitleDownload" aria-label="下载">下载 ⬇</button>';
+      host.insertBefore(row, host.firstChild);
+    }
+    var titleName = document.getElementById('iosTitleName');
+    if (titleName) titleName.textContent = meta.title || '正在播放';
+    var follow = document.getElementById('iosFollow');
+    if (follow && !follow.__iosSynced) {
+      follow.__iosSynced = true;
+      var on = followed();
+      follow.className = on ? 'on' : '';
+      follow.textContent = on ? '已追剧' : '追剧';
+    }
+    /* 信息行：类型 · 评分 · 标签 · 简介 › —— 站点给了什么就显示什么，没有的字段不编 */
+    if (!document.getElementById('iosInfoRow')) {
+      var info = document.createElement('div');
+      info.id = 'iosInfoRow';
+      info.innerHTML = '<span id="iosInfoText"></span>'
+        + '<button class="iosir-more" type="button" data-ios-act="intro" aria-label="简介">简介 ›</button>';
+      host.insertBefore(info, document.getElementById('iosTitleRow').nextSibling);
+    }
+    var infoText = document.getElementById('iosInfoText');
+    if (infoText && !infoText.__iosSynced) {
+      infoText.__iosSynced = true;
+      var bits = [];
+      var tags = document.querySelectorAll ? document.querySelectorAll('.detail-tags span,.detail-info .tag') : [];
+      for (var t = 0; t < tags.length && bits.length < 3; t++) {
+        var text = String(tags[t].textContent || '').trim();
+        if (text) bits.push(text);
+      }
+      if (Number(meta.total) > 0) bits.push('全 ' + meta.total + ' 集');
+      infoText.textContent = bits.length ? bits.join(' · ') : '剧集信息';
+    }
+    /* 选集标题：选集 全N集 ›（点开展开全部集数） */
+    if (!document.getElementById('iosEpHead')) {
+      var head = document.createElement('div');
+      head.id = 'iosEpHead';
+      head.innerHTML = '<button class="ioseh-title" type="button" data-ios-act="expand-eps" id="iosEpHeadBtn"></button>';
+      host.insertBefore(head, document.getElementById('iosDlEntry') || grid);
+    }
+    var headBtn = document.getElementById('iosEpHeadBtn');
+    if (headBtn) headBtn.textContent = '选集 全' + (Number(meta.total) || epNodes().length) + '集 ›';
+    return true;
+  }
+
+  /* ---- ② 下载页（整页推入） ---- */
+  function ensureDownloadPage() {
+    if (document.getElementById('iosDlPage')) return document.getElementById('iosDlPage');
+    if (!document.body) return null;
+    var page = document.createElement('div');
+    page.id = 'iosDlPage';
+    page.className = 'ios-page';
+    page.hidden = true;
+    page.innerHTML = ''
+      + '<div class="ip-head">'
+      + '  <button type="button" data-ios-act="dl-back" aria-label="返回">‹</button>'
+      + '  <span class="ip-title">点击集数即可下载</span>'
+      + '</div>'
+      + '<div class="ip-body">'
+      + '  <div class="ip-row"><span class="ip-label">下载画质</span>'
+      + '    <button type="button" id="iosDlQuality" data-ios-act="quality">720P ›</button></div>'
+      + '  <div class="ip-sub" id="iosDlCount"></div>'
+      + '  <div id="iosDlGrid6"></div>'
+      + '</div>'
+      + '<div class="ip-foot">'
+      + '  <button type="button" id="iosDlListBtn" data-ios-act="open-mine">查看下载列表</button>'
+      + '  <span id="iosDlFree">剩余空间未知</span>'
+      + '</div>';
+    document.body.appendChild(page);
+    return page;
+  }
+
+  function openDownloadPage() {
+    var page = ensureDownloadPage();
+    if (!page) return false;
+    page.hidden = false;
+    if (typeof page.removeAttribute === 'function') page.removeAttribute('hidden');
+    var qualityBtn = document.getElementById('iosDlQuality');
+    if (qualityBtn) qualityBtn.textContent = quality() + ' ›';
+    syncDownloadPage();
+    storageText();
+    return true;
+  }
+  function closeDownloadPage() {
+    var page = document.getElementById('iosDlPage');
+    if (!page) return;
+    page.hidden = true;
+    if (typeof page.setAttribute === 'function') page.setAttribute('hidden', '');
+  }
+
+  /// 每行 6 格；点一格立刻下载（规格 §2，不做下载全部）
+  function syncDownloadPage() {
+    var grid = document.getElementById('iosDlGrid6');
+    if (!grid) return;
+    var nodes = epNodes();
+    var showId = dlShowId();
+    var count = document.getElementById('iosDlCount');
+    if (count) count.textContent = '共 ' + nodes.length + ' 集 · 点一下立即加入下载';
+    for (var i = 0; i < nodes.length; i++) {
+      var key = epKeyOf(nodes[i]);
+      var label = epLabelOf(nodes[i]) || ('第' + key + '集');
+      var state = dlStateText(showId, key);
+      var cell = document.getElementById('iosDlCell6-' + key);
+      if (!cell) {
+        cell = document.createElement('button');
+        cell.type = 'button';
+        cell.id = 'iosDlCell6-' + key;
+        cell.className = 'ip-cell';
+        cell.setAttribute('data-dl-ep', key);
+        var nameNode = document.createElement('span');
+        nameNode.textContent = /^第\d+集$/.test(label) ? label : label;
+        cell.appendChild(nameNode);
+        var stateNode = document.createElement('span');
+        stateNode.className = 'ip-cell-state';
+        cell.appendChild(stateNode);
+        cell.__iosState = stateNode;
+        grid.appendChild(cell);
+      }
+      if (cell.__iosState) cell.__iosState.textContent = state === '已下载' ? '已下载' : state;
+      cell.className = 'ip-cell'
+        + (state === '已下载' ? ' done' : '')
+        + (state.indexOf('下载中') === 0 || state === '排队中' ? ' busy' : '');
+      cell.setAttribute('aria-label', label + ' ' + state);
+    }
+  }
+
+  /* ---- ③ 我的下载（正在下载 + 按剧分组 + 左滑删除 + 底部占用） ---- */
+  function ensureMinePage() {
+    if (document.getElementById('iosMinePage')) return document.getElementById('iosMinePage');
+    if (!document.body) return null;
+    var page = document.createElement('div');
+    page.id = 'iosMinePage';
+    page.className = 'ios-page';
+    page.hidden = true;
+    page.innerHTML = ''
+      + '<div class="ip-head">'
+      + '  <button type="button" data-ios-act="mine-back" aria-label="返回">‹</button>'
+      + '  <span class="ip-title">我的下载</span>'
+      + '  <button type="button" data-ios-act="mine-edit" aria-label="编辑">编辑</button>'
+      + '</div>'
+      + '<div class="ip-body" id="iosMineBody"></div>'
+      + '<div class="ip-foot"><span id="iosMineUsage">剩余空间未知</span></div>';
+    document.body.appendChild(page);
+    return page;
+  }
+
+  function openMinePage() {
+    var page = ensureMinePage();
+    if (!page) return false;
+    page.hidden = false;
+    if (typeof page.removeAttribute === 'function') page.removeAttribute('hidden');
+    renderMinePage();
+    storageText();
+    return true;
+  }
+  function closeMinePage() {
+    var page = document.getElementById('iosMinePage');
+    if (!page) return;
+    page.hidden = true;
+    if (typeof page.setAttribute === 'function') page.setAttribute('hidden', '');
+  }
+
+  function renderMinePage() {
+    var body = document.getElementById('iosMineBody');
+    if (!body) return;
+    body.innerHTML = '';
+    var showId = dlShowId();
+    /* 正在下载：队列里 running / queued 的集 */
+    var running = [];
+    for (var q = 0; q < queueTasks.length; q++) {
+      var task = queueTasks[q];
+      var status = String(task && task.status || '');
+      if (status === 'running' || status === 'queued') running.push(task);
+    }
+    if (running.length) {
+      var row = document.createElement('div');
+      row.id = 'iosMineRunning';
+      var total = Number(running[0].total) || 0;
+      var received = Number(running[0].received) || 0;
+      var percent = total > 0 ? Math.min(100, Math.round(received / total * 100)) : 0;
+      row.innerHTML = ''
+        + '<div class="imr-main">'
+        + '  <div class="imr-title" id="iosMineRunningTitle"></div>'
+        + '  <div class="imr-meta" id="iosMineRunningMeta"></div>'
+        + '</div>';
+      var badge = document.createElement('span');
+      badge.textContent = '正在下载 ' + running.length + ' 集';
+      row.appendChild(badge);
+      body.appendChild(row);
+      var t = document.getElementById('iosMineRunningTitle');
+      if (t) t.textContent = (running[0].title || showMeta().title || '') + ' ' + (running[0].epLabel || '');
+      var m = document.getElementById('iosMineRunningMeta');
+      if (m) {
+        m.textContent = (total > 0 ? percent + '% · ' : '接收中 · ')
+          + megabyte(received) + (running.length > 1 ? ' · 其余 ' + (running.length - 1) + ' 集排队' : '');
+      }
+    }
+    /* 已下载：按剧分组，每部下面一行一集，左滑删除 */
+    var shows = readLibrary().shows;
+    if (!shows.length) {
+      var empty = document.createElement('div');
+      empty.className = 'ip-sub';
+      empty.textContent = '还没有下载完成的剧集';
+      body.appendChild(empty);
+    }
+    for (var i = 0; i < shows.length; i++) {
+      var show = shows[i];
+      var size = 0;
+      for (var e = 0; e < show.eps.length; e++) size += Number(show.eps[e].size) || 0;
+      var block = document.createElement('div');
+      block.setAttribute('data-show', show.id);
+      var head = document.createElement('div');
+      head.className = 'ip-show';
+      if (show.cover) {
+        var img = document.createElement('img');
+        img.src = show.cover;
+        img.alt = show.title;
+        head.appendChild(img);
+      }
+      var main = document.createElement('div');
+      main.className = 'ips-main';
+      var name = document.createElement('div');
+      name.className = 'ips-title';
+      name.textContent = show.title;
+      main.appendChild(name);
+      var meta = document.createElement('div');
+      meta.className = 'ips-meta';
+      meta.textContent = '已下载 ' + show.eps.length + ' 集 · ' + megabyte(size);
+      main.appendChild(meta);
+      head.appendChild(main);
+      block.appendChild(head);
+      for (var k = 0; k < show.eps.length; k++) {
+        (function (ep) {
+          var epRow = document.createElement('div');
+          epRow.className = 'ip-eprow';
+          epRow.setAttribute('data-dl-show', show.id);
+          epRow.setAttribute('data-dl-key', String(ep.key));
+          epRow.setAttribute('aria-label', (ep.label || ('第' + ep.key + '集')) + ' 已下载，左滑可删除');
+          var body2 = document.createElement('div');
+          body2.className = 'ip-epbody';
+          var title = document.createElement('span');
+          title.className = 'ip-eptitle';
+          title.textContent = ep.label || ('第' + ep.key + '集');
+          body2.appendChild(title);
+          var sizeNode = document.createElement('span');
+          sizeNode.className = 'ip-epsize';
+          sizeNode.textContent = ep.size ? megabyte(ep.size) : '';
+          body2.appendChild(sizeNode);
+          epRow.appendChild(body2);
+          var del = document.createElement('button');
+          del.className = 'ip-epdel';
+          del.type = 'button';
+          del.textContent = '删除';
+          del.setAttribute('data-dl-delete', '1');
+          epRow.appendChild(del);
+          block.appendChild(epRow);
+        }(show.eps[k]));
+      }
+      body.appendChild(block);
+    }
+    bindMineSwipe(body);
+  }
+
+  var mineSwipe = null;
+  function bindMineSwipe(body) {
+    if (!body || body.__iosMineSwipe || typeof body.addEventListener !== 'function') return;
+    body.__iosMineSwipe = true;
+    function rowOf(node) {
+      var cursor = node;
+      while (cursor) {
+        if (cursor.className && String(cursor.className).split(' ').indexOf('ip-eprow') >= 0) return cursor;
+        cursor = cursor.parentNode;
+      }
+      return null;
+    }
+    function shift(row, dx) {
+      var inner = row.children ? row.children[0] : null;
+      if (!inner || !inner.style) return;
+      var limit = 84;
+      var offset = Math.max(-limit, Math.min(0, dx));
+      inner.style.transform = offset ? 'translateX(' + offset + 'px)' : '';
+    }
+    body.addEventListener('touchstart', function (event) {
+      var touch = event.touches && event.touches[0];
+      if (!touch) return;
+      mineSwipe = { x: touch.clientX, y: touch.clientY, row: rowOf(event.target) };
+    }, { passive: true });
+    body.addEventListener('touchmove', function (event) {
+      if (!mineSwipe || !mineSwipe.row) return;
+      var touch = event.touches && event.touches[0];
+      if (!touch) return;
+      var dx = touch.clientX - mineSwipe.x;
+      var dy = touch.clientY - mineSwipe.y;
+      if (Math.abs(dy) > Math.abs(dx) + 6) { mineSwipe = null; return; }
+      if (dx > 0) return;
+      shift(mineSwipe.row, dx);
+    }, { passive: true });
+    body.addEventListener('touchend', function () {
+      if (!mineSwipe || !mineSwipe.row) return;
+      var row = mineSwipe.row;
+      mineSwipe = null;
+      var inner = row.children ? row.children[0] : null;
+      var moved = inner && inner.style ? /translateX\(/.test(String(inner.style.transform)) : false;
+      shift(row, moved ? -84 : 0);
+    }, { passive: true });
+  }
+
+  /* ---- ⑤ 播放设置面板（从右侧滑出） ---- */
+  function ensurePlaySettings() {
+    if (document.getElementById('iosPlaySettings')) return document.getElementById('iosPlaySettings');
+    if (!document.body) return null;
+    var panel = document.createElement('div');
+    panel.id = 'iosPlaySettings';
+    panel.innerHTML = ''
+      + '<div class="ips-card">'
+      + '  <div class="ips-head"><span class="ips-title">播放设置</span>'
+      + '    <button type="button" data-ios-act="ps-close" aria-label="关闭">✕</button></div>'
+      + '  <div class="ips-icons">'
+      + '    <button type="button" data-ios-act="ps-download" aria-label="下载">下载</button>'
+      + '    <button type="button" data-ios-act="ps-fill" aria-label="撑满全屏">撑满全屏</button>'
+      + '    <button type="button" data-ios-act="ps-pip" aria-label="画中画">画中画</button>'
+      + '    <button type="button" data-ios-act="ps-audio" aria-label="音频播放">音频播放</button>'
+      + '  </div>'
+      + '  <div class="ips-list">'
+      + '    <div class="ips-item"><span class="ips-name">定时关闭</span>'
+      + '      <span class="ips-val" id="ipsSleep">未开启 ›</span></div>'
+      + '    <div class="ips-item"><span class="ips-name">循环播放</span>'
+      + '      <button type="button" data-ios-act="ps-loop" id="ipsLoop" style="appearance:none;border:0;background:transparent;color:inherit;font-size:12px;font-weight:600"></button></div>'
+      + '    <div class="ips-item"><span class="ips-name">跳过片头片尾</span>'
+      + '      <button type="button" data-ios-act="ps-skip" id="ipsSkip" style="appearance:none;border:0;background:transparent;color:inherit;font-size:12px;font-weight:600"></button></div>'
+      + '    <div class="ips-item"><span class="ips-name">分集标题</span>'
+      + '      <button type="button" data-ios-act="ps-eptitle" id="ipsEpTitle" style="appearance:none;border:0;background:transparent;color:inherit;font-size:12px;font-weight:600"></button></div>'
+      + '  </div>'
+      + '</div>';
+    document.body.appendChild(panel);
+    return panel;
+  }
+
+  function syncPlaySettings() {
+    readPlayPrefs();
+    var loop = document.getElementById('ipsLoop');
+    if (loop) loop.textContent = loopMode === 'one' ? '单集' : (loopMode === 'list' ? '列表' : '关闭');
+    var skip = document.getElementById('ipsSkip');
+    if (skip) skip.textContent = skipIntro ? '开' : '关';
+    var epTitle = document.getElementById('ipsEpTitle');
+    if (epTitle) epTitle.textContent = epTitleOn ? '开' : '关';
+    var sleep = document.getElementById('ipsSleep');
+    if (sleep) sleep.textContent = (sleepTimer ? sleepTimer : '未开启') + ' ›';
+    var subtitle = document.querySelector ? document.querySelector('[data-ios-act="subtitle"]') : null;
+    if (subtitle) subtitle.className = subtitleOn ? 'on' : '';
+  }
+
+  function openPlaySettings() {
+    var panel = ensurePlaySettings();
+    if (!panel) return false;
+    panel.className = 'on';
+    syncPlaySettings();
+    return true;
+  }
+  function closePlaySettings() {
+    var panel = document.getElementById('iosPlaySettings');
+    if (panel) panel.className = '';
+  }
+
+  /* ---- 统一分发：所有 0.1.17 的节点都带 data-ios-act ---- */
+  function actionOf(node) {
+    var cursor = node;
+    while (cursor) {
+      var act = '';
+      if (typeof cursor.getAttribute === 'function') {
+        try { act = cursor.getAttribute('data-ios-act') || ''; } catch (error) { act = ''; }
+      }
+      if (act) return String(act);
+      cursor = cursor.parentNode;
+    }
+    return '';
+  }
+
+  function handleTencentUI(target, event) {
+    var act = actionOf(target);
+    if (!act) return false;
+    /* 集数格子：网格是一格一集，点一格立刻下载（§2） */
+    if (act === '') return false;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    if (act === 'back' || act === 'dl-back' || act === 'mine-back') {
+      if (document.getElementById('iosDlPage') && !document.getElementById('iosDlPage').hidden) closeDownloadPage();
+      else if (document.getElementById('iosMinePage') && !document.getElementById('iosMinePage').hidden) closeMinePage();
+      else if (immersiveNow()) setUserFullscreen(false);
+      else if (window.history && window.history.length > 1) window.history.back();
+      return true;
+    }
+    if (act === 'cast') { postNative({ action: 'share', url: mediaUrl(), title: showMeta().title || '' }); return true; }
+    if (act === 'share') { postNative({ action: 'share', url: mediaUrl(), title: showMeta().title || '' }); return true; }
+    if (act === 'play-settings') { openPlaySettings(); return true; }
+    if (act === 'ps-close') { closePlaySettings(); return true; }
+    if (act === 'intro') { announce(showMeta().title ? (showMeta().title + '：暂无更多简介') : '暂无简介'); return true; }
+    if (act === 'expand-eps') { var btn = document.getElementById('iosEpMore'); if (btn && typeof btn.click === 'function') btn.click(); announce('已展开全部集数'); return true; }
+    if (act === 'lock') { announce('已锁定控制栏'); return true; }
+    if (act === 'shot') { announce('截图请用手机侧键'); return true; }
+    if (act === 'subtitle') { subtitleOn = !subtitleOn; savePlayPrefs(); syncPlaySettings(); announce(subtitleOn ? '字幕开' : '字幕关'); return true; }
+    if (act === 'rate') { var rateBtn = document.getElementById('ppRate'); if (rateBtn && typeof rateBtn.click === 'function') rateBtn.click(); return true; }
+    if (act === 'quality') {
+      var next = quality() === '720P' ? '1080P' : '720P';
+      setQuality(next);
+      var q2 = document.getElementById('iosDlQuality');
+      if (q2) q2.textContent = next + ' ›';
+      announce('下载画质：' + next);
+      return true;
+    }
+    if (act === 'episodes') { if (!dlSheetOpen) toggleDlSheet(); announce('选集中'); return true; }
+    if (act === 'next') { var nextBtn = document.getElementById('nextEpBtn'); if (nextBtn && typeof nextBtn.click === 'function') nextBtn.click(); else announce('已经是最后一集'); return true; }
+    if (act === 'ps-download') { closePlaySettings(); openDownloadPage(); return true; }
+    if (act === 'ps-fill') {
+      var modes = FIT_MODES;
+      var at = modes.indexOf(fitMode);
+      chooseFit(modes[(at + 1) % modes.length]);
+      return true;
+    }
+    if (act === 'ps-pip') { announce('画中画请在系统控制中心开启'); return true; }
+    if (act === 'ps-audio') { announce('音频播放：锁屏后仍会继续播放'); return true; }
+    if (act === 'ps-loop') {
+      loopMode = loopMode === 'off' ? 'one' : (loopMode === 'one' ? 'list' : 'off');
+      savePlayPrefs();
+      syncPlaySettings();
+      announce('循环播放：' + (loopMode === 'one' ? '单集' : (loopMode === 'list' ? '列表' : '关闭')));
+      return true;
+    }
+    if (act === 'ps-skip') { skipIntro = !skipIntro; savePlayPrefs(); syncPlaySettings(); announce(skipIntro ? '跳过片头片尾：开' : '跳过片头片尾：关'); return true; }
+    if (act === 'ps-eptitle') { epTitleOn = !epTitleOn; savePlayPrefs(); syncPlaySettings(); var lbl = document.getElementById('playerLabel'); if (lbl) lbl.hidden = !epTitleOn; return true; }
+    if (act === 'open-mine') { closeDownloadPage(); openMinePage(); return true; }
+    if (act === 'mine-edit') { announce('左滑任意一集即可删除'); return true; }
+    return false;
+  }
+
+  /// 0.1.17 的所有节点在每次状态变化后同步一次（队列/片库/全屏/暂停都在调）
+  function syncTencentUI() {
+    syncDownloadPage();
+    var mine = document.getElementById('iosMinePage');
+    if (mine && !mine.hidden) renderMinePage();
+    var ps = document.getElementById('iosPlaySettings');
+    if (ps && ps.className === 'on') syncPlaySettings();
+  }
+
+  /// 规格要求移除的入口：弹幕按钮已在 0.1.13 让位给下载，这里再兜一层，
+  /// 顺手把会员/广告/VIP 角标收掉（只按文案/类名匹配，不删节点）。
+  function hideRemovedEntries() {
+    var patterns = [/^VIP$/i, /会员/, /^广告$/, /^\d+s?广告$/, /^预告$/, /^弹幕/];
+    var nodes = document.querySelectorAll ? document.querySelectorAll('span,div,i,em,button,a') : [];
+    for (var i = 0; i < nodes.length; i++) {
+      var node = nodes[i];
+      if (!node || !node.textContent) continue;
+      if (node.id && node.id.indexOf('pp') === 0) continue;
+      if (typeof node.closest === 'function' && node.closest('#ppCtrl,#iosBatchBar,#iosDlEntry,#iosTopBar,#iosFsTop,.ios-page')) continue;
+      var text = String(node.textContent).replace(/\s+/g, '');
+      if (text.length > 8) continue;
+      for (var p = 0; p < patterns.length; p++) {
+        if (patterns[p].test(text)) {
+          node.hidden = true;
+          if (node.style) node.style.display = 'none';
+          break;
+        }
+      }
+    }
+    var danmaku = document.getElementById('dmBtn');
+    if (danmaku) {
+      danmaku.hidden = true;
+      if (danmaku.style) danmaku.style.display = 'none';
+    }
+  }
+
+  function mountTencentUI() {
+    readPlayPrefs();
+    mountPlayerChrome();
+    ensureDownloadPage();
+    ensureMinePage();
+    ensurePlaySettings();
+    hideRemovedEntries();
+    syncTencentUI();
+    return true;
+  }
+
+  /* 旧的调用点仍然叫 mountFitBar（挂载 / 重试两处），这里只是个别名。 */
+  function mountFitBar() {
+    return mountFsTop();
+  }
+
   function handleCtrlClick(event) {
     var target = event.target;
     if (!target) return false;
+    if (handleTencentUI(target, event)) return true;
     /* 选集页「选择」模式：点选集卡片是选中/取消，不再跳集 */
     if (batchSelecting) {
       var epNode = epNodeOf(target);
@@ -2836,10 +3568,10 @@
         return true;
       }
     }
-    if (hit(target, 'iosDlButton')) {
+    if (hit(target, 'iosDlButton') || hit(target, 'iosTitleDownload')) {
       event.preventDefault();
       event.stopImmediatePropagation();
-      toggleDlSheet();
+      openDownloadPage();
       return true;
     }
     if (target && target.getAttribute && String(target.getAttribute('data-dl-delete') || '') === '1') {
@@ -3275,7 +4007,7 @@
   }
   /* 站点是 SPA：换集或重渲染可能整块换掉 #player，几次补挂 */
   [0, 400, 1200, 2600].forEach(function (delay) {
-    setTimeout(function () { mountCtrlBar(); mountToolDownload(); mountDlEntry(); mountFitBar(); }, delay);
+    setTimeout(function () { mountCtrlBar(); mountToolDownload(); mountDlEntry(); mountFitBar(); mountTencentUI(); }, delay);
   });
   /* 首页/播放页的站点渲染是异步的：面板和状态晚一步再补一次 */
   [0, 600, 1600].forEach(function (delay) {
@@ -3284,6 +4016,7 @@
       mountToolDownload();
       mountDlEntry();
       mountFitBar();
+      mountTencentUI();
       syncExtToggle();
       syncDownloadRow();
     }, delay);
