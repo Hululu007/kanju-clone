@@ -1,11 +1,11 @@
 import { defineConfig } from 'vite'
 import { resolve } from 'node:path'
 
-// BASE_PATH lets the same source deploy either at a domain root ("/")
+// DEPLOY_SUBDIR lets the same source deploy either at a domain root ("/")
 // or under a project sub-path such as "/kanju-clone/" on GitHub Pages.
-// Example: BASE_PATH=/kanju-clone/ npx vite build
+// Example: DEPLOY_SUBDIR=kanju-clone npx vite build
 export default defineConfig({
-  base: process.env.BASE_PATH || '/',
+  base: process.env.DEPLOY_SUBDIR ? `/${process.env.DEPLOY_SUBDIR}/` : '/',
   build: {
     outDir: 'dist',
     emptyOutDir: true,

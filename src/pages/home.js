@@ -5,44 +5,159 @@ import {
   bindShell,
   initTheme,
   posterCard,
+  posterArt,
   compactCard,
   showToast,
 } from '../shell.js'
 import { u } from '../base.js'
-import { WEEK, TODAY, CATS, categoryItems, catCount, ROWS, allByPool, shows } from '../data.js'
+import { CATS, ROWS, allByPool, shows } from '../data.js'
+import { proxyReady, proxyShow, proxyHomeFeed, proxyList } from '../runtime.js'
+import { fetchUserProgress, getCachedUser } from '../auth.js'
 
 const state = {
-  day: TODAY,
   q: '',
   mode: 'quick',
   cat: null,
   extra: [],
+  categories: {},
+  calendar: [],
+  selectedDate: '',
+  rows: [...ROWS],
+  order: ROWS.map((row) => row.id),
+  browse: null,
 }
 
-const DOW = ['周一', '周二', '周三', '周四', '周五', '周六', '周日']
+const KIND_CAT = { series: 'tv', short_drama: 'tv', movie: 'movie', anime: 'anime', animation: 'anime', variety: 'variety', documentary: 'variety' }
+const KIND_LABEL = { series: '电视剧', short_drama: '短剧', movie: '电影', anime: '动漫', animation: '动漫', variety: '综艺', documentary: '纪录片' }
+const HOME_CAT_KEYS = ['tv', 'anime', 'variety', 'movie']
+const CALENDAR_KIND = { tv: 'series', anime: 'anime', variety: 'variety', movie: 'movie' }
+const ROW_AREA = { kr: '韩国', jp: '日本', us: '美国', cn: '中国大陆' }
+const BROWSE_PAGE = 24
+let searchTimer = null
+
+function findRow(id) {
+  return state.rows.find((row) => row.id === id)
+}
+
+// 原站栏目没有直接对应的分类时，用同分类热榜
+function browseOf(row) {
+  if (!row) return { title: '全部影视' }
+  if (row.id === 'hot') return { title: row.title }
+  if (ROW_AREA[row.id]) return { title: row.title, cat: 'tv', area: ROW_AREA[row.id] }
+  if (row.cat === 'movie' || row.cat === 'anime' || row.cat === 'variety' || row.cat === 'tv') {
+    return { title: row.title, cat: row.cat }
+  }
+  return { title: row.title }
+}
+
+function calendarItems(day, cat) {
+  const key = CALENDAR_KIND[cat]
+  const preview = key ? day.groups?.[key]?.preview || [] : []
+  return preview.map((item, index) => feedShow({
+    id: item.id,
+    title: item.title,
+    year: item.year,
+    kind: item.content_kind,
+    poster: item.poster_url,
+    remarks: item.latest_episode_label || item.forecast?.label || '',
+    heatValue: item.heat_score,
+  }, index))
+}
 
 function daysHTML() {
-  return WEEK.map(
-    (d) => `<button class="day ${d.day === state.day ? 'on' : ''}" type="button" role="tab"
-      aria-selected="${d.day === state.day}" data-day="${d.day}">
-      <span class="dow">${d.label}</span>
-      <span class="dnum">${d.date}日</span>
-      <span class="dcnt">${d.total}部</span>
-    </button>`
-  ).join('')
+  return state.calendar.map((day) => `<button class="day ${day.date === state.selectedDate ? 'on' : ''}" type="button" role="tab"
+    aria-selected="${day.date === state.selectedDate}" data-day="${day.date}">
+    <span class="dow">${day.weekday_label}</span>
+    <span class="dnum">${Number(day.date.slice(-2))}日</span>
+    <span class="dcnt">${day.count ?? Object.values(day.groups || {}).reduce((total, group) => total + (Number(group.total) || 0), 0)}部</span>
+  </button>`).join('')
+}
+
+/* 手机上日期条是可横向滚动的：一进来把它停在今天（只在条内定位，不动页面），
+   手动拖动之后不再覆盖用户的选择。 */
+let daysTouched = false
+/* 用户把日期条停在哪。后台刷新会重建 #days 并把 scrollLeft 归零，
+   重建后照这个值放回去，观众看到的就是自己刚才那一格，而不是被拨回今天。 */
+let daysLeft = 0
+
+if (typeof document !== 'undefined') {
+  document.addEventListener('touchstart', (event) => {
+    if (event.target && event.target.closest && event.target.closest('#days')) daysTouched = true
+  }, true)
+  document.addEventListener('scroll', (event) => {
+    if (!daysTouched || !event.target || event.target.id !== 'days') return
+    daysLeft = event.target.scrollLeft
+  }, true)
+  /* 站点自己的重渲染走 centerSelectedDay，但其他路径（局部刷新、插件、注入层）
+     也会整块换掉卡片；统一用观察器兜住，两条路径都不会把用户的位置拨走。 */
+  if (typeof MutationObserver === 'function') {
+    const watch = () => {
+      const days = document.getElementById('days')
+      if (!days) {
+        document.addEventListener('DOMContentLoaded', watch, { once: true })
+        return
+      }
+      new MutationObserver(() => centerSelectedDay(days)).observe(days, { childList: true })
+    }
+    watch()
+  }
+}
+
+function centerSelectedDay(days) {
+  const active = days.querySelector('.day.on')
+  if (!active) return
+  if (daysTouched) {
+    /* 不抢用户的选择：只把重建后归零的位置放回去，位置没变就不写（每次写都强制一次布局） */
+    const max = Math.max(0, days.scrollWidth - days.clientWidth)
+    const target = Math.min(max, Math.max(0, daysLeft))
+    if (Math.abs(days.scrollLeft - target) > 4) days.scrollLeft = target
+    return
+  }
+  const max = Math.max(0, days.scrollWidth - days.clientWidth)
+  if (max <= 0) return
+  const stripRect = days.getBoundingClientRect()
+  const activeRect = active.getBoundingClientRect()
+  /* 把今天拨到可视区起点。日期条是 scroll-snap 容器（每张卡都是 snap 点），
+     居中会被吸附回卡片边界，所以按「对齐到天」处理，结果稳定。 */
+  const target = days.scrollLeft + (activeRect.left - stripRect.left)
+  const wanted = Math.min(max, Math.max(0, target))
+  if (Math.abs(days.scrollLeft - wanted) > 4) days.scrollLeft = wanted
+  daysLeft = days.scrollLeft
+}
+
+function renderCalendarDay() {
+  const day = state.calendar.find((item) => item.date === state.selectedDate)
+  if (!day) return
+  document.querySelectorAll('.day').forEach((button) => {
+    const selected = button.dataset.day === state.selectedDate
+    button.classList.toggle('on', selected)
+    button.setAttribute('aria-selected', String(selected))
+  })
+  HOME_CAT_KEYS.forEach((cat) => {
+    const key = CALENDAR_KIND[cat]
+    const group = day.groups?.[key]
+    state.categories[cat] = {
+      total: group?.total || 0,
+      items: calendarItems(day, cat),
+    }
+  })
+  const cats = document.getElementById('cats')
+  if (cats) cats.innerHTML = catsHTML()
 }
 
 function catsHTML() {
-  return Object.entries(CATS)
-    .map(([key, label]) => {
-      const items = categoryItems(key, state.day, 4)
+  return HOME_CAT_KEYS
+    .map((key) => {
+      const label = CATS[key]
+      const data = state.categories[key]
+      const items = data?.items || []
       return `<section class="cat" aria-label="${label}">
       <div class="cat-head">
         <h3><button class="cat-name" type="button" data-cat="${key}">${label}</button></h3>
-        <span class="cat-count"><b>${catCount(key, state.day)}</b> 部</span>
+        <span class="cat-count"><b>${data?.total ?? '—'}</b> 部</span>
       </div>
       <div class="cat-list" data-catlist="${key}">
-        ${items.map((s) => compactCard(s)).join('')}
+        ${items.length ? items.map((s) => compactCard(s)).join('') : '<p class="cat-loading">正在同步片库…</p>'}
       </div>
     </section>`
     })
@@ -69,15 +184,15 @@ function rowHTML(row, idx) {
 }
 
 function rowsHTML() {
-  return [...ROWS, ...state.extra].map(rowHTML).join('')
+  const base = state.order.map((id) => findRow(id)).filter(Boolean)
+  return [...base, ...state.extra].map(rowHTML).join('')
 }
 
 function bodyHTML() {
   return `<section class="page-body">
     <div class="wrap home">
     <section class="hero">
-      <h1>看剧AI</h1>
-      <p class="hero-sub">永久域名 <b>kanju.ai</b></p>
+      <h1>阿噗影视</h1>
       <form class="search" id="searchForm" autocomplete="off">
         <label class="sr-only" for="q">影视搜索输入</label>
         <textarea id="q" rows="1" placeholder="今天你想看什么？"></textarea>
@@ -92,9 +207,15 @@ function bodyHTML() {
           <button class="send" type="submit" aria-label="发送搜索">${icon('send', 18)}</button>
         </div>
       </form>
+      <div class="home-hot" aria-label="热门影片"><span>热门影片</span>${(findRow('hot')?.items || ROWS[0]?.items || []).slice(0, 7).map((s) => `<button type="button" data-hot="${s.title}"><span aria-hidden="true">▶</span>${s.title}</button>`).join('')}</div>
+      <div class="home-suggest" aria-label="推荐输入"><span>推荐输入</span><button type="button" data-hot="AI漫剧">AI漫剧</button></div>
     </section>
 
     <div id="homeSections">
+      <section class="row" id="continueRow" hidden>
+        <div class="row-head"><div><h2>继续观看</h2></div><a class="link-mint" href="${u('/library/history/')}">查看更多</a></div>
+        <div class="strip" id="continueStrip"></div>
+      </section>
       <section class="week">
         <div class="sec-head">
           <span class="sec-ico">${icon('calendar', 18)}</span>
@@ -104,10 +225,10 @@ function bodyHTML() {
           </div>
           <div class="sec-actions">
             <a class="link-mint" href="${u('/library/history/')}">查看完整日历</a>
-            <span class="range">11月9日 - 11月15日</span>
+            <span class="range" id="calendarRange"></span>
           </div>
         </div>
-        <div class="days" id="days" role="tablist" aria-label="本周追剧">${daysHTML()}</div>
+        <div class="days" id="days" role="tablist" aria-label="本周追剧"></div>
       </section>
 
       <div class="cats" id="cats">${catsHTML()}</div>
@@ -121,53 +242,72 @@ function bodyHTML() {
 }
 
 function renderResultView() {
-  const box = document.getElementById('results')
-  const home = document.getElementById('homeSections')
   if (!state.q && !state.cat) {
-    box.innerHTML = ''
-    home.hidden = false
+    const box = document.getElementById('results')
+    const home = document.getElementById('homeSections')
+    if (box) box.innerHTML = ''
+    if (home) home.hidden = false
+    state.browse = null
     return
   }
-  home.hidden = true
-  const q = state.q.trim().toLowerCase()
-  let list = shows
-  if (state.cat) list = list.filter((s) => s.cat === state.cat)
-  if (q) {
-    list = list.filter(
-      (s) =>
-        s.title.toLowerCase().includes(q) ||
-        s.genres.join(' ').toLowerCase().includes(q) ||
-        s.badge.toLowerCase().includes(q)
-    )
-  }
-  const title = state.cat ? CATS[state.cat] : '搜索结果'
-  box.innerHTML = `<section class="browse">
+  openBrowse({
+    title: state.cat ? CATS[state.cat] : '搜索结果',
+    cat: state.cat || '',
+    q: state.q.trim(),
+  })
+}
+
+function browseShellHTML(title) {
+  return `<section class="browse">
     <div class="browse-head">
       <h2>${title}</h2>
-      <span>共 ${list.length} 部</span>
+      <span id="browseCount">正在同步…</span>
       <button class="more-btn" type="button" id="clearView" style="margin-left:auto">返回首页</button>
     </div>
-    ${
-      list.length
-        ? `<div class="browse-grid">${list.map((s) => posterCard(s)).join('')}</div>`
-        : `<div class="empty-note">没有找到相关影片，换个关键词试试</div>`
-    }
+    <div class="browse-grid" id="browseGrid"></div>
+    <button class="loadmore" type="button" id="browseMore" hidden>加载更多</button>
+    <div class="empty-note" id="browseEmpty" hidden>没有找到相关影片，换个关键词试试</div>
   </section>`
 }
 
-function refreshDay() {
-  // keep the day buttons themselves in place (their click targets stay alive),
-  // only move the highlight and re-draw the category lists
-  document.querySelectorAll('.day').forEach((b) => {
-    const on = Number(b.dataset.day) === state.day
-    b.classList.toggle('on', on)
-    b.setAttribute('aria-selected', String(on))
-  })
-  document.getElementById('cats').innerHTML = catsHTML()
+function browseGridFill(items, start, append) {
+  const grid = document.getElementById('browseGrid')
+  if (!grid) return
+  const html = items.map((r, i) => posterCard(feedShow(r, start + i))).join('')
+  if (append) grid.insertAdjacentHTML('beforeend', html)
+  else grid.innerHTML = html
+}
+
+async function openBrowse({ title, cat = '', area = '', q = '' }) {
+  const home = document.getElementById('homeSections')
+  const box = document.getElementById('results')
+  if (!home || !box) return
+  home.hidden = true
+  state.browse = { title: title || '影视列表', cat, area, q, page: 0, items: [] }
+  box.innerHTML = browseShellHTML(title || '影视列表')
+  await loadBrowsePage(1, false)
+}
+
+async function loadBrowsePage(page, append) {
+  const b = state.browse
+  if (!b) return
+  await proxyReady
+  const data = await proxyList({ cat: b.cat, area: b.area, q: b.q, limit: BROWSE_PAGE, page, sort: 'heat' })
+  const items = data?.items || []
+  if (!append) b.items = []
+  b.items.push(...items)
+  b.page = page
+  browseGridFill(items, b.items.length - items.length, append && b.items.length > items.length)
+  const count = document.getElementById('browseCount')
+  if (count) count.textContent = b.items.length ? `已显示 ${b.items.length} 部` : '共 0 部'
+  const more = document.getElementById('browseMore')
+  if (more) more.hidden = items.length < BROWSE_PAGE
+  const empty = document.getElementById('browseEmpty')
+  if (empty) empty.hidden = b.items.length > 0
 }
 
 function refreshRow(id) {
-  const row = [...ROWS, ...state.extra].find((r) => r.id === id)
+  const row = findRow(id)
   const el = document.querySelector(`[data-row="${id}"]`)
   if (!row || !el) return
   el.outerHTML = rowHTML(row, 0)
@@ -177,8 +317,17 @@ function bind() {
   document.getElementById('app').addEventListener('click', (e) => {
     const day = e.target.closest('[data-day]')
     if (day) {
-      state.day = Number(day.dataset.day)
-      refreshDay()
+      state.selectedDate = day.dataset.day
+      renderCalendarDay()
+      return
+    }
+    const suggestion = e.target.closest('[data-hot]')
+    if (suggestion) {
+      const ta = document.getElementById('q')
+      ta.value = suggestion.dataset.hot
+      state.q = ta.value
+      state.cat = null
+      renderResultView()
       return
     }
     const mode = e.target.closest('[data-mode]')
@@ -201,9 +350,14 @@ function bind() {
     if (e.target.closest('#clearView')) {
       state.cat = null
       state.q = ''
+      state.browse = null
       const ta = document.getElementById('q')
       if (ta) ta.value = ''
       renderResultView()
+      return
+    }
+    if (e.target.closest('#browseMore')) {
+      if (state.browse) loadBrowsePage(state.browse.page + 1, true)
       return
     }
     const sc = e.target.closest('[data-scroll]')
@@ -215,12 +369,11 @@ function bind() {
     }
     const more = e.target.closest('[data-more]')
     if (more) {
-      const row = [...ROWS, ...state.extra].find((r) => r.id === more.dataset.more)
+      const row = findRow(more.dataset.more)
       if (!row) return
-      const pool = allByPool(row.pool)
-      row.items = pool.slice(0, Math.min(pool.length, row.items.length + 6))
-      refreshRow(row.id)
-      showToast('已展开全部 ' + row.title)
+      const { title, cat, area } = browseOf(row)
+      openBrowse({ title, cat: cat || '', area: area || '' })
+      window.scrollTo({ top: 0, behavior: 'smooth' })
       return
     }
     if (e.target.closest('#loadmore')) {
@@ -248,7 +401,8 @@ function bind() {
   ta.addEventListener('input', () => {
     state.q = ta.value
     state.cat = null
-    renderResultView()
+    clearTimeout(searchTimer)
+    searchTimer = setTimeout(renderResultView, 240)
   })
   ta.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -278,3 +432,164 @@ document.getElementById('app').innerHTML = shell({
 bindShell()
 bind()
 renderResultView()
+try {
+  if (!localStorage.getItem('kj-notice-seen')) {
+    window.setTimeout(() => {
+      const notice = document.getElementById('noticeWrap')
+      if (!notice) return
+      notice.classList.add('on')
+      notice.setAttribute('aria-hidden', 'false')
+    }, 450)
+  }
+} catch {}
+
+HOME_CAT_KEYS.forEach((cat) => {
+  const items = allByPool(cat).slice(0, 4)
+  state.categories[cat] = { total: allByPool(cat).length, items }
+})
+document.getElementById('cats').innerHTML = catsHTML()
+
+function readProgress() {
+  try { return JSON.parse(localStorage.getItem('kj-progress') || '{}') } catch { return {} }
+}
+
+function heatText(value) {
+  const v = Number(value) || 0
+  if (v >= 10000) return (v / 10000).toFixed(1).replace(/\.0$/, '') + '万'
+  if (v >= 1000) return (v / 1000).toFixed(1).replace(/\.0$/, '') + 'k'
+  return v ? String(Math.round(v)) : ''
+}
+
+function feedShow(r, i) {
+  return {
+    id: r.id,
+    title: r.title,
+    year: r.year || '',
+    area: r.area || '中国大陆',
+    genres: r.genres?.length ? r.genres : [],
+    poster: r.poster || '',
+    badge: r.remarks || '最近更新',
+    heat: heatText(r.heatValue),
+    heatValue: r.heatValue || 0,
+    hue: [206, 214, 222, 230, 238, 196, 188, 26, 12, 210][i % 10],
+    vip: r.availability?.state === 'login_required',
+    cat: KIND_CAT[r.kind] || 'tv',
+    kindLabel: KIND_LABEL[r.kind] || '影视',
+    seed: i,
+  }
+}
+
+async function loadContinue() {
+  const strip = document.getElementById('continueStrip')
+  const row = document.getElementById('continueRow')
+  if (row) row.hidden = true
+  if (strip) strip.innerHTML = ''
+  const user = getCachedUser()
+  let items = []
+  if (user) {
+    const rows = await fetchUserProgress('', 12)
+    items = rows.map((row, i) => ({
+      show: feedShow(
+        {
+          id: row.showId,
+          title: row.title || row.showId,
+          year: row.year,
+          area: row.area,
+          genres: [],
+          poster: row.poster,
+          remarks: row.remarks,
+          kind: row.kind,
+        },
+        i
+      ),
+      progress: { idx: row.idx, position: row.position, duration: row.duration },
+    }))
+  } else {
+    let ids = []
+    try { ids = JSON.parse(localStorage.getItem('kj-history') || '[]') } catch {}
+    if (!ids.length) return
+    const progress = readProgress()
+    const local = new Map(shows.map((s) => [s.id, s]))
+    items = await Promise.all(ids.slice(0, 10).map(async (id, i) => {
+      const cached = local.get(id)
+      let show = cached
+      if (!show) {
+        await proxyReady
+        const remote = await proxyShow(id).catch(() => null)
+        show = remote?.id ? feedShow(remote, i) : null
+      }
+      if (!show) return null
+      return { show, progress: progress[id] || { idx: 0, position: 0, duration: 0 } }
+    }))
+  }
+  const valid = items.filter(Boolean)
+  if (!strip || !row || !valid.length) return
+  strip.innerHTML = valid.map(({ show, progress: item }) => {
+    const episodeLabel = item.label || `第${Number(item.idx || 0) + 1}集`
+    const seconds = Math.max(0, Number(item.position) || 0)
+    const duration = Math.max(0, Number(item.duration) || 0)
+    const percent = duration ? Math.min(99, Math.round(seconds / duration * 100)) : 0
+    const time = `${Math.floor(seconds / 60)}:${String(Math.floor(seconds % 60)).padStart(2, '0')}`
+    const meta = `${episodeLabel} · ${time}${duration ? ` · ${percent}%` : ''}`
+    return `<article class="continue-card"><a class="continue-link" href="${u('/player/')}?id=${encodeURIComponent(show.id)}&ep=${Number(item.idx) || 0}&t=${Math.floor(seconds)}&v=live">${posterArt(show)}<span class="p-badge">${show.badge}</span><span class="p-shade"></span><h3 class="p-title">${show.title}</h3><p class="p-meta">${show.year || '—'} · ${show.area}</p></a><div class="continue-progress"><span>${meta}</span><i style="--progress:${percent}%"></i></div></article>`
+  }).join('')
+  row.hidden = false
+}
+
+async function loadHomeFeed() {
+  await proxyReady
+  const feed = await proxyHomeFeed()
+  if (!feed?.rows) return
+  const defs = new Map(ROWS.map((row) => [row.id, row]))
+  const order =
+    Array.isArray(feed.order) && feed.order.length
+      ? feed.order
+      : Object.keys(feed.rows).map((id) => ({ id, title: defs.get(id)?.title || id, sub: defs.get(id)?.sub || '' }))
+  const rows = []
+  for (const item of order) {
+    const list = feed.rows[item.id] || []
+    if (!list.length) continue
+    const base = defs.get(item.id) || {}
+    const mapped = list.map((r, i) => feedShow(r, i))
+    rows.push({
+      id: item.id,
+      title: item.title || base.title || item.id,
+      sub: item.sub || base.sub || '',
+      cat: base.cat || mapped[0]?.cat || 'tv',
+      pool: base.pool || mapped[0]?.cat || 'tv',
+      items: mapped,
+    })
+  }
+  if (!rows.length) return
+  state.rows = rows
+  state.order = rows.map((row) => row.id)
+  state.extra = []
+  const box = document.getElementById('rows')
+  if (box) box.innerHTML = rows.map((row) => rowHTML(row)).join('')
+  const hot = findRow('hot')
+  if (hot) {
+    const hotLinks = document.querySelector('.home-hot')
+    if (hotLinks) hotLinks.innerHTML = `<span>热门影片</span>${hot.items.slice(0, 7).map((s) => `<button type="button" data-hot="${s.title}"><span aria-hidden="true">▶</span>${s.title}</button>`).join('')}`
+  }
+  if (feed.calendar?.length) {
+    state.calendar = feed.calendar.map((day) => ({
+      ...day,
+      count: Object.values(day.groups || {}).reduce((total, group) => total + (Number(group.total) || 0), 0),
+    }))
+    const now = new Date()
+    const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`
+    state.selectedDate = state.calendar.find((day) => day.date === today)?.date || state.calendar[0].date
+    const days = document.getElementById('days')
+    if (days) {
+      days.innerHTML = daysHTML()
+      centerSelectedDay(days)
+    }
+    const range = document.getElementById('calendarRange')
+    if (range) range.textContent = `${state.calendar[0].date.slice(5, 7)}月${Number(state.calendar[0].date.slice(8))}日 - ${state.calendar.at(-1).date.slice(5, 7)}月${Number(state.calendar.at(-1).date.slice(8))}日`
+    renderCalendarDay()
+  }
+}
+
+loadContinue()
+loadHomeFeed()
+document.addEventListener('kj-auth-changed', () => void loadContinue())
