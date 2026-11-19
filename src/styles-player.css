@@ -172,7 +172,7 @@ html.pl-webfull .pl { position: fixed; inset: 0; z-index: 9000; border-radius: 0
   .pw-pane { max-height: none; }
 }
 @media (max-width: 639px) {
-  .pl { border-radius: 10px; }
+  .pl:not(.is-fullscreen):not(.is-webfull) { border-radius: 10px; }
   .pl-bigplay { width: 54px; height: 54px; }
   .pl-epov { bottom: 64px; font-size: 12px; padding: 6px 10px; }
   .pl-hint { bottom: 104px; font-size: 11px; }
