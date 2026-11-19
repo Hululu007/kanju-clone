@@ -2,17 +2,16 @@ import XCTest
 import WebKit
 @testable import ZhuijuAI
 
-/// 0.1.14 下载队列的**真 WKWebView**回归（下载专题，独立文件）。
+/// 下载队列的**真 WKWebView**回归（下载专题，独立文件）。
 ///
-/// 为什么单独一个文件而不是往 `InjectedUITests` 里加：批量下载/队列是本分支独占范围，
+/// 为什么单独一个文件而不是往 `InjectedUITests` 里加：下载队列是独立回归范围，
 /// 共享测试文件留给集成时统一改，避免两边写同一个文件。
 ///
 /// 这里证明什么：
-/// 1. 选集页真的有批量入口（选择 / 一键全集 / 从本集往后 / 下载已选），
-///    原位「下载本集」还在，点「一键全集」发出去的是一整批真实片源（逐集解析后）；
+/// 1. 标题旁下载入口打开新版单集下载页，点一集只发送一个队列项；
 /// 2. 原生队列**真的入队**（`MediaDownloader.start` 写 UserDefaults 的记录），
-///    两条任务不会被互相顶掉；把这份真实记录当快照推给网页后，设置面板按剧显示
-///    「任务 N/M 集」并带暂停/继续/取消；点按钮发的是对应的原生桥接消息；
+///    两条任务不会被互相顶掉；把这份真实记录当快照推给网页后，我的下载页按剧显示
+///    展示进行中的单集及真实传输状态；
 /// 3. 下载进度/暂停态由快照驱动渲染，不靠网页自己猜。
 ///
 /// 明确不在这里证明（测试层边界）：暂停后 resumeData 的真实续传效果、后台/锁屏传输、
@@ -51,7 +50,7 @@ final class DownloadQueueUITests: XCTestCase, WKNavigationDelegate {
         func last() -> [String: Any]? { bodies.last }
     }
 
-    /// 选集页骨架：节点名和站点模板一致，注入层要挂的东西都在。
+    /// 播放页骨架：节点名和站点模板一致，注入层要挂的东西都在。
     private static let fixtureHTML = """
     <html><head><meta name="viewport" content="width=device-width,initial-scale=1">
     <style>
@@ -104,7 +103,7 @@ final class DownloadQueueUITests: XCTestCase, WKNavigationDelegate {
         await fulfillment(of: [loaded!], timeout: 60)
 
         /* 下载门控读的是站点自己的登录 token（和真机同一条路） */
-        /* 片库/队列/批量记忆都在 localStorage，测试类之间会互相污染：先清空再注入。 */
+        /* 片库/队列记忆都在 localStorage，测试类之间会互相污染：先清空再注入。 */
         _ = try await javaScript("""
         (function () {
           try {
@@ -119,7 +118,7 @@ final class DownloadQueueUITests: XCTestCase, WKNavigationDelegate {
         _ = try await javaScript("localStorage.setItem('kj-auth-token', 'fixture-token'); true;")
 
         /* 站点会用自己的 /api/play 解析每一集的真实片源。这里换成受控应答：
-           本用例验的是注入层「批量解析 → 入队 / 跳过」这条链路，不是站点接口；
+           本用例验的是注入层「单集解析 → 入队 / 跳过」这条链路，不是站点接口；
            真实接口的校验分支由 Node 夹具覆盖。必须在 AppBootstrap 之前装好，
            因为注入层会把 window.fetch 包一层并记住原始实现。 */
         _ = try await javaScript("""
@@ -166,107 +165,47 @@ final class DownloadQueueUITests: XCTestCase, WKNavigationDelegate {
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { loaded?.fulfill() }
 
-    // MARK: - 1. 选集页批量入口
+    // MARK: - 1. 新版单集下载入口
 
-    /// 批量入口必须在选集区上方，四个按钮齐；原位「下载本集」不能被挤掉。
-    /// 「一键全集」要按集逐条解析并发出整批真实片源（不是拿播放页 URL 顶替）。
-    func testEpisodePageOffersBatchDownloadAndKeepsTheSingleEpisodeEntry() async throws {
-        _ = try await awaitValue("!!document.getElementById('iosBatchBar')")
+    /// 新版由标题旁的下载按钮打开独立下载页；点一集立即解析并入队。
+    func testEpisodePageDownloadsOneEpisodeFromTheNewDownloadPage() async throws {
+        _ = try await awaitValue("!!document.getElementById('iosTitleDownload')")
         let raw = try await javaScript("""
         (function () {
-          var bar = document.getElementById('iosBatchBar');
-          var grid = document.getElementById('epGrid');
-          if (!bar) return 'missing-bar';
           return JSON.stringify({
-            buttons: Array.prototype.map.call(bar.querySelectorAll('button'), function (b) { return b.id; }),
-            beforeGrid: bar.nextElementSibling === grid,
-            single: !!document.getElementById('ppToolDownload'),
-            singleInDanmakuSlot: !!(document.getElementById('dmBtn') &&
-              document.getElementById('ppToolDownload').nextElementSibling === document.getElementById('dmBtn')),
-            note: document.getElementById('iosBatchNote').textContent
+            legacyBatch: !!document.getElementById('iosBatchBar'),
+            titleDownload: !!document.getElementById('iosTitleDownload'),
+            toolbarDownload: !!document.getElementById('ppToolDownload')
           });
         })();
         """)
         let text = try XCTUnwrap(raw as? String)
-        XCTAssertNotEqual(text, "missing-bar", "选集区没有批量下载条")
         let info = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any])
-        XCTAssertEqual(info["buttons"] as? [String], ["iosBatchSelect", "iosBatchAll", "iosBatchForward", "iosBatchStart"],
-                       "批量入口不齐：\(text)")
-        XCTAssertEqual(info["beforeGrid"] as? Bool, true, "批量条要在选集区上方：\(text)")
-        XCTAssertEqual(info["single"] as? Bool, true, "原位「下载本集」必须保留：\(text)")
-        XCTAssertEqual(info["singleInDanmakuSlot"] as? Bool, true, "下载本集还在弹幕那一格：\(text)")
+        XCTAssertEqual(info["legacyBatch"] as? Bool, false, "旧多选/全集入口已移除：\(text)")
+        XCTAssertEqual(info["titleDownload"] as? Bool, true, "新版下载入口必须存在：\(text)")
+        XCTAssertEqual(info["toolbarDownload"] as? Bool, false, "播放器工具条不应保留第二个下载入口：\(text)")
 
-        /* 一键全集：四集都要解析成真实片源再入队 */
-        _ = try await javaScript("document.getElementById('iosBatchAll').click(); true;")
-        let sent = try await awaitMessage { $0["action"] as? String == "downloadBatch" }
-        let items = try XCTUnwrap(sent["items"] as? [[String: Any]], "一键全集没有发出批量下载：\(sent)")
-        XCTAssertEqual(items.count, 4, "这部剧有 4 集：\(sent)")
-        XCTAssertEqual(items.compactMap { $0["url"] as? String },
-                       ["https://media.example/0.mp4", "https://media.example/1.mp4",
-                        "https://media.example/2.mp4", "https://media.example/3.mp4"],
-                       "每一集都要用解析出来的真实片源：\(sent)")
-        XCTAssertEqual(items.compactMap { $0["epKey"] as? String }, ["0", "1", "2", "3"])
-        XCTAssertEqual(items.first?["showId"] as? String, "fixture")
-        XCTAssertEqual(items.first?["name"] as? String, "测试剧 第1集.mp4", "文件名是真实剧名 + 集号：\(sent)")
-
-        /* 从本集往后：先把当前集切到第 3 集 */
         _ = try await javaScript("""
         (function () {
-          var eps = document.querySelectorAll('#epGrid .ep');
-          eps.forEach(function (ep) { ep.className = 'ep'; });
-          eps[2].className = 'ep on';
-          return true;
+          document.getElementById('iosTitleDownload').click();
+          var cell = document.getElementById('iosDlCell6-0');
+          if (!cell) return 'missing-cell';
+          cell.click();
+          return 'queued';
         })();
         """)
-        _ = try await javaScript("document.getElementById('iosBatchForward').click(); true;")
-        let forward = try await awaitMessage { message in
-            (message["action"] as? String) == "downloadBatch"
-                && ((message["items"] as? [[String: Any]])?.first?["epKey"] as? String) == "2"
-        }
-        let forwardItems = try XCTUnwrap(forward["items"] as? [[String: Any]])
-        XCTAssertEqual(forwardItems.compactMap { $0["epKey"] as? String }, ["2", "3"],
-                       "从本集往后只下当前集和它后面的：\(forward)")
-
-        /* 多选：选择模式点两集 → 下载已选 (2) → 只发这两集 */
-        _ = try await javaScript("""
-        (function () {
-          document.getElementById('iosBatchSelect').click();
-          var eps = document.querySelectorAll('#epGrid .ep');
-          eps[0].click();
-          eps[1].click();
-          return document.getElementById('iosBatchStart').textContent;
-        })();
-        """)
-        let startText = try await javaScript("document.getElementById('iosBatchStart').textContent") as? String
-        XCTAssertEqual(startText, "下载已选 (2)", "多选数量要显示出来：\(String(describing: startText))")
-        _ = try await javaScript("document.getElementById('iosBatchStart').click(); true;")
-        let picked = try await awaitMessage { message in
-            (message["action"] as? String) == "downloadBatch"
-                && ((message["items"] as? [[String: Any]])?.count) == 2
-                && ((message["items"] as? [[String: Any]])?.first?["epKey"] as? String) == "0"
-        }
-        XCTAssertEqual((picked["items"] as? [[String: Any]])?.compactMap { $0["epKey"] as? String }, ["0", "1"],
-                       "多选只下用户选中的两集：\(picked)")
-
-        /* 原位下载本集仍然发单集下载（REG-008 不回退） */
-        _ = try await javaScript("""
-        (function () {
-          var video = document.getElementById('video');
-          video.src = 'https://media.example/19.mp4';
-          document.getElementById('ppToolDownload').click();
-          return true;
-        })();
-        """)
-        let single = try await awaitMessage { $0["action"] as? String == "download" }
-        XCTAssertEqual(single["url"] as? String, "https://media.example/19.mp4", "这一格还是下载本集：\(single)")
-        XCTAssertNil(single["path"], "下载本集不能变成打开本地文件")
+        let single = try await awaitMessage { $0["action"] as? String == "downloadBatch" }
+        let items = try XCTUnwrap(single["items"] as? [[String: Any]])
+        XCTAssertEqual(items.count, 1, "新入口一次只能发起一个单集下载：\(single)")
+        XCTAssertEqual(items.first?["title"] as? String, "测试剧")
+        XCTAssertEqual(items.first?["epKey"] as? String, "0")
+        XCTAssertEqual(items.first?["url"] as? String, "https://media.example/0.mp4")
     }
 
-    // MARK: - 2. 真实队列入队 + 快照驱动设置面板
+    // MARK: - 2. 真实队列入队与我的下载页
 
-    /// 原生队列真的写盘：两条任务都要在（旧实现第二条会把第一条取消掉），
-    /// 把这份**真实记录**当快照推给网页后，设置面板按剧显示任务数并带暂停/取消。
-    func testTheRealQueueKeepsBothEpisodesAndTheSettingsSheetShowsThem() async throws {
+    /// 原生队列持久化三条单集任务；我的下载只显示运行剧名、集数和接收状态。
+    func testRealQueueProgressAppearsInMyDownloads() async throws {
         let unreachable = URL(string: "https://10.255.255.1/1.mp4")!
         let downloader = MediaDownloader()
         downloader.start(id: "queue-a", url: unreachable, name: "测试剧 第1集.mp4",
@@ -312,69 +251,25 @@ final class DownloadQueueUITests: XCTestCase, WKNavigationDelegate {
 
         let rendered = try await javaScript("""
         (function () {
-          document.querySelector('[data-action="settings"]').click();
-          var item = document.getElementById('iosDlShows').children[0];
+          document.getElementById('iosTitleDownload').click();
+          document.getElementById('iosDlListBtn').click();
+          var item = document.getElementById('iosMineRunning');
           if (!item) return 'missing-show';
-          var queue = item.querySelector('.ios-dl-queue');
-          var actions = item.querySelector('.ios-dl-actions');
           return JSON.stringify({
-            show: item.querySelector('.ios-dl-name').textContent,
-            queue: queue ? queue.textContent : 'missing-queue',
-            actions: actions ? Array.prototype.map.call(actions.children, function (b) { return b.textContent; }) : [],
-            running: queue ? /进行中 2/.test(queue.textContent) : false,
-            queued: queue ? /排队 1/.test(queue.textContent) : false
+            title: document.getElementById('iosMineRunningTitle').textContent,
+            meta: document.getElementById('iosMineRunningMeta').textContent,
+            badge: item.children[item.children.length - 1].textContent,
+            settingsLibrary: !!document.getElementById('iosDownloadLibrary')
           });
         })();
         """)
         let renderedText = try XCTUnwrap(rendered as? String)
-        XCTAssertNotEqual(renderedText, "missing-show", "真实队列没有出现在设置面板里")
+        XCTAssertNotEqual(renderedText, "missing-show", "真实队列没有出现在我的下载页")
         let ui = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(renderedText.utf8)) as? [String: Any])
-        XCTAssertEqual(ui["show"] as? String, "测试剧", "按剧名分组：\(renderedText)")
-        let queueText = try XCTUnwrap(ui["queue"] as? String)
-        XCTAssertTrue(queueText.contains("任务 0/3 集"), "要显示整部剧的任务数：\(queueText)")
-        XCTAssertEqual(ui["running"] as? Bool, true, "两条在跑：\(queueText)")
-        XCTAssertEqual(ui["queued"] as? Bool, true, "一条排队：\(queueText)")
-        XCTAssertEqual(ui["actions"] as? [String], ["暂停整部剧", "取消整部剧"], "整组操作不齐：\(renderedText)")
-
-        /* 暂停整部剧 → 发的是原生暂停消息（暂停后的状态机由 DownloadQueueTests 钉住） */
-        _ = try await javaScript("""
-        (function () {
-          document.querySelector('#iosDlShows .ios-dl-actions button[data-batch-action="pause"]').click();
-          return true;
-        })();
-        """)
-        let paused = try await awaitMessage { $0["action"] as? String == "downloadPause" }
-        XCTAssertEqual(paused["showId"] as? String, "fixture", "暂停要带上是哪部剧：\(paused)")
-
-        /* 暂停态快照 → 面板出现「继续下载」；点它发 downloadResume */
-        var pausedTasks = tasks
-        for index in pausedTasks.indices { pausedTasks[index]["status"] = "paused" }
-        try await pushSnapshot(pausedTasks)
-        let resumeShown = try await awaitValue("""
-        (function () {
-          var button = document.querySelector('#iosDlShows .ios-dl-actions button[data-batch-action="resume"]');
-          return !!button && button.textContent === '继续下载';
-        })()
-        """)
-        XCTAssertTrue(resumeShown, "暂停后要能看到「继续下载」")
-        _ = try await javaScript("""
-        (function () {
-          document.querySelector('#iosDlShows .ios-dl-actions button[data-batch-action="resume"]').click();
-          return true;
-        })();
-        """)
-        let resumed = try await awaitMessage { $0["action"] as? String == "downloadResume" }
-        XCTAssertEqual(resumed["showId"] as? String, "fixture")
-
-        /* 取消整部剧 → downloadCancel；真实取消效果（不动已下载文件）见 DownloadQueueTests */
-        _ = try await javaScript("""
-        (function () {
-          document.querySelector('#iosDlShows .ios-dl-actions button[data-batch-action="cancel"]').click();
-          return true;
-        })();
-        """)
-        let cancelled = try await awaitMessage { $0["action"] as? String == "downloadCancel" }
-        XCTAssertEqual(cancelled["showId"] as? String, "fixture")
+        XCTAssertTrue((ui["title"] as? String ?? "").contains("测试剧"), "我的下载显示剧名：\(renderedText)")
+        XCTAssertTrue((ui["meta"] as? String ?? "").contains("接收中"), "显示下载字节状态：\(renderedText)")
+        XCTAssertEqual(ui["badge"] as? String, "正在下载 3 集")
+        XCTAssertEqual(ui["settingsLibrary"] as? Bool, false, "队列状态不能回到旧设置片库：\(renderedText)")
     }
 
     // MARK: - 工具

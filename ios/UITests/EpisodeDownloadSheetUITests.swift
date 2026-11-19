@@ -1,10 +1,6 @@
 import XCTest
 
-/// 0.1.15：播放页「视频下方、选集旁边」那个投屏入口换成下载按钮 —— 点它**不跳页、不弹层**，
-/// 就在这一页里、按钮下面展开可下载的集数列表（带总数、单选/多选/全选、每集状态），
-/// 选完直接进 0.1.14 那条共享下载队列。
-///
-/// 这条用例先写、先红：它照着需求断言真实 App 里的按钮与展开列表，实现之前不可能通过。
+/// 验证独立下载页的入口、选集状态以及逐集入队。
 @MainActor
 final class EpisodeDownloadSheetUITests: XCTestCase {
     private let fixtureBase = "http://127.0.0.1:8765"
@@ -61,13 +57,8 @@ final class EpisodeDownloadSheetUITests: XCTestCase {
         return fail(app, what, "页面上找不到「\(text)」（\(what)）")
     }
 
-    /// 选集旁那个下载入口。**不能**只按「下载」子串找：工具条上那一格叫「下载本集」，
-    /// 会先被匹配到（点它就变成单集下载，列表当然不会展开）。
     private func downloadEntry(_ web: XCUIElement, timeout: TimeInterval = 30) -> XCUIElement? {
-        let predicate = NSPredicate(
-            format: "label == %@ OR label CONTAINS %@ OR label CONTAINS %@",
-            "下载", "展开可下载的集数", "收起可下载集数"
-        )
+        let predicate = NSPredicate(format: "label == %@", "下载")
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
             let candidate = web.descendants(matching: .any).matching(predicate).firstMatch
@@ -100,9 +91,7 @@ final class EpisodeDownloadSheetUITests: XCTestCase {
             .tap()
     }
 
-    // MARK: - 入口：投屏换成了下载
-
-    func testTheCastEntryNextToTheEpisodesIsADownloadButtonThatExpandsInPlace() throws {
+    func testTitleDownloadOpensTheStandaloneEpisodeGrid() throws {
         let app = launchApp()
         let web = web(app)
 
@@ -114,28 +103,25 @@ final class EpisodeDownloadSheetUITests: XCTestCase {
             .firstMatch
         XCTAssertFalse(siteCast.exists, "选集旁仍然能看到站点那个「投屏」入口，它应该让位给下载按钮")
 
-        // 选集旁现在是下载按钮
         guard let entry = downloadEntry(web) else {
-            _ = fail(app, "download-entry", "选集旁没有下载入口（工具条那格「下载本集」不算）")
+            _ = fail(app, "download-entry", "剧名旁没有下载入口")
             return
         }
         attach(app, "010-download-entry")
         XCTAssertTrue(entry.isHittable, "下载按钮存在但点不到")
 
         // 展开之前，列表还没出现
-        XCTAssertNil(element(web, containing: "共 5 集", timeout: 3),
+        XCTAssertNil(element(web, containing: "点一下立即加入下载", timeout: 3),
                      "还没点下载按钮，选集下载列表就已经展开了")
 
         entry.tap()
         RunLoop.current.run(until: Date().addingTimeInterval(0.8))
 
-        // 列表在同一个页面里展开：总数写清楚，当前页没被替换掉
-        let total = requireElement(app, web, "共 5 集", "sheet-total", timeout: 15)
-        XCTAssertTrue(total.exists, "展开后的列表没有写总集数")
+        let total = requireElement(app, web, "共 5 集 · 点一下立即加入下载", "page-total", timeout: 15)
+        XCTAssertTrue(total.exists, "下载页没有写总集数")
         XCTAssertNotNil(element(web, containing: "第19集", timeout: 10),
                         "展开后的列表里没有选集条目")
-        XCTAssertNotNil(element(web, containing: "开始播放测试片", timeout: 10),
-                        "点了下载按钮之后页面被换掉了（原来的播放页元素不见了），要求是在原页面里展开")
+        XCTAssertNotNil(element(web, containing: "查看下载列表", timeout: 10), "独立下载页没有片库入口")
         attach(app, "011-download-panel")
 
         // 每一条都带真实状态。不能写死成「未下载」：同一台模拟器上先跑过的用例
@@ -147,62 +133,39 @@ final class EpisodeDownloadSheetUITests: XCTestCase {
                       "第19集那一条没带下载状态：\(stateful.label)")
     }
 
-    // MARK: - 单选 / 多选 / 全选 → 进共享队列，并显示已下载与下载中
-
-    func testSelectingEpisodesQueuesThemAndShowsDownloadedAndDownloadingStates() throws {
+    func testTappingAnEpisodeDownloadsOnlyThatEpisode() throws {
         let app = launchApp()
         let web = web(app)
 
         guard let entry = downloadEntry(web) else {
-            _ = fail(app, "download-entry", "选集旁没有下载入口（工具条那格「下载本集」不算）")
+            _ = fail(app, "download-entry", "剧名旁没有下载入口")
             return
         }
         entry.tap()
         RunLoop.current.run(until: Date().addingTimeInterval(0.8))
-        _ = requireElement(app, web, "共 5 集", "sheet-total", timeout: 15)
+        _ = requireElement(app, web, "点一下立即加入下载", "page-total", timeout: 15)
+        XCTAssertFalse(web.buttons["全选"].exists)
+        XCTAssertFalse(web.buttons["下载已选"].exists)
 
-        // 单选：点第 20 集那一条（用「集名 + 状态」定位，不会误点选集网格里的切集按钮）
         let row20 = web.descendants(matching: .any).matching(rowPredicate("第20集")).firstMatch
+        let row21 = web.descendants(matching: .any).matching(rowPredicate("第21集")).firstMatch
         guard row20.waitForExistence(timeout: 15) else {
             _ = fail(app, "sheet-row-20", "展开的列表里没有第20集那一条")
             return
         }
+        XCTAssertTrue(row21.exists)
+        let untouchedLabel = row21.label
         tapWhenVisible(app, row20, web)
-        RunLoop.current.run(until: Date().addingTimeInterval(0.4))
-        XCTAssertNotNil(element(web, containing: "已选 1 集", timeout: 10),
-                        "单选一集之后计数没变")
-
-        // 全选
-        let selectAll = requireElement(app, web, "全选", "select-all", timeout: 10)
-        tapWhenVisible(app, selectAll, web)
-        RunLoop.current.run(until: Date().addingTimeInterval(0.6))
-        XCTAssertNotNil(element(web, containing: "已选 5 集", timeout: 10),
-                        "点全选之后没有选中全部 5 集")
-        attach(app, "012-download-panel-all-selected")
-
-        // 入队：走的是 0.1.14 那条共享队列（原生并发上限 2）
-        let start = requireElement(app, web, "下载已选", "start-batch", timeout: 10)
-        tapWhenVisible(app, start, web)
-
-        /* 这一批片源就在本机、单集只有几百 KB，5 集几秒钟就跑完：
-           「下载中 / 排队」是瞬时的，单靠它做断言会在慢的机器上漏掉、在快的机器上偶发失败。
-           所以先抓一次瞬时状态（抓到就立刻截图），再用**持久**的证据确认它真的进了共享队列：
-           设置里的下载列表会写「任务 x/y 集」，那是队列快照，不会一闪而过。 */
-        let transient = element(web, containing: "下载中", timeout: 8)
-            ?? element(web, containing: "排队", timeout: 8)
+        let completed = requireElement(app, web, "第20集 已下载", "episode-done", timeout: 60)
+        XCTAssertTrue(completed.exists, "第20集没有下载完成")
+        XCTAssertEqual(row21.label, untouchedLabel, "点第20集时不应下载第21集")
         attach(app, "013-download-queue-states")
 
-        let settings = requireElement(app, web, "设置", "settings-entry", timeout: 20)
-        settings.tap()
-        RunLoop.current.run(until: Date().addingTimeInterval(0.8))
-        let queueRow = web.descendants(matching: .any)
-            .matching(NSPredicate(format: "label CONTAINS %@ AND label CONTAINS %@", "任务", "/5 集"))
-            .firstMatch
-        let sawQueue = queueRow.waitForExistence(timeout: 30)
-        attach(app, "014-download-queue-in-settings")
-        XCTAssertTrue(sawQueue,
-                      "点了下载已选之后，设置里没有出现「任务 x/5 集」的队列记录 —— 这一批没有进共享队列")
-        XCTAssertNotNil(transient ?? element(web, containing: "已下载", timeout: 30),
-                        "队列跑完之后每一集都没有显示已下载")
+        let library = requireElement(app, web, "查看下载列表", "downloads-entry")
+        guard library.exists else { return }
+        library.tap()
+        XCTAssertNotNil(element(web, containing: "我的下载", timeout: 15))
+        XCTAssertNotNil(element(web, containing: "第20集", timeout: 15))
+        attach(app, "014-single-episode-in-downloads")
     }
 }

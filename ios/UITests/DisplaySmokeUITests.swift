@@ -191,27 +191,28 @@ final class DisplaySmokeUITests: XCTestCase {
             _ = webButton(app, labels: ["播放"], exact: true, timeout: 8)
         }
 
-        // 02 下载本集：工具条那一格永远是「下载本集」，所以**不能**拿它当入队证据。
-        // 收紧后：必须等「下载进度：」这一行真的离开「尚未下载/需登录」，出现在连接/百分比/已完成态。
-        let download = requireButton(app, labels: ["下载本集"], exact: true, what: "toolbar-download")
+        // 02 新版下载页：剧名旁的下载入口打开单集网格。
+        let download = requireButton(app, labels: ["下载"], exact: false, what: "title-download")
         guard download != nil else { return }
         download!.tap()
-        let enqueued: (String) -> Bool = { text in
-            if text.contains("下载本集") { return false }
-            if text.contains("尚未下载") || text.contains("需登录") { return false }
-            if text.contains("中断") || text.contains("失败") || text.contains("不可下载") { return false }
-            if text.contains("%") && (text.contains("下载 ") || text.contains("下载进度：")) { return true }
-            if text.contains("下载进度：") && (text.contains("正在连接") || text.contains("已完成")) { return true }
-            // 6 秒小片源可能比第一次轮询还快下完：这行只在真有完成文件时出现。
-            return text.contains("用其他播放器播放") && text.contains("已下载")
-        }
-        let progressText = waitForLabel(app, timeout: 60, enqueued)
-        guard let progress = progressText else {
-            fail("点「下载本集」之后没有真的入队（下载进度停在未下载/需登录/失败）", "single-not-enqueued", app)
+        let episode = requireButton(app, labels: ["第19集"], exact: false, what: "download-episode")
+        guard episode != nil else { return }
+        attachScreenshot("02-download-page")
+        episode!.tap()
+        guard let downloads = requireButton(app, labels: ["查看下载列表"], exact: true, what: "my-downloads") else {
             return
         }
-        attachScreenshot("02-download-episode")
-        _ = progress
+        downloads.tap()
+        let episodeText = waitForLabel(app, timeout: 60) { $0.contains("第19集 已下载") }
+        guard episodeText != nil else {
+            fail("我的下载页没有第19集的真实队列状态", "single-not-enqueued", app)
+            return
+        }
+        attachScreenshot("10-my-downloads-single-episode")
+        guard let mineBack = requireButton(app, labels: ["返回"], exact: true, what: "my-downloads-back") else { return }
+        mineBack.tap()
+        guard let downloadBack = requireButton(app, labels: ["返回"], exact: true, what: "download-page-back") else { return }
+        downloadBack.tap()
 
         // 03 全屏（适应档）：按真的「全屏播放」按钮，轮询真的「退出全屏」出现；
         // 不能用归一化坐标盲点，也不能直接调 requestFullscreen 绕过产品手势。
@@ -260,21 +261,19 @@ final class DisplaySmokeUITests: XCTestCase {
         exit!.tap()
         _ = webButton(app, labels: ["全屏播放"], exact: true, timeout: 15)
 
-        // 06 设置里的下载列表：必须是**这一条**真实记录（剧名 + 第19集 + 状态），
-        // 先断言下载片库本身，再截图；页面自己的选集列表里也有「第19集」，不能算。
+        // 06 设置显示账号状态；下载列表独立存在「我的下载」页。
         let settings = requireButton(app, labels: ["设置"], exact: true, what: "settings-entry")
         guard settings != nil else { return }
         settings!.tap()
-        let libraryEvidence = waitForLabel(app, timeout: 45) { text in
-            if text.contains("正在下载") && text.contains("测试剧") && text.contains("第19集") { return true }
-            return text.contains("已下载 ") && text.contains(" 集")
-        }
-        guard let evidence = libraryEvidence else {
-            fail("设置里的下载片库没有这一条真实记录（测试剧 · 第19集 · 已下载 N 集）", "library-missing", app)
+        let account = waitForLabel(app, timeout: 15) { $0.contains("即将上线") }
+        let settingsLabels = labelTexts(app)
+        guard account != nil,
+              settingsLabels.contains(where: { $0.contains("个人资料") }),
+              settingsLabels.contains(where: { $0.contains("账号安全") }) else {
+            fail("设置账号行没有显示即将上线状态", "settings-account-status", app)
             return
         }
-        attachScreenshot("06-settings-download-list")
-        _ = evidence
+        attachScreenshot("06-settings-account-status")
     }
 
     // MARK: - 记住上次选择：杀进程重进仍然是裁剪

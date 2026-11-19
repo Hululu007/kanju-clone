@@ -2,13 +2,10 @@ import XCTest
 import WebKit
 @testable import ZhuijuAI
 
-/// 0.1.14 复审阻塞：批量 5 集全部完成，队列显示 5/5、100%，
-/// 但设置里的片库还是「已下载 0/5 集」「下载进度：尚未下载」。
+/// 0.1.18：此回归验证连续逐集下载完成后我的下载页正确记录各集。
 ///
-/// 这里用真 WKWebView + **原生自己生成的 done 事件**（`MediaDownloader.eventsForPage()`）
-/// 复现：先真点「一键全集」写出 5 集任务，再把 5 条真实完成记录交给网页，
-/// 断言设置面板的片库出现 5/5 集、剧名和 5 个集号。
-/// 修前：这些 done 事件在网页入口被 id 不匹配直接丢掉，片库 0/5 → 红。
+/// 使用真 WKWebView 和原生 `MediaDownloader.eventsForPage()` 完成事件，
+/// 逐集经过新版下载页入队，再确认每条真实落盘记录都能在「我的下载」逐集查看。
 @MainActor
 final class LibraryDoneTests: XCTestCase, WKNavigationDelegate {
     private var webView: WKWebView!
@@ -122,14 +119,14 @@ final class LibraryDoneTests: XCTestCase, WKNavigationDelegate {
 
     func webView(_ w: WKWebView, didFinish navigation: WKNavigation!) { loaded?.fulfill() }
 
-    func testAllFiveFinishedBatchEpisodesAppearInTheDownloadLibrary() async throws {
-        /* 1. 真点「一键全集」：网页写出批量任务并记住剧名/总集数 */
-        _ = try await javaScript("document.getElementById('iosBatchAll').click(); true;")
-        let batch = await awaitFirstBatchMessage()
-        let items = try XCTUnwrap(batch["items"] as? [[String: Any]], "没有发出批量任务：\(batch)")
-        XCTAssertEqual(items.count, 5)
-        let show = try XCTUnwrap(batch["show"] as? [String: Any])
-        XCTAssertEqual(show["title"] as? String, "测试剧")
+    func testFinishedSingleEpisodesAppearInMyDownloads() async throws {
+        _ = try await javaScript("document.getElementById('iosTitleDownload').click(); true;")
+        var items: [[String: Any]] = []
+        for index in 0..<5 {
+            _ = try await javaScript("document.getElementById('iosDlCell6-\(index)').click(); true;")
+            let item = await awaitDownloadItem(index: index)
+            items.append(try XCTUnwrap(item, "第\(index + 1)集没有通过单集入口入队"))
+        }
 
         /* 2. 写 5 条真实完成记录（文件真的存在），让原生自己生成 done 事件 */
         var records: [[String: Any]] = []
@@ -146,7 +143,7 @@ final class LibraryDoneTests: XCTestCase, WKNavigationDelegate {
                 "name": item["name"] as? String ?? "",
                 "title": "测试剧",
                 "ep": item["epLabel"] as? String ?? "第\(index + 1)集",
-                "meta": [
+            "meta": [
                     "showId": "fixture", "epKey": epKey, "title": "测试剧",
                     "epLabel": item["epLabel"] as? String ?? "", "cover": "https://img.example/cover.jpg",
                     "total": "5",
@@ -163,7 +160,7 @@ final class LibraryDoneTests: XCTestCase, WKNavigationDelegate {
         XCTAssertEqual(events.count, 5, "原生必须给出 5 条完成事件：\(events)")
         XCTAssertTrue(events.allSatisfy { ($0["event"] as? String) == "done" })
 
-        /* 3. 按 WebViewController.flushDownloadEvents 的顺序交给网页，再打开设置 */
+        /* 按 WebViewController.flushDownloadEvents 的顺序交给网页，再打开我的下载 */
         for event in events {
             let json = try JSONSerialization.data(withJSONObject: event)
             let text = try XCTUnwrap(String(data: json, encoding: .utf8))
@@ -171,15 +168,17 @@ final class LibraryDoneTests: XCTestCase, WKNavigationDelegate {
         }
         let rendered = try await javaScript("""
         (function () {
-          document.querySelector('[data-action="settings"]').click();
-          var item = document.getElementById('iosDlShows').children[0];
+          document.getElementById('iosDlListBtn').click();
+          var item = document.getElementById('iosMineBody').querySelector('.ip-show');
           if (!item) return 'missing-show';
-          var chips = item.querySelector('.ios-dl-eps');
           return JSON.stringify({
-            title: item.querySelector('.ios-dl-name').textContent,
-            count: item.querySelector('.ios-dl-count').textContent,
-            episodes: chips ? Array.prototype.map.call(chips.children, function (c) { return c.textContent; }) : [],
-            progress: document.getElementById('iosDownloadLabel').textContent
+            title: item.querySelector('.ips-title').textContent,
+            count: item.querySelector('.ips-meta').textContent,
+            episodes: Array.prototype.map.call(item.parentNode.querySelectorAll('.ip-eptitle'), function (episode) {
+              return episode.textContent;
+            }),
+            oldBatchActions: !!document.querySelector('[data-batch-action]'),
+            showId: item.parentNode.getAttribute('data-show')
           });
         })();
         """)
@@ -187,12 +186,11 @@ final class LibraryDoneTests: XCTestCase, WKNavigationDelegate {
         XCTAssertNotEqual(text, "missing-show", "完成 5 集后片库里一部剧都没有：\(text)")
         let ui = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any])
         XCTAssertEqual(ui["title"] as? String, "测试剧", "片库条目要用真实剧名：\(text)")
-        XCTAssertEqual(ui["count"] as? String, "已下载 5/5 集", "5 集完成必须写进片库：\(text)")
+        XCTAssertEqual(ui["showId"] as? String, "fixture", "5 个单集必须归到同一部剧：\(text)")
+        XCTAssertEqual(ui["count"] as? String, "已下载 5 集 · 0.0 MB", "5 集完成必须写进片库：\(text)")
         XCTAssertEqual(ui["episodes"] as? [String], ["第1集", "第2集", "第3集", "第4集", "第5集"],
                        "5 个集号都要能点开：\(text)")
-        /* 当前这一集（第1集）就是批量里刚下完的那一集：脚下那行不能还写「尚未下载」 */
-        XCTAssertEqual(ui["progress"] as? String, "下载进度：已完成 · 点下方选择播放器",
-                       "批量下完的当前集，单集进度行必须显示已完成：\(text)")
+        XCTAssertEqual(ui["oldBatchActions"] as? Bool, false, "我的下载页不应残留整部剧批量操作")
 
         /* 幂等：原生换页/重启会把同一批 done 再送一遍，片库不能重复计数或重复提示 */
         for event in events {
@@ -202,30 +200,32 @@ final class LibraryDoneTests: XCTestCase, WKNavigationDelegate {
         }
         let again = try await javaScript("""
         (function () {
-          var item = document.getElementById('iosDlShows').children[0];
+          var item = document.getElementById('iosMineBody').querySelector('.ip-show');
           if (!item) return 'missing-show';
-          var chips = item.querySelector('.ios-dl-eps');
           return JSON.stringify({
-            count: item.querySelector('.ios-dl-count').textContent,
-            episodes: chips ? Array.prototype.map.call(chips.children, function (c) { return c.textContent; }) : []
+            count: item.querySelector('.ips-meta').textContent,
+            episodes: item.parentNode.querySelectorAll('.ip-eptitle').length
           });
         })();
         """)
         let replayText = try XCTUnwrap(again as? String, "重送之后片库不在了：\(String(describing: again))")
         let replay = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(replayText.utf8)) as? [String: Any])
-        XCTAssertEqual(replay["count"] as? String, "已下载 5/5 集", "重送同一批 done 不得重复计数：\(replay)")
-        XCTAssertEqual(replay["episodes"] as? [String], ["第1集", "第2集", "第3集", "第4集", "第5集"],
-                       "重送同一批 done 不得多出集：\(replay)")
+        XCTAssertEqual(replay["count"] as? String, "已下载 5 集 · 0.0 MB", "重送同一批 done 不得重复计数：\(replay)")
+        XCTAssertEqual(replay["episodes"] as? Int, 5, "重送同一批 done 不得多出集：\(replay)")
     }
 
-    private func awaitFirstBatchMessage(timeout: Double = 10) async -> [String: Any] {
+    private func awaitDownloadItem(index: Int, timeout: Double = 10) async -> [String: Any]? {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
-            if let hit = bridge.bodies.last(where: { ($0["action"] as? String) == "downloadBatch" }) { return hit }
+            for message in bridge.bodies.reversed() where message["action"] as? String == "downloadBatch" {
+                guard let items = message["items"] as? [[String: Any]], items.count == 1,
+                      items.first?["epKey"] as? String == String(index) else { continue }
+                return items.first
+            }
             try? await Task.sleep(nanoseconds: 100_000_000)
         }
-        XCTFail("没有等到批量下载消息：\(bridge.bodies)")
-        return [:]
+        XCTFail("第\(index + 1)集没有产生单集入队消息：\(bridge.bodies)")
+        return nil
     }
 
     private func javaScript(_ source: String) async throws -> Any? {
