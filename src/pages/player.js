@@ -1,11 +1,22 @@
 import '../styles.css'
+import '../styles-player.css'
 import { icon } from '../icons.js'
-import { shell, bindShell, initTheme, pageHead, posterArt, posterCard, showToast } from '../shell.js'
+import { shell, bindShell, initTheme, pageHead, posterCard, showToast } from '../shell.js'
 import { findShow, shows } from '../data.js'
 import { u } from '../base.js'
-import { proxyReady, proxyShowFresh, resolvePlay, fetchLines, fetchDanmaku, sendDanmaku, fetchComments } from '../runtime.js'
+import { proxyReady, proxyShowFresh, resolvePlay, fetchLines, fetchDanmaku, sendDanmaku } from '../runtime.js'
 import { authReady, fetchShowProgress, flushSavedProgress, saveProgress } from '../auth.js'
-import { mountPlayerCtrl } from '../player-ctrl.js'
+import { openSettings } from '../settings-panel.js'
+import {
+  FILL_MODES,
+  SPEED_MIN,
+  SPEED_MAX,
+  clampRate,
+  getSetting,
+  onSettingChange,
+  rateText,
+  setSetting,
+} from '../settings.js'
 
 const id = new URLSearchParams(location.search).get('id')
 const resumeParams = new URLSearchParams(location.search)
@@ -76,122 +87,193 @@ document.title = `${show.title} - 阿噗影视`
 
 const related = shows.filter((s) => s.id !== show.id && s.cat === show.cat).slice(0, 10)
 const rest = related.length >= 6 ? related : shows.slice(6, 16)
-
-const EP_SHOW = 120
-const mins = (s) => (s ? Math.round(s / 60) + ' 分钟' : '—')
 const first = eps[0]
-const srcHost = (first?.url || '').split('/')[2] || 'archive.org'
+const startIdx = eps.find((e) => Number(e.idx) === Number(resumeIdx))?.idx ?? first?.idx ?? 0
+const epLabel = (idx) => eps.find((e) => Number(e.idx) === Number(idx))?.label || `第${Number(idx) + 1}集`
+const heatText = show.heat || (show.heatValue ? `热度 ${Math.round(show.heatValue / 1000)} 万` : '热播中')
+const metaText = [show.kindLabel, show.year, show.area].filter(Boolean).join(' · ')
+const esc = (value) =>
+  String(value ?? '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char])
 
-const body = `<section class="page-body"><div class="wrap page p-player2" style="--h:${show.hue}">
-  <div class="pp-top">
-    <div class="pp-title">
-      <h1>${show.title}</h1>
-      <div class="pp-sub">
-        ${show.year ? show.year + ' · ' : ''}${show.area} · ${show.kindLabel}
-        ${show.remarks ? ` · ${show.remarks}` : ''}
-      </div>
-    </div>
-    <div class="pp-actions">
-      <button class="btn-mint" type="button" data-play="1">${icon('play', 16)}${resumeTime > 0 ? '继续观看' : '开始播放'}</button>
-      <button class="btn-ghost" type="button" data-fav>${icon('bookmark', 16)}加入片单</button>
-      <button class="btn-ghost" type="button" data-detail>查看影片详情</button>
-      <button class="btn-ghost" type="button" data-cast>投屏</button>
-      <a class="btn-ghost" href="${u('/download/')}">${icon('phone', 16)}下载APP</a>
-      <button class="btn-ghost" type="button" data-action="share">${icon('share', 16)}分享</button>
-    </div>
-  </div>
+const ACT_BTN = (key, ico, label, extra = '') =>
+  `<button class="pw-act${extra}" type="button" data-pw-act="${key}" aria-label="${label}">${icon(ico, 20)}<span>${label}</span></button>`
 
-  <div class="pp-layout">
-    <div class="pp-main">
-      <section class="player" id="player">
-        <video id="video" controls playsinline preload="metadata"
-          poster="${show.poster || ''}" style="width:100%;display:block;aspect-ratio:16/9;background:#000">
-          <source id="vsrc" src="${first?.url || ''}" type="video/mp4" />
-          你的浏览器不支持 HTML5 播放。
-        </video>
+const body = `<section class="page-body"><div class="wrap page pw" style="--h:${show.hue}">
+  <div class="pw-grid" id="pwGrid">
+    <div class="pw-stage">
+      <div class="pl" id="player" data-controls="on">
+        <video id="video" playsinline preload="metadata" poster="${show.poster || ''}"></video>
         <div class="dm-layer" id="dmLayer"></div>
-        <button class="skip-btn" id="skipIntro" type="button" hidden>跳过片头</button>
-        <button class="skip-btn" id="skipOutro" type="button" hidden>跳过片尾</button>
-        <span class="p-label" id="playerLabel">${show.title} · ${first?.label || '正片'}</span>
-      </section>
+        <div class="pl-mask"></div>
 
-      <div class="pp-toolbar" id="playTools">
-        <button class="pp-tool" id="settingsBtn" type="button">${icon('settings', 15)}显示设置</button>
-        <button class="pp-tool" id="lineBtn" type="button">线路</button>
-        <button class="pp-tool on" id="dmBtn" type="button">弹幕 开</button>
-        <button class="pp-tool" id="pipBtn" type="button">画中画</button>
-        <button class="pp-tool" id="nextEpBtn" type="button">下一集</button>
-        <div class="dm-input" id="dmInputWrap">
-          <input id="dmText" type="text" maxlength="60" placeholder="发条弹幕…" autocomplete="off" />
-          <button id="dmSend" type="button">发送</button>
+        <div class="pl-top">
+          <div class="pl-speed" role="group" aria-label="播放速度">
+            <span class="pl-rate" id="rateNum">1.00</span>
+            <button class="pl-rb" type="button" data-rate="min" aria-label="最慢速度" title="最慢">«</button>
+            <button class="pl-rb" type="button" data-rate="-0.25" aria-label="减速 0.25" title="减速">−</button>
+            <button class="pl-rb" type="button" data-rate="+0.25" aria-label="加速 0.25" title="加速">+</button>
+            <button class="pl-rb" type="button" data-rate="max" aria-label="最快速度" title="最快">»</button>
+          </div>
+          <button class="pl-quality" id="qualityPill" type="button" aria-label="线路与清晰度">
+            <i class="pl-dot" aria-hidden="true"></i>
+            <span id="qualityText">1080P · 官方线路</span>
+            <b>自动</b>
+          </button>
         </div>
-      </div>
 
-      <div class="pp-settings" id="settingsPanel" hidden>
-        <div class="pp-set-row"><span>播放速度</span><div class="speed-bar" id="speedBar"></div></div>
-        <div class="pp-set-row"><span>画面填充</span>
-          <div class="fill-bar" id="fillBar">
-            <button class="tool-btn on" type="button" data-fill="contain">默认</button>
-            <button class="tool-btn" type="button" data-fill="cover">铺满</button>
-            <button class="tool-btn" type="button" data-fill="fill">拉伸</button>
+        <button class="pl-bigplay" id="bigPlay" type="button" aria-label="播放">${icon('play', 30)}</button>
+
+        <button class="pl-epov" id="epOverlay" type="button">≡ <span id="playerLabel">${epLabel(startIdx)}</span> ›</button>
+        <p class="pl-hint" id="playHint"></p>
+
+        <div class="pl-ctrl" id="ppCtrl">
+          <div class="pl-seek" id="plSeek" role="slider" tabindex="0" aria-label="播放进度" aria-valuemin="0" aria-valuemax="0" aria-valuenow="0">
+            <i class="pl-buf" id="plBuf"></i>
+            <i class="pl-played" id="plPlayed"></i>
+            <b class="pl-knob" id="plKnob"></b>
+          </div>
+          <div class="pl-btns">
+            <div class="pl-btns-l">
+              <button class="plb" id="btnPlay" type="button" aria-label="播放 / 暂停">${icon('play', 18)}</button>
+              <button class="plb" id="btnNext" type="button" aria-label="下一集">${icon('chevronRight', 18)}<i class="plb-bar"></i></button>
+              <div class="pl-vol">
+                <button class="plb" id="btnVol" type="button" aria-label="静音">${icon('volume', 18)}</button>
+                <input class="pl-vol-range" id="volRange" type="range" min="0" max="1" step="0.05" value="1" aria-label="音量" />
+              </div>
+              <span class="pl-time" id="plTime">00:00 / 00:00</span>
+            </div>
+            <div class="pl-btns-r">
+              <button class="plb plb-text" id="btnDm" type="button" aria-label="弹幕开关">弹幕 开</button>
+              <button class="plb" id="btnDmSet" type="button" aria-label="弹幕设置">${icon('chat', 18)}</button>
+              <button class="plb" id="btnGear" type="button" aria-label="播放设置">${icon('settings', 18)}</button>
+              <button class="plb" id="btnPip" type="button" aria-label="画中画">${icon('grid', 18)}</button>
+              <button class="plb" id="btnWebFull" type="button" aria-label="网页全屏">${icon('monitor', 18)}</button>
+              <button class="plb" id="btnFull" type="button" aria-label="全屏">${icon('external', 18)}</button>
+            </div>
           </div>
         </div>
-        <div class="pp-set-row"><span>增强与网络</span>
-          <button class="pp-tool" id="hqBtn" type="button">画质增强</button>
-          <button class="pp-tool" id="p2pBtn" type="button">P2P</button>
+
+        <div class="pl-pop pl-gear" id="plGear" hidden>
+          <div class="pg-main">
+            <button class="pg-row" type="button" data-pg-go="speed"><span>播放速度</span><em id="pgRate">1.00</em><i>›</i></button>
+            <button class="pg-row" type="button" data-pg-go="fill"><span>画面填充</span><em id="pgFill">默认</em><i>›</i></button>
+            <div class="pg-row"><span>画质增强</span><button class="set-sw" type="button" role="switch" data-pg-switch="enhance" aria-checked="false"><i></i></button></div>
+            <div class="pg-row"><span>P2P 共享加速</span><button class="set-sw" type="button" role="switch" data-pg-switch="p2p" aria-checked="false"><i></i></button></div>
+            <button class="pg-row pg-more" type="button" data-pg-more><span>更多设置</span><i>›</i></button>
+          </div>
+          <div class="pg-sub" data-pg-sub="speed" hidden>
+            <button class="pg-back" type="button" data-pg-back>‹ 播放速度</button>
+            <div class="pg-list" id="pgSpeedList"></div>
+          </div>
+          <div class="pg-sub" data-pg-sub="fill" hidden>
+            <button class="pg-back" type="button" data-pg-back>‹ 画面填充</button>
+            <div class="pg-list">
+              ${FILL_MODES.map(([value, label]) => `<button class="pg-opt${getSetting('fill') === value ? ' on' : ''}" type="button" data-fill="${value}">${label}</button>`).join('')}
+            </div>
+          </div>
         </div>
-      </div>
 
-      <div class="line-bar" id="lineBar" hidden></div>
-      <p class="pp-hint" id="playHint">点播放即可观看，线路失败会自动切换下一条。</p>
+        <div class="pl-pop pl-lines" id="plLines" hidden>
+          <p class="pl-pop-title">线路 / 清晰度</p>
+          <div class="pl-line-list" id="lineList"></div>
+        </div>
 
-      <div class="pp-info" id="detailInfo">
-        ${show.synopsis ? `<h3>简介</h3><p class="synopsis">${show.synopsis}</p>` : ''}
-        ${
-          (show.directors?.length || show.actors?.length)
-            ? `<h3>主创</h3><p class="pp-crew">
-                ${show.directors?.length ? `导演：${show.directors.slice(0, 3).join('、')}` : ''}
-                ${show.directors?.length && show.actors?.length ? ' · ' : ''}
-                ${show.actors?.length ? `主演：${show.actors.slice(0, 8).join('、')}` : ''}
-              </p>`
-            : ''
-        }
-        <p class="pp-genres">${show.genres.slice(0, 5).map((g) => `<span class="tag">${g}</span>`).join('')}</p>
+        <div class="pl-pop pl-dmset" id="plDm" hidden>
+          <p class="pl-pop-title">弹幕设置</p>
+          <label class="pl-dmrow"><span>透明度</span><input type="range" data-dm-range="dmOpacity" min="0.2" max="1" step="0.1" /><b data-dm-val="dmOpacity">90%</b></label>
+          <label class="pl-dmrow"><span>字号</span><input type="range" data-dm-range="dmSize" min="12" max="28" step="1" /><b data-dm-val="dmSize">18px</b></label>
+          <label class="pl-dmrow"><span>速度</span><input type="range" data-dm-range="dmSpeed" min="4" max="14" step="1" /><b data-dm-val="dmSpeed">8s</b></label>
+          <p class="pl-dmrow"><span>显示区域</span>
+            <select class="pl-dmarea" data-dm-area aria-label="弹幕显示区域">
+              <option value="25">1/4 画面</option><option value="50">1/2 画面</option><option value="75">3/4 画面</option><option value="100">全画面</option>
+            </select>
+          </p>
+          <div class="pl-dmsend">
+            <input id="dmText" type="text" maxlength="60" placeholder="发条弹幕…" autocomplete="off" />
+            <button type="button" id="dmSend">发送</button>
+          </div>
+        </div>
+
+        <div class="pl-eps" id="plEps" hidden>
+          <header class="pl-eps-head">
+            <span id="plEpsTitle">选集</span>
+            <button class="pl-eps-x" type="button" data-pl-eps-close aria-label="关闭选集">${icon('close', 16)}</button>
+          </header>
+          <div class="pl-eps-grid" id="plEpsGrid"></div>
+        </div>
       </div>
     </div>
 
-    <aside class="pp-side">
-      <div class="pp-tabs" role="tablist">
-        <button class="pp-tab on" type="button" data-tab="eps">选集</button>
-        <button class="pp-tab" type="button" data-tab="cast">投屏</button>
-        <button class="pp-tab" type="button" data-tab="talk">讨论 <span class="pp-tab-count">99+</span></button>
-        <button class="pp-tab" type="button" data-tab="fb">反馈</button>
+    <aside class="pw-side" id="pwSide">
+      <div class="pw-tabs" role="tablist">
+        <button class="pw-tab on" type="button" role="tab" aria-selected="true" data-pw-tab="eps">选集</button>
+        <button class="pw-tab" type="button" role="tab" aria-selected="false" data-pw-tab="cast">投屏</button>
       </div>
-      <div class="pp-pane" id="paneEps">
-        <div class="pp-pane-head">选集 <span>共 ${eps.length} 集</span></div>
-        <div class="ep-grid" id="epGrid">
-          ${eps
-            .slice(0, EP_SHOW)
-            .map((e, i) => `<button class="ep ${i === 0 ? 'on' : ''}" type="button" data-ep="${e.idx}">${e.label}</button>`)
-            .join('')}
+
+      <section class="pw-card">
+        <div class="pw-card-bg" aria-hidden="true"${show.poster ? ` style="background-image:url('${esc(show.poster)}')"` : ''}></div>
+        <div class="pw-card-in">
+          <div class="pw-card-top">
+            <div class="pw-card-id">
+              <h1 class="pw-title">${esc(show.title)}<span class="pw-caret">›</span></h1>
+              <p class="pw-meta">${esc(heatText)}<i>·</i>${esc(metaText)}</p>
+            </div>
+            <button class="pw-more" type="button" data-pw-more>更多推荐 ›</button>
+          </div>
+          <div class="pw-acts">
+            ${ACT_BTN('fav', 'bookmark', '片单')}
+            ${ACT_BTN('line', 'swap', '换源')}
+            ${ACT_BTN('cast', 'tv', '投屏')}
+            ${ACT_BTN('dl', 'download', '下载')}
+            ${ACT_BTN('share', 'share', '分享')}
+          </div>
+          <div class="pw-crew">
+            ${
+              show.directors?.length
+                ? `<button class="pw-crow" type="button" data-pw-row><span>导演</span><b>${esc(show.directors.join('、'))}</b></button>`
+                : ''
+            }
+            ${
+              show.actors?.length
+                ? `<button class="pw-crow" type="button" data-pw-row><span>主演</span><b>${esc(show.actors.slice(0, 12).join('、'))}</b></button>`
+                : ''
+            }
+            ${
+              show.synopsis
+                ? `<button class="pw-crow" type="button" data-pw-row><span>简介</span><b>${esc(show.synopsis)}</b></button>`
+                : ''
+            }
+          </div>
         </div>
-        ${eps.length > EP_SHOW ? `<button class="btn-ghost" type="button" id="epMore" style="margin-top:10px">显示全部 ${eps.length} 集</button>` : ''}
+      </section>
+
+      <div class="pw-pane" id="pwEps">
+        <div class="pw-ephead">
+          <span id="pwEpCount">当前：${epLabel(startIdx)}/共 ${eps.length} 集</span>
+          <button class="pw-expand" type="button" data-pw-expand-eps>展开选集 ›</button>
+        </div>
+        <div class="pw-eplist" id="pwEpList">
+          ${eps.map((e) => `<button class="ep${Number(e.idx) === Number(startIdx) ? ' on' : ''}" type="button" data-ep="${e.idx}">${e.label}</button>`).join('')}
+        </div>
+        <div class="pw-epgrid" id="pwEpGrid" hidden></div>
       </div>
-      <div class="pp-pane" id="paneCast" hidden>
-        <div class="pp-empty">投屏请在 TV / 手机 App 内使用</div>
-      </div>
-      <div class="pp-pane" id="paneTalk" hidden>
-        <div class="pp-comments" id="commentList">加载中…</div>
-      </div>
-      <div class="pp-pane" id="paneFb" hidden>
-        <div class="pp-empty">反馈请通过 App 内「反馈」提交</div>
+
+      <div class="pw-pane" id="pwCast" hidden>
+        <div class="pw-cast">
+          <div class="pw-cast-ico">${icon('tv', 26)}</div>
+          <p class="pw-cast-t">投屏到电视</p>
+          <p class="pw-cast-s">在同一网络下打开 TV 版或手机 App，选择本片即可投到电视。</p>
+          <a class="pw-cast-btn" href="${u('/download/')}">${icon('download', 15)}获取 TV / 手机 App</a>
+        </div>
       </div>
     </aside>
+
+    <button class="pw-handle" id="pwHandle" type="button" aria-label="收起侧栏" title="收起侧栏">›</button>
   </div>
 
-  <section class="row" style="margin-top:26px">
+  <section class="row pw-related" id="pwRelated" style="margin-top:26px">
     <div class="row-head">
-      <div><h2>相关推荐</h2><p class="sub">同类片库里还有这些</p></div>
+      <div><h2>更多推荐</h2><p class="sub">同类片库里还有这些</p></div>
     </div>
     <div class="strip">${rest.map((s) => posterCard(s)).join('')}</div>
   </section>
@@ -207,96 +289,301 @@ document.getElementById('app').innerHTML = shell({
 })
 bindShell()
 
-const epMore = document.getElementById('epMore')
-if (epMore) {
-  epMore.addEventListener('click', () => {
-    const grid = document.getElementById('epGrid')
-    // 记住当前播放的集数，展开后要保留高亮，否则会错标成第 1 集
-    const activeIdx = Number(document.querySelector('.ep.on')?.dataset.ep ?? eps[0]?.idx ?? 0)
-    grid.innerHTML = eps
-      .map((e) => `<button class="ep ${Number(e.idx) === activeIdx ? 'on' : ''}" type="button" data-ep="${e.idx}">${e.label}</button>`)
-      .join('')
-    epMore.remove()
-    const cur = grid.querySelector('.ep.on')
-    // 只在选集面板内部对齐，不要把整页滚走
-    if (cur && cur.scrollIntoView) cur.scrollIntoView({ block: 'nearest', inline: 'nearest' })
-  })
-}
-
+const $ = (sel) => document.querySelector(sel)
+const player = document.getElementById('player')
 const video = document.getElementById('video')
 const label = document.getElementById('playerLabel')
 const hint = document.getElementById('playHint')
-
-// ---- 倍速 ----
-const SPEEDS = [1, 1.5, 2, 2.5, 3]
-const speedBar = document.getElementById('speedBar')
-let rate = Number(localStorage.getItem('kj-speed') || 1)
-if (!SPEEDS.includes(rate)) rate = 1
-
-// ---- 自带播放控制栏：全屏在进度条右端，倍速到 3× ----
-// 原生控件没法改布局（iOS 上全屏键在左上角、倍速最多 2×），所以页内自带一条。
-{
-  const player = document.getElementById('player')
-  if (player && video) {
-    mountPlayerCtrl({
-      player,
-      video,
-      speeds: SPEEDS,
-      announce: (text) => showToast(text),
-      onFullscreen: (on) => {
-        // 全屏里上方工具条和它的面板全部收起，只留底部控制栏
-        if (on) {
-          for (const panel of [document.getElementById('settingsPanel'), document.getElementById('lineBar')]) {
-            if (panel) panel.hidden = true
-          }
-        }
-        // App 端：交给原生锁方向；浏览器端：标准全屏由模块自己处理
-        try {
-          window.webkit?.messageHandlers?.iosPlayer?.postMessage({ action: on ? 'fullscreen' : 'inline' })
-        } catch (error) { /* 非 App 环境 */ }
-      },
-    })
-  }
-}
-
-// ---- 画质增强 / 弹幕 / 跳过片头片尾 ----
-const hqBtn = document.getElementById('hqBtn')
-const dmBtn = document.getElementById('dmBtn')
 const dmLayer = document.getElementById('dmLayer')
-const dmInputWrap = document.getElementById('dmInputWrap')
+const ppCtrl = document.getElementById('ppCtrl')
+const seekBar = document.getElementById('plSeek')
+const seekBuf = document.getElementById('plBuf')
+const seekPlayed = document.getElementById('plPlayed')
+const seekKnob = document.getElementById('plKnob')
+const btnPlay = document.getElementById('btnPlay')
+const bigPlay = document.getElementById('bigPlay')
+const btnNext = document.getElementById('btnNext')
+const btnVol = document.getElementById('btnVol')
+const volRange = document.getElementById('volRange')
+const timeText = document.getElementById('plTime')
+const btnDm = document.getElementById('btnDm')
+const btnDmSet = document.getElementById('btnDmSet')
+const btnGear = document.getElementById('btnGear')
+const btnPip = document.getElementById('btnPip')
+const btnWebFull = document.getElementById('btnWebFull')
+const btnFull = document.getElementById('btnFull')
+const rateNum = document.getElementById('rateNum')
+const qualityPill = document.getElementById('qualityPill')
+const qualityText = document.getElementById('qualityText')
+const epOverlay = document.getElementById('epOverlay')
+const gear = document.getElementById('plGear')
+const linePop = document.getElementById('plLines')
+const lineList = document.getElementById('lineList')
+const dmPop = document.getElementById('plDm')
+const plEps = document.getElementById('plEps')
+const plEpsGrid = document.getElementById('plEpsGrid')
+const plEpsTitle = document.getElementById('plEpsTitle')
+const epList = document.getElementById('pwEpList')
+const epGrid = document.getElementById('pwEpGrid')
+const epCount = document.getElementById('pwEpCount')
 const dmText = document.getElementById('dmText')
 const dmSend = document.getElementById('dmSend')
-const skipIntroBtn = document.getElementById('skipIntro')
-const skipOutroBtn = document.getElementById('skipOutro')
-const lineBtn = document.getElementById('lineBtn')
-const settingsBtn = document.getElementById('settingsBtn')
-const settingsPanel = document.getElementById('settingsPanel')
-const fillBar = document.getElementById('fillBar')
-const nextEpBtn = document.getElementById('nextEpBtn')
-const pipBtn = document.getElementById('pipBtn')
-const p2pBtn = document.getElementById('p2pBtn')
-const ppTabs = document.querySelector('.pp-tabs')
-const commentList = document.getElementById('commentList')
-let talkLoaded = false
 
-let hq = localStorage.getItem('kj-hq') === '1'
-let dmOn = localStorage.getItem('kj-dm') !== '0'
-let skipInfo = null
+/* ---------------- 控制栏显隐（3 秒无操作隐藏） ---------------- */
+
+let hideTimer = null
+let pointerInside = false
+
+function playing() {
+  return !video.paused && !video.ended
+}
+
+function showControls({ keep = false } = {}) {
+  player.dataset.controls = 'on'
+  ppCtrl?.classList.add('on')
+  clearTimeout(hideTimer)
+  if (keep || !playing()) return
+  hideTimer = setTimeout(() => {
+    if (!playing() || video.seeking) return
+    if (gear && !gear.hidden) return
+    if (linePop && !linePop.hidden) return
+    if (dmPop && !dmPop.hidden) return
+    if (plEps && !plEps.hidden) return
+    player.dataset.controls = 'off'
+    ppCtrl?.classList.remove('on')
+  }, 3000)
+}
+
+player.addEventListener('pointermove', () => showControls())
+player.addEventListener('pointerdown', () => showControls())
+player.addEventListener('pointerleave', () => {
+  pointerInside = false
+  showControls()
+})
+player.addEventListener('pointerenter', () => {
+  pointerInside = true
+})
+video.addEventListener('play', () => {
+  syncPlayButton()
+  showControls()
+})
+video.addEventListener('pause', () => {
+  syncPlayButton()
+  showControls({ keep: true })
+})
+
+/* ---------------- 播放 / 进度 / 时间 ---------------- */
+
+const clock = (value) => {
+  const total = Math.max(0, Math.floor(Number(value) || 0))
+  const h = Math.floor(total / 3600)
+  const m = Math.floor((total % 3600) / 60)
+  const s = total % 60
+  const two = (n) => (n < 10 ? '0' + n : String(n))
+  return (h ? h + ':' + two(m) : two(m)) + ':' + two(s)
+}
+
+function syncPlayButton() {
+  const on = playing()
+  btnPlay.innerHTML = on ? icon('pause', 18) : icon('play', 18)
+  btnPlay.setAttribute('aria-label', on ? '暂停' : '播放')
+  bigPlay.classList.toggle('on', !on)
+  bigPlay.setAttribute('aria-label', on ? '暂停' : '播放')
+  player.classList.toggle('is-playing', on)
+}
+
+function paintProgress() {
+  const d = video.duration || 0
+  const t = video.currentTime || 0
+  const ratio = d > 0 ? Math.min(1, Math.max(0, t / d)) : 0
+  seekPlayed.style.width = (ratio * 100).toFixed(3) + '%'
+  seekKnob.style.left = (ratio * 100).toFixed(3) + '%'
+  let buffered = 0
+  try {
+    if (video.buffered && video.buffered.length) buffered = video.buffered.end(video.buffered.length - 1)
+  } catch {}
+  seekBuf.style.width = d > 0 ? Math.min(100, (buffered / d) * 100).toFixed(3) + '%' : '0%'
+  timeText.textContent = `${clock(t)} / ${clock(d)}`
+  seekBar.setAttribute('aria-valuemax', String(Math.round(d)))
+  seekBar.setAttribute('aria-valuenow', String(Math.round(t)))
+}
+
+function seekTo(clientX) {
+  const rect = seekBar.getBoundingClientRect()
+  if (!rect.width || !video.duration) return
+  const ratio = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width))
+  video.currentTime = ratio * video.duration
+  paintProgress()
+}
+
+let dragging = false
+seekBar.addEventListener('pointerdown', (event) => {
+  dragging = true
+  player.classList.add('seeking')
+  seekBar.setPointerCapture?.(event.pointerId)
+  seekTo(event.clientX)
+})
+seekBar.addEventListener('pointermove', (event) => {
+  if (!dragging) return
+  seekTo(event.clientX)
+})
+const endSeek = (event) => {
+  if (!dragging) return
+  dragging = false
+  player.classList.remove('seeking')
+  if (event?.clientX) seekTo(event.clientX)
+  showControls()
+}
+seekBar.addEventListener('pointerup', endSeek)
+seekBar.addEventListener('pointercancel', endSeek)
+seekBar.addEventListener('keydown', (event) => {
+  if (!video.duration) return
+  if (event.key === 'ArrowRight') video.currentTime = Math.min(video.duration, video.currentTime + 5)
+  if (event.key === 'ArrowLeft') video.currentTime = Math.max(0, video.currentTime - 5)
+})
+
+function togglePlay() {
+  if (video.paused || video.ended) startPlayback()
+  else video.pause()
+  showControls({ keep: true })
+}
+
+btnPlay.addEventListener('click', togglePlay)
+bigPlay.addEventListener('click', togglePlay)
+video.addEventListener('click', (event) => {
+  // 打开选集抽屉/面板时不抢点击
+  if (event.target !== video) return
+  togglePlay()
+})
+video.addEventListener('dblclick', () => toggleFullscreen())
+
+btnVol.addEventListener('click', () => {
+  const muted = video.muted || video.volume === 0
+  video.muted = !muted
+  volRange.value = String(muted ? 1 : 0)
+  syncVolumeIcon()
+})
+volRange.addEventListener('input', () => {
+  video.volume = Number(volRange.value)
+  video.muted = video.volume === 0
+  syncVolumeIcon()
+})
+function syncVolumeIcon() {
+  const muted = video.muted || video.volume === 0
+  btnVol.innerHTML = icon(muted ? 'volumeMute' : 'volume', 18)
+  btnVol.setAttribute('aria-label', muted ? '取消静音' : '静音')
+}
+
+video.addEventListener('volumechange', () => {
+  if (!video.muted && video.volume > 0) volRange.value = String(video.volume)
+  syncVolumeIcon()
+})
+
+/* ---------------- 倍速：数字 + « − + » ---------------- */
+
+let rate = clampRate(getSetting('speed'))
+
+function applyRateUI() {
+  const text = rateText(rate)
+  rateNum.textContent = text
+  const pgRate = document.getElementById('pgRate')
+  if (pgRate) pgRate.textContent = text
+  document.querySelectorAll('#pgSpeedList [data-speed]').forEach((button) => {
+    button.classList.toggle('on', Math.abs(Number(button.dataset.speed) - rate) < 0.001)
+  })
+}
+
+function applyRate() {
+  try {
+    video.playbackRate = rate
+    // iOS 等平台会把 >2x 钳制到 2x，界面按真实值回显
+    const real = video.playbackRate
+    if (real && Math.abs(real - rate) > 0.01) {
+      rate = clampRate(real)
+      setSetting('speed', rate)
+    }
+  } catch {}
+  applyRateUI()
+}
+
+function setRate(value, { persist = true } = {}) {
+  const next = clampRate(value)
+  if (next === rate) return
+  rate = next
+  if (persist) setSetting('speed', rate)
+  applyRate()
+  showToast(`播放速度 ${rateText(rate)}×`)
+}
+
+document.querySelectorAll('[data-rate]').forEach((button) => {
+  button.addEventListener('click', () => {
+    const dir = button.dataset.rate
+    if (dir === 'min') setRate(SPEED_MIN)
+    else if (dir === 'max') setRate(SPEED_MAX)
+    else setRate(rate + Number(dir))
+  })
+})
+
+/* ---------------- 画质增强 / 画面填充 ---------------- */
+
+function applyHQ() {
+  const on = getSetting('enhance')
+  video.style.filter = on ? 'contrast(1.06) saturate(1.08) brightness(1.02)' : ''
+  document.querySelectorAll('[data-pg-switch="enhance"]').forEach((button) => {
+    button.classList.toggle('on', on)
+    button.setAttribute('aria-checked', String(on))
+  })
+}
+
+function applyFill() {
+  const value = getSetting('fill')
+  video.style.objectFit = value === 'fill' ? 'fill' : value === 'cover' ? 'cover' : 'contain'
+  const label = (FILL_MODES.find(([mode]) => mode === value) || FILL_MODES[0])[1]
+  const pgFill = document.getElementById('pgFill')
+  if (pgFill) pgFill.textContent = label
+  document.querySelectorAll('[data-fill]').forEach((button) => button.classList.toggle('on', button.dataset.fill === value))
+}
+
+document.addEventListener('click', (event) => {
+  const fill = event.target.closest('[data-fill]')
+  if (!fill) return
+  setSetting('fill', fill.dataset.fill)
+  applyFill()
+})
+
+/* ---------------- 弹幕 ---------------- */
+
+let dmOn = getSetting('danmaku')
 let dmList = []
 let dmCursor = 0
 let lastT = 0
 let dmLane = 0
 
-function applyHQ() {
-  video.style.filter = hq ? 'contrast(1.06) saturate(1.08) brightness(1.02)' : ''
-  hqBtn.classList.toggle('on', hq)
+function applyDm() {
+  dmOn = getSetting('danmaku')
+  btnDm.textContent = dmOn ? '弹幕 开' : '弹幕 关'
+  btnDm.classList.toggle('on', dmOn)
+  btnDm.setAttribute('aria-pressed', String(dmOn))
+  if (!dmOn) dmLayer.innerHTML = ''
 }
 
-function applyDm() {
-  dmBtn.classList.toggle('on', dmOn)
-  dmBtn.textContent = dmOn ? '弹幕 开' : '弹幕 关'
-  dmInputWrap.style.display = dmOn ? '' : 'none'
-  if (!dmOn) dmLayer.innerHTML = ''
+function applyDmStyle() {
+  const opacity = getSetting('dmOpacity')
+  const size = getSetting('dmSize')
+  const speed = getSetting('dmSpeed')
+  dmLayer.style.setProperty('--dm-opacity', String(opacity))
+  dmLayer.style.setProperty('--dm-size', size + 'px')
+  dmLayer.style.setProperty('--dm-dur', speed + 's')
+  dmLayer.style.height = getSetting('dmArea') + '%'
+  dmLayer.style.bottom = 'auto'
+  document.querySelectorAll('[data-dm-range]').forEach((input) => {
+    const key = input.dataset.dmRange
+    input.value = String(getSetting(key))
+    const out = document.querySelector(`[data-dm-val="${key}"]`)
+    if (out) out.textContent = key === 'dmOpacity' ? Math.round(getSetting(key) * 100) + '%' : key === 'dmSize' ? getSetting(key) + 'px' : getSetting(key) + 's'
+  })
+  const area = document.querySelector('[data-dm-area]')
+  if (area) area.value = String(getSetting('dmArea'))
 }
 
 function spawnDm(d) {
@@ -306,7 +593,7 @@ function spawnDm(d) {
   if (d.color) el.style.color = d.color
   dmLane = (dmLane + 1) % 7
   el.style.top = 6 + dmLane * 11 + '%'
-  el.style.setProperty('--dur', 8 + Math.min(6, d.text.length * 0.12) + 's')
+  el.style.setProperty('--dur', getSetting('dmSpeed') + Math.min(6, d.text.length * 0.12) + 's')
   dmLayer.appendChild(el)
   setTimeout(() => el.remove(), 16000)
 }
@@ -341,9 +628,8 @@ async function loadDm(epIdx) {
 async function sendDm() {
   const text = dmText.value.trim()
   if (!text) return
-  const epIdx = Number(document.querySelector('.ep.on')?.dataset.ep ?? eps[0]?.idx ?? 0)
   const t = video.currentTime || 0
-  const ok = await sendDanmaku(show.id, epIdx, t, text)
+  const ok = await sendDanmaku(show.id, currentEpIdx(), t, text)
   if (!ok) {
     hint.textContent = '弹幕发送失败，稍后再试'
     return
@@ -358,183 +644,368 @@ async function sendDm() {
   }
 }
 
-function updateSkip() {
-  if (!skipInfo) {
-    skipIntroBtn.hidden = true
-    skipOutroBtn.hidden = true
-    return
+btnDm.addEventListener('click', () => {
+  setSetting('danmaku', !dmOn)
+})
+dmSend?.addEventListener('click', (event) => {
+  event.preventDefault()
+  void sendDm()
+})
+dmText?.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter') {
+    event.preventDefault()
+    void sendDm()
   }
-  const t = video.currentTime || 0
-  const d = video.duration || 0
-  skipIntroBtn.hidden = !(skipInfo.introEnd && t < skipInfo.introEnd - 1)
-  skipOutroBtn.hidden = !(skipInfo.outroFrom && d > 0 && d - t <= skipInfo.outroFrom)
+})
+document.querySelectorAll('[data-dm-range]').forEach((input) => {
+  input.addEventListener('input', () => setSetting(input.dataset.dmRange, Number(input.value)))
+})
+document.querySelector('[data-dm-area]')?.addEventListener('change', (event) => {
+  setSetting('dmArea', Number(event.target.value))
+})
+
+/* ---------------- 弹出层通用开关 ---------------- */
+
+const POPS = [gear, linePop, dmPop]
+function closePops(except = null) {
+  for (const pop of POPS) {
+    if (!pop || pop === except) continue
+    pop.hidden = true
+  }
+}
+function togglePop(pop) {
+  if (!pop) return
+  const willOpen = pop.hidden
+  closePops(pop)
+  pop.hidden = !willOpen
+  if (willOpen) showControls({ keep: true })
 }
 
-// ---- 顶部工具条 / 右侧面板 ----
-const escHtml = (s) =>
-  String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]))
-const timeAgo = (iso) => {
-  const t = Date.parse(iso)
-  if (!t) return ''
-  const d = Date.now() - t
-  if (d < 3600e3) return Math.max(1, Math.round(d / 60e3)) + ' 分钟前'
-  if (d < 86400e3) return Math.round(d / 3600e3) + ' 小时前'
-  return Math.round(d / 86400e3) + ' 天前'
+btnGear.addEventListener('click', () => {
+  togglePop(gear)
+  syncGear()
+})
+qualityPill.addEventListener('click', () => {
+  togglePop(linePop)
+  renderLineList()
+})
+btnDmSet.addEventListener('click', () => {
+  togglePop(dmPop)
+  applyDmStyle()
+})
+document.addEventListener('pointerdown', (event) => {
+  if (!POPS.some((pop) => pop && !pop.hidden)) return
+  if (event.target.closest('.pl-pop') || event.target.closest('#btnGear, #qualityPill, #btnDmSet')) return
+  closePops()
+})
+
+/* ---------------- 齿轮浮层 ---------------- */
+
+function syncGear() {
+  applyRateUI()
+  applyFill()
+  applyHQ()
+  document.querySelectorAll('[data-pg-switch]').forEach((button) => {
+    const key = button.dataset.pgSwitch
+    const on = !!getSetting(key)
+    button.classList.toggle('on', on)
+    button.setAttribute('aria-checked', String(on))
+  })
 }
 
-async function loadComments() {
-  if (!commentList) return
-  commentList.innerHTML = '加载中…'
-  const j = await fetchComments(show.id, 0, 30).catch(() => null)
-  if (!j?.items?.length) {
-    commentList.innerHTML = '<div class="pp-empty">还没有讨论</div>'
+gear.addEventListener('click', (event) => {
+  const go = event.target.closest('[data-pg-go]')
+  if (go) {
+    gear.querySelector('.pg-main').hidden = true
+    const sub = gear.querySelector(`[data-pg-sub="${go.dataset.pgGo}"]`)
+    if (sub) sub.hidden = false
+    if (go.dataset.pgGo === 'speed') renderSpeedList()
     return
   }
-  commentList.innerHTML = j.items
+  const back = event.target.closest('[data-pg-back]')
+  if (back) {
+    gear.querySelectorAll('.pg-sub').forEach((sub) => (sub.hidden = true))
+    gear.querySelector('.pg-main').hidden = false
+    return
+  }
+  const sw = event.target.closest('[data-pg-switch]')
+  if (sw) {
+    const key = sw.dataset.pgSwitch
+    setSetting(key, !getSetting(key))
+    syncGear()
+    return
+  }
+  if (event.target.closest('[data-pg-more]')) {
+    closePops()
+    openSettings()
+    return
+  }
+  const speed = event.target.closest('[data-speed]')
+  if (speed) {
+    setRate(Number(speed.dataset.speed))
+    gear.querySelectorAll('.pg-sub').forEach((sub) => (sub.hidden = true))
+    gear.querySelector('.pg-main').hidden = false
+  }
+})
+
+function renderSpeedList() {
+  const list = document.getElementById('pgSpeedList')
+  if (!list) return
+  const values = [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2, 2.5, 3]
+  if (!values.includes(rate)) values.push(rate)
+  values.sort((a, b) => a - b)
+  list.innerHTML = values
     .map(
-      (c) => `<div class="cmt">
-        <p class="cmt-body">${escHtml(c.content)}</p>
-        <div class="cmt-meta"><span>${escHtml(c.author)}</span><span>${timeAgo(c.at)}</span><span>👍 ${c.up || 0}</span></div>
-      </div>`
+      (value) =>
+        `<button class="pg-opt${Math.abs(value - rate) < 0.001 ? ' on' : ''}" type="button" data-speed="${value}">${value.toFixed(2)}×</button>`
     )
     .join('')
 }
 
-lineBtn?.addEventListener('click', () => {
-  lineBar.hidden = !lineBar.hidden
+/* ---------------- 线路 / 清晰度 ---------------- */
+
+let linesByEp = new Map()
+let currentProvider = ''
+const STATUS_TIP = { dup: '该线路串集，已停用', dead: '线路不可用', empty: '线路为空', member: '需要会员或更高等级', unknown: '', ok: '' }
+
+function lineOptions(epIdx) {
+  return linesByEp.get(Number(epIdx))?.options || []
+}
+
+function updateQuality() {
+  const options = lineOptions(currentEpIdx())
+  const hit = options.find((o) => o.provider === currentProvider) || options[0]
+  qualityText.textContent = hit ? hit.label : '官方线路'
+  qualityPill.title = hit ? hit.label : ''
+}
+
+function renderLineList() {
+  const options = lineOptions(currentEpIdx())
+  if (!options.length) {
+    lineList.innerHTML = '<p class="pl-line-empty">这一集暂时没有可选线路</p>'
+    return
+  }
+  const groups = { official: [], normal: [] }
+  for (const o of options) (groups[o.group] || groups.normal).push(o)
+  const row = (o) =>
+    `<button class="pl-line${o.provider === currentProvider ? ' on' : ''}" type="button" data-line="${esc(o.provider)}"${
+      o.status === 'dup' || o.status === 'dead' ? ' disabled' : ''
+    }><span>${esc(o.label)}</span>${o.status && o.status !== 'ok' ? `<em>${esc(STATUS_TIP[o.status] || '')}</em>` : ''}</button>`
+  lineList.innerHTML = `
+    ${groups.official.length ? `<p class="pl-line-group">官方线路</p>${groups.official.map(row).join('')}` : ''}
+    ${groups.normal.length ? `<p class="pl-line-group">普通线路</p>${groups.normal.map(row).join('')}` : ''}`
+}
+
+document.addEventListener('click', (event) => {
+  const line = event.target.closest('[data-line]')
+  if (!line) return
+  play(currentEpIdx(), true, line.dataset.line)
+  closePops()
 })
-settingsBtn?.addEventListener('click', () => {
-  settingsPanel.hidden = !settingsPanel.hidden
+
+/* ---------------- 选集：侧栏一行 + 展开网格 + 播放器内抽屉 ---------------- */
+
+let epExpanded = false
+
+function paintEpSelection(activeIdx) {
+  const idx = Number(activeIdx)
+  document.querySelectorAll('.ep').forEach((button) => button.classList.toggle('on', Number(button.dataset.ep) === idx))
+  const found = eps.find((e) => Number(e.idx) === idx)
+  label.textContent = found ? found.label : epLabel(idx)
+  epCount.textContent = `当前：${found ? found.label : epLabel(idx)}/共 ${eps.length} 集`
+  plEpsTitle.textContent = `选集 · 共 ${eps.length} 集`
+  const active = epList.querySelector('.ep.on')
+  if (active && active.scrollIntoView) active.scrollIntoView({ block: 'nearest', inline: 'center' })
+}
+
+function buildEpGrid() {
+  epGrid.innerHTML = eps.map((e) => `<button class="ep${Number(e.idx) === currentEpIdx() ? ' on' : ''}" type="button" data-ep="${e.idx}">${e.label}</button>`).join('')
+}
+
+plEpsGrid.innerHTML = eps.map((e) => `<button class="ep${Number(e.idx) === Number(startIdx) ? ' on' : ''}" type="button" data-ep="${e.idx}">${e.label}</button>`).join('')
+
+document.addEventListener('click', (event) => {
+  if (event.target.closest('[data-pl-eps-close]')) {
+    plEps.hidden = true
+    showControls()
+    return
+  }
+  if (event.target.closest('[data-pw-expand-eps]')) {
+    epExpanded = !epExpanded
+    const button = document.querySelector('[data-pw-expand-eps]')
+    if (epExpanded) buildEpGrid()
+    epList.hidden = epExpanded
+    epGrid.hidden = !epExpanded
+    if (button) button.textContent = epExpanded ? '收起选集 ‹' : '展开选集 ›'
+    return
+  }
+  const epBtn = event.target.closest('[data-ep]')
+  if (epBtn) {
+    plEps.hidden = true
+    void play(Number(epBtn.dataset.ep))
+  }
 })
-nextEpBtn?.addEventListener('click', () => {
-  const cur = Number(document.querySelector('.ep.on')?.dataset.ep ?? eps[0]?.idx ?? 0)
-  const nxt = eps.find((e) => e.idx > cur)
-  if (nxt) play(nxt.idx)
-  else showToast('已经是最后一集了')
+
+epOverlay.addEventListener('click', () => {
+  plEps.hidden = !plEps.hidden
+  if (!plEps.hidden) {
+    const active = plEpsGrid.querySelector('.ep.on')
+    if (active && active.scrollIntoView) active.scrollIntoView({ block: 'nearest', inline: 'center' })
+    showControls({ keep: true })
+  }
 })
-pipBtn?.addEventListener('click', async () => {
+
+/* ---------------- 侧栏 Tab / 收起把手 / 信息卡 ---------------- */
+
+document.addEventListener('click', (event) => {
+  const tab = event.target.closest('[data-pw-tab]')
+  if (tab) {
+    document.querySelectorAll('[data-pw-tab]').forEach((button) => {
+      const on = button === tab
+      button.classList.toggle('on', on)
+      button.setAttribute('aria-selected', String(on))
+    })
+    const eps1 = document.getElementById('pwEps')
+    const cast = document.getElementById('pwCast')
+    if (eps1) eps1.hidden = tab.dataset.pwTab !== 'eps'
+    if (cast) cast.hidden = tab.dataset.pwTab !== 'cast'
+    return
+  }
+
+  const row = event.target.closest('[data-pw-row]')
+  if (row) {
+    row.classList.toggle('open')
+    return
+  }
+
+  if (event.target.closest('[data-pw-more]')) {
+    document.getElementById('pwRelated')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    return
+  }
+
+  const act = event.target.closest('[data-pw-act]')
+  if (act) {
+    const key = act.dataset.pwAct
+    if (key === 'fav') {
+      try {
+        const list = JSON.parse(localStorage.getItem('kj-fav') || '[]')
+        const next = [...new Set([show.id, ...list])]
+        localStorage.setItem('kj-fav', JSON.stringify(next))
+      } catch {}
+      showToast(`已把《${show.title}》加入片单`)
+    }
+    if (key === 'line') {
+      togglePop(linePop)
+      renderLineList()
+    }
+    if (key === 'cast') {
+      document.querySelector('[data-pw-tab="cast"]')?.click()
+      document.getElementById('pwSide')?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    }
+    if (key === 'dl') {
+      const bridge = window.webkit?.messageHandlers?.iosPlayer
+      if (bridge) bridge.postMessage({ action: 'download', url: mediaUrl(), name: downloadName() })
+      else window.location.href = u('/download/')
+    }
+    if (key === 'share') {
+      const url = location.href
+      if (navigator.clipboard?.writeText) navigator.clipboard.writeText(url).then(() => showToast('链接已复制，去分享给朋友吧'), () => showToast('复制失败'))
+      else showToast('链接已复制，去分享给朋友吧')
+      try {
+        window.webkit?.messageHandlers?.iosPlayer?.postMessage({ action: 'share', url, title: document.title })
+      } catch {}
+    }
+  }
+})
+
+const pwGrid = document.getElementById('pwGrid')
+const pwHandle = document.getElementById('pwHandle')
+pwHandle?.addEventListener('click', () => {
+  const collapsed = pwGrid.classList.toggle('collapsed')
+  pwHandle.textContent = collapsed ? '‹' : '›'
+  pwHandle.setAttribute('aria-label', collapsed ? '展开侧栏' : '收起侧栏')
+  pwHandle.title = collapsed ? '展开侧栏' : '收起侧栏'
+  try {
+    localStorage.setItem('kj-pw-collapsed', collapsed ? '1' : '0')
+  } catch {}
+})
+try {
+  if (localStorage.getItem('kj-pw-collapsed') === '1') {
+    pwGrid.classList.add('collapsed')
+    if (pwHandle) {
+      pwHandle.textContent = '‹'
+      pwHandle.setAttribute('aria-label', '展开侧栏')
+      pwHandle.title = '展开侧栏'
+    }
+  }
+} catch {}
+
+/* ---------------- 全屏 / 画中画 ---------------- */
+
+let webFull = false
+function setWebFull(on) {
+  webFull = on
+  document.documentElement.classList.toggle('pl-webfull', on)
+  player.classList.toggle('is-webfull', on)
+  showControls({ keep: true })
+}
+btnWebFull?.addEventListener('click', () => setWebFull(!webFull))
+
+function toggleFullscreen() {
+  const doc = document
+  if (doc.fullscreenElement || doc.webkitFullscreenElement) {
+    ;(doc.exitFullscreen || doc.webkitExitFullscreen)?.call(doc)
+    return
+  }
+  const el = player
+  const fn = el.requestFullscreen || el.webkitRequestFullscreen
+  if (fn) {
+    Promise.resolve(fn.call(el)).catch(() => {
+      // iOS Safari 没有元素级全屏，退回网页全屏
+      setWebFull(true)
+    })
+  } else setWebFull(true)
+}
+btnFull?.addEventListener('click', () => {
+  toggleFullscreen()
+  try {
+    window.webkit?.messageHandlers?.iosPlayer?.postMessage({ action: 'fullscreen' })
+  } catch {}
+})
+document.addEventListener('fullscreenchange', () => {
+  player.classList.toggle('is-fullscreen', !!document.fullscreenElement)
+  showControls({ keep: true })
+})
+
+btnPip?.addEventListener('click', async () => {
   try {
     if (document.pictureInPictureElement) await document.exitPictureInPicture()
     else if (document.pictureInPictureEnabled && video.requestPictureInPicture) await video.requestPictureInPicture()
     else showToast('当前浏览器不支持画中画')
-  } catch { showToast('暂时无法开启画中画') }
-})
-p2pBtn?.addEventListener('click', () => showToast('当前片源线路未提供 P2P 加速'))
-document.querySelector('[data-detail]')?.addEventListener('click', () => {
-  document.getElementById('detailInfo')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
-})
-document.querySelector('[data-cast]')?.addEventListener('click', () => {
-  const castTab = document.querySelector('[data-tab="cast"]')
-  castTab?.click()
-  document.querySelector('.pp-side')?.scrollIntoView({ behavior: 'smooth', block: 'center' })
-})
-fillBar?.addEventListener('click', (e) => {
-  const b = e.target.closest('[data-fill]')
-  if (!b) return
-  video.style.objectFit = b.dataset.fill
-  fillBar.querySelectorAll('.tool-btn').forEach((x) => x.classList.toggle('on', x === b))
-  localStorage.setItem('kj-fill', b.dataset.fill)
-})
-{
-  const saved = localStorage.getItem('kj-fill') || 'contain'
-  video.style.objectFit = saved
-  fillBar?.querySelector(`[data-fill="${saved}"]`)?.classList.add('on')
-  fillBar?.querySelectorAll('.tool-btn').forEach((x) => x.classList.toggle('on', x.dataset.fill === saved))
-}
-/* 选集区横滑切页：投屏 / 讨论 / 反馈 以前只能点，真机横滑多次没反应。
-   横向位移明显压过纵向时才切页，避免和上下滚动抢手势。 */
-{
-  let start = null
-  ppTabs?.addEventListener('touchstart', (e) => {
-    if (e.touches.length !== 1) return
-    start = { x: e.touches[0].clientX, y: e.touches[0].clientY }
-  }, { passive: true })
-  ppTabs?.addEventListener('touchend', (e) => {
-    // App 内注入层也在监听横滑；它先处理过就不要再来一次，否则一次滑动跳两页
-    if (e.__zhuijuSwipeHandled) { start = null; return }
-    if (!start || !e.changedTouches.length) return
-    const dx = e.changedTouches[0].clientX - start.x
-    const dy = e.changedTouches[0].clientY - start.y
-    start = null
-    if (Math.abs(dx) < 44 || Math.abs(dx) < Math.abs(dy) * 1.6) return
-    const tabs = [...ppTabs.querySelectorAll('.pp-tab')]
-    const current = tabs.findIndex((tab) => tab.classList.contains('on'))
-    const next = tabs[Math.min(tabs.length - 1, Math.max(0, current + (dx < 0 ? 1 : -1)))]
-    if (next && next !== tabs[current]) next.click()
-  }, { passive: true })
-}
-
-ppTabs?.addEventListener('click', (e) => {
-  const b = e.target.closest('[data-tab]')
-  if (!b) return
-  ppTabs.querySelectorAll('.pp-tab').forEach((x) => x.classList.toggle('on', x === b))
-  const map = { eps: 'paneEps', cast: 'paneCast', talk: 'paneTalk', fb: 'paneFb' }
-  for (const [k, id] of Object.entries(map)) {
-    const el = document.getElementById(id)
-    if (el) el.hidden = k !== b.dataset.tab
-  }
-  if (b.dataset.tab === 'talk' && !talkLoaded) {
-    talkLoaded = true
-    loadComments()
-  }
-})
-
-function renderSpeed() {
-  if (!speedBar) return
-  speedBar.innerHTML =
-    `<span class="speed-title">倍速</span>` +
-    SPEEDS.map(
-      (v) => `<button class="speed-btn ${v === rate ? 'on' : ''}" type="button" data-speed="${v}">${v}x</button>`
-    ).join('')
-}
-
-function applyRate() {
-  try {
-    video.playbackRate = rate
-    const real = video.playbackRate
-    // iOS 等平台可能把 >2x 钳制到 2x，界面按真实值回显
-    if (real && Math.abs(real - rate) > 0.01) {
-      rate = real
-      localStorage.setItem('kj-speed', String(rate))
-      renderSpeed()
-    }
   } catch {
-    /* iOS 可能不支持 >2x，会静默钳制 */
+    showToast('暂时无法开启画中画')
   }
-}
+})
 
-function setRate(v) {
-  rate = Number(v) || 1
-  localStorage.setItem('kj-speed', String(rate))
-  renderSpeed()
-  applyRate()
-}
+/* ---------------- 设置联动（设置面板 ↔ 播放器共用一份值） ---------------- */
 
-function remember(idx) {
-  const position = video.currentTime || 0
-  const duration = video.duration || null
-  const label = eps.find((episode) => Number(episode.idx) === Number(idx))?.label || `第${Number(idx) + 1}集`
-  try {
-    const hist = JSON.parse(localStorage.getItem('kj-history') || '[]')
-    localStorage.setItem('kj-history', JSON.stringify([show.id, ...hist.filter((x) => x !== show.id)].slice(0, 12)))
-  } catch {}
-  try {
-    const progress = JSON.parse(localStorage.getItem('kj-progress') || '{}')
-    progress[show.id] = {
-      idx,
-      label,
-      position,
-      duration,
-      updated: Date.now(),
-    }
-    localStorage.setItem('kj-progress', JSON.stringify(progress))
-  } catch {}
-  void saveProgress({ showId: show.id, idx, position, duration })
-}
+onSettingChange((key) => {
+  if (key === 'speed') {
+    rate = clampRate(getSetting('speed'))
+    applyRate()
+  }
+  if (key === 'enhance') applyHQ()
+  if (key === 'fill') applyFill()
+  if (key === 'danmaku') applyDm()
+  if (key === 'dmOpacity' || key === 'dmSize' || key === 'dmSpeed' || key === 'dmArea') applyDmStyle()
+  if (key === 'p2p') syncGear()
+})
 
-// ---- 播放器：mp4 直连；m3u8 用原生或按需加载 hls.js ----
+/* ---------------- 播放器：mp4 直连；m3u8 用原生或按需加载 hls.js ---------------- */
+
 let hls = null
 let hlsLoading = null
+
 function loadHls() {
   if (window.Hls) return Promise.resolve(window.Hls)
   if (!hlsLoading) {
@@ -549,12 +1020,14 @@ function loadHls() {
   return hlsLoading
 }
 
-const isHlsUrl = (u) => /\.m3u8(\?|$)/i.test(String(u || ''))
+const isHlsUrl = (value) => /\.m3u8(\?|$)/i.test(String(value || ''))
 
 function attach(url) {
-  if (hls) { hls.destroy(); hls = null }
+  if (hls) {
+    hls.destroy()
+    hls = null
+  }
   if (!url) return
-  // Chrome 的 canPlayType 对 HLS 会撒谎（返回 maybe 但播不了），有 MediaSource 就统一走 hls.js
   if (isHlsUrl(url) && typeof window.MediaSource !== 'undefined') {
     hint.textContent = '正在加载 HLS 线路…'
     loadHls()
@@ -567,7 +1040,9 @@ function attach(url) {
         hls.loadSource(url)
         hls.attachMedia(video)
       })
-      .catch(() => { hint.textContent = 'HLS 线路加载失败。' })
+      .catch(() => {
+        hint.textContent = 'HLS 线路加载失败。'
+      })
     return
   }
   video.src = url
@@ -575,39 +1050,7 @@ function attach(url) {
   applyRate()
 }
 
-// ---- 线路选择（与原站一致：官方 / 普通两组）----
-const lineBar = document.getElementById('lineBar')
-const linesByEp = new Map()
-const STATUS_TIP = {
-  dup: '该线路串集，已停用',
-  dead: '线路不可用',
-  empty: '线路为空',
-  member: '需要会员或更高等级',
-  unknown: '',
-  ok: '',
-}
-
-function renderLines(epIdx, currentProvider = '') {
-  if (!lineBar) return
-  const data = linesByEp.get(Number(epIdx))
-  if (!data || !data.options?.length) {
-    lineBar.innerHTML = ''
-    return
-  }
-  const groups = { official: [], normal: [] }
-  for (const o of data.options) (groups[o.group] || groups.normal).push(o)
-  const option = (o) => `<option value="${escHtml(o.provider)}" ${o.provider === currentProvider ? 'selected' : ''} ${o.status === 'dup' || o.status === 'dead' ? 'disabled' : ''}>${escHtml(o.label)}${o.status && o.status !== 'ok' ? ` · ${STATUS_TIP[o.status] || ''}` : ''}</option>`
-  lineBar.innerHTML = `
-    <span class="line-title">线路</span>
-    <select class="line-select" id="lineSelect" aria-label="选择播放线路">
-      ${groups.official.length ? `<optgroup label="官方线路">${groups.official.map(option).join('')}</optgroup>` : ''}
-      ${groups.normal.length ? `<optgroup label="普通线路">${groups.normal.map(option).join('')}</optgroup>` : ''}
-    </select>`
-  document.getElementById('lineSelect')?.addEventListener('change', (event) => {
-    const cur = Number(document.querySelector('.ep.on')?.dataset.ep ?? eps[0]?.idx ?? 0)
-    play(cur, true, event.currentTarget.value)
-  })
-}
+/* ---------------- 线路数据 ---------------- */
 
 async function ensureLines(epIdx) {
   if (linesByEp.has(Number(epIdx))) return
@@ -617,19 +1060,43 @@ async function ensureLines(epIdx) {
   if (j) linesByEp.set(Number(epIdx), j)
 }
 
+function currentEpIdx() {
+  return Number(document.querySelector('.ep.on')?.dataset.ep ?? eps[0]?.idx ?? 0)
+}
+
+function mediaUrl() {
+  const direct = video.currentSrc || video.src || ''
+  if (direct) return direct
+  const ep = eps.find((e) => Number(e.idx) === currentEpIdx())
+  return ep?.url || ''
+}
+
+function downloadName() {
+  const url = mediaUrl()
+  const match = /\.(mp4|m4v|mov|mkv|ts)(?:[?#]|$)/i.exec(url || '')
+  const ext = match ? `.${match[1].toLowerCase()}` : '.mp4'
+  const name = epLabel(currentEpIdx()).replace(/\s+/g, '')
+  return `阿噗影视_${name}${ext}`
+}
+
+/* ---------------- 播放主流程 ---------------- */
+
+let playRetried = false
+let skipInfo = null
+let skipDone = { intro: false, outro: false }
+
 async function play(idx, autoplay = true, preferred = '') {
   const ep = eps.find((e) => e.idx === Number(idx)) || eps[0]
   if (!ep) return
   playRetried = false
-  document.querySelectorAll('.ep').forEach((b) => b.classList.toggle('on', Number(b.dataset.ep) === ep.idx))
-  label.textContent = `${show.title} · ${ep.label}`
+  skipDone = { intro: false, outro: false }
+  paintEpSelection(ep.idx)
   hint.textContent = '正在换取片源…'
   await ensureLines(ep.idx)
-  renderLines(ep.idx, preferred)
-  // 静态页面里的直链会过期：优先让本地片源服务现场解析一条新的
+  if (!preferred) preferred = currentProvider
   const fresh = await resolvePlay(show.id, ep.idx, preferred).catch(() => null)
   if (!fresh) {
-    hint.textContent = '片源服务响应超时或未连接，请确认 npm run proxy 已启动，然后重试本集。'
+    hint.textContent = '片源服务响应超时或未连接，请稍后重试本集。'
     return
   }
   if (fresh?.error === 'login_required') {
@@ -645,18 +1112,17 @@ async function play(idx, autoplay = true, preferred = '') {
     hint.textContent = '这一集暂时取不到片源（可能是会员片源或线路维护），换一集或换一部试试。'
     return
   }
+  if (fresh?.provider) currentProvider = fresh.provider
+  if (fresh?.options?.length) linesByEp.set(Number(ep.idx), { options: fresh.options })
+  updateQuality()
+  renderLineList()
   attach(url)
   skipInfo = fresh?.skip || null
-  updateSkip()
   loadDm(ep.idx)
-  if (fresh?.options?.length) {
-    linesByEp.set(Number(ep.idx), { options: fresh.options })
-    renderLines(ep.idx, fresh.provider)
-  }
   hint.textContent = fresh
-    ? `正在播放 第${fresh.episodeNumber ?? ep.idx + 1} 集 · 线路 ${fresh.line || '官方'} · ${fresh.kind === 'hls' ? 'HLS' : 'MP4'}${fresh.verified ? ' · 内容指纹已校验' : ''}`
+    ? `正在播放 ${epLabel(ep.idx)} · 线路 ${fresh.line || '官方'} · ${fresh.kind === 'hls' ? 'HLS' : 'MP4'}${fresh.verified ? ' · 内容指纹已校验' : ''}`
     : '使用缓存的片源线路（可能已过期）'
-  if (resumeTime > 0 && Number(ep.idx) === resumeIdx) {
+  if (resumeTime > 0 && Number(ep.idx) === Number(resumeIdx)) {
     const seekResume = () => {
       video.currentTime = Math.min(resumeTime, Math.max(0, video.duration - 1))
       video.removeEventListener('loadedmetadata', seekResume)
@@ -667,12 +1133,11 @@ async function play(idx, autoplay = true, preferred = '') {
   }
   if (autoplay) {
     startPlayback()
-    if (!(resumeTime > 0 && Number(ep.idx) === resumeIdx)) remember(ep.idx)
+    if (!(resumeTime > 0 && Number(ep.idx) === Number(resumeIdx))) remember(ep.idx)
   }
 }
 
-// 播放启动失败不能静默：iOS 上 play() 会被拒绝或卡住，页面却已写着“当前线路可播放”，用户看到的就是黑屏。
-let playRetried = false
+// 播放启动失败不能静默：iOS 上 play() 会被拒绝或卡住，页面却已写着「当前线路可播放」，用户看到的就是黑屏。
 function startPlayback() {
   const p = video.play()
   if (!p || typeof p.catch !== 'function') return
@@ -680,12 +1145,11 @@ function startPlayback() {
     const name = (error && error.name) || 'Error'
     if (!playRetried) {
       playRetried = true
-      // 同一次交互内再点一下就能播：挂一次手势重试
       const retry = () => {
         document.removeEventListener('pointerup', retry, true)
         document.removeEventListener('touchend', retry, true)
         const again = video.play()
-        if (again && again.catch) again.catch(() => hint.textContent = '播放器没有开始播放（' + name + '），请再点一次本集或换一条线路。')
+        if (again && again.catch) again.catch(() => (hint.textContent = '播放器没有开始播放（' + name + '），请再点一次本集或换一条线路。'))
       }
       document.addEventListener('pointerup', retry, true)
       document.addEventListener('touchend', retry, true)
@@ -696,117 +1160,127 @@ function startPlayback() {
   })
 }
 
-// 线路失败时绝不自动跳到下一集：那正是「点第19集却看到第2集」的来源。
-// 片源服务已经会在同集内换线，浏览器仍失败就提示用户重试本集。
 video.addEventListener('error', () => {
   hint.textContent = '这条线路在浏览器里播不动。请再点一次本集（会自动换线），或换一条线路。'
 })
 video.addEventListener('loadedmetadata', () => {
   applyRate()
-  updateSkip()
-  hint.textContent = video.duration ? `时长 ${mins(video.duration)} · 当前线路可直接播放` : '当前线路可直接播放'
+  paintProgress()
+  hint.textContent = video.duration ? `时长 ${Math.round(video.duration / 60)} 分钟 · 当前线路可直接播放` : '当前线路可直接播放'
 })
 video.addEventListener('pause', () => {
-  const activeEp = document.querySelector('.ep.on')
-  if (!activeEp || !(video.currentTime > 0)) return
+  const active = currentEpIdx()
+  if (!(video.currentTime > 0)) return
   void saveProgress(
-    {
-      showId: show.id,
-      idx: Number(activeEp.dataset.ep),
-      position: video.currentTime || 0,
-      duration: video.duration || null,
-    },
+    { showId: show.id, idx: active, position: video.currentTime || 0, duration: video.duration || null },
     { force: true }
   )
 })
+function runSkip() {
+  const t = video.currentTime || 0
+  const d = video.duration || 0
+  if (!skipInfo) return
+  if (getSetting('skipIntro') && skipInfo.introEnd && !skipDone.intro && t > 0.8 && t < skipInfo.introEnd - 1) {
+    skipDone.intro = true
+    video.currentTime = skipInfo.introEnd
+    showToast('已跳过片头')
+    return
+  }
+  if (getSetting('skipOutro') && skipInfo.outroFrom && d > 0 && !skipDone.outro && d - t <= skipInfo.outroFrom) {
+    skipDone.outro = true
+    const nxt = eps.find((e) => Number(e.idx) > currentEpIdx())
+    if (nxt) {
+      showToast('已跳过片尾，播放下一集')
+      void play(nxt.idx)
+    }
+  }
+}
+
 video.addEventListener('timeupdate', () => {
   pumpDm()
-  updateSkip()
-  const activeEp = document.querySelector('.ep.on')
+  paintProgress()
+  runSkip()
   const second = Math.floor(video.currentTime)
-  if (activeEp && second > 0 && second - lastSavedSecond >= 10) {
+  if (second > 0 && second - lastSavedSecond >= 10) {
     lastSavedSecond = second
-    remember(Number(activeEp.dataset.ep))
+    remember(currentEpIdx())
   }
+})
+video.addEventListener('progress', paintProgress)
+
+btnNext.addEventListener('click', () => {
+  const cur = currentEpIdx()
+  const nxt = eps.find((e) => Number(e.idx) > cur)
+  if (nxt) void play(nxt.idx)
+  else showToast('已经是最后一集了')
 })
 
-document.addEventListener('click', (e) => {
-  const sp = e.target.closest('[data-speed]')
-  if (sp) {
-    setRate(sp.dataset.speed)
-    return
-  }
-  const ln = e.target.closest('[data-line]')
-  if (ln) {
-    const cur = Number(document.querySelector('.ep.on')?.dataset.ep ?? eps[0]?.idx ?? 0)
-    play(cur, true, ln.dataset.line)
-    return
-  }
-  const ep = e.target.closest('[data-ep]')
-  if (ep) return play(Number(ep.dataset.ep))
-  const p = e.target.closest('[data-play]')
-  if (p) {
-    play(resumeTime > 0 ? resumeIdx : eps[0]?.idx ?? 0)
-    video.scrollIntoView({ behavior: 'smooth', block: 'center' })
-    return
-  }
-  if (e.target.closest('[data-fav]')) showToast(`已把《${show.title}》加入默认片单`)
-})
+function remember(idx) {
+  const position = video.currentTime || 0
+  const duration = video.duration || null
+  const name = epLabel(idx)
+  try {
+    const hist = JSON.parse(localStorage.getItem('kj-history') || '[]')
+    localStorage.setItem('kj-history', JSON.stringify([show.id, ...hist.filter((x) => x !== show.id)].slice(0, 12)))
+  } catch {}
+  try {
+    const progress = JSON.parse(localStorage.getItem('kj-progress') || '{}')
+    progress[show.id] = { idx, label: name, position, duration, updated: Date.now() }
+    localStorage.setItem('kj-progress', JSON.stringify(progress))
+  } catch {}
+  void saveProgress({ showId: show.id, idx, position, duration })
+}
+
+/* ---------------- 启动 ---------------- */
+
+applyRate()
+applyFill()
+applyHQ()
+applyDm()
+applyDmStyle()
+syncVolumeIcon()
+syncGear()
+syncPlayButton()
+paintProgress()
+paintEpSelection(startIdx)
 
 if (!eps.length) {
   hint.textContent = '这部暂时没有可播放文件。'
 }
 
-// 进页面先把第 1 集的线路列出来，和原站一致
 if (eps.length) {
-  const initialEp = eps.find((episode) => Number(episode.idx) === resumeIdx) || eps[0]
-  ensureLines(initialEp.idx).then(() => renderLines(initialEp.idx))
-  if (resumeParams.has('ep')) play(initialEp.idx, true)
+  const initialEp = eps.find((episode) => Number(episode.idx) === Number(resumeIdx)) || eps[0]
+  ensureLines(initialEp.idx).then(() => {
+    updateQuality()
+    renderLineList()
+  })
+  if (resumeParams.has('ep')) void play(initialEp.idx, true)
+  else {
+    // 未指定集数时先把首集地址挂上（不自动播），点播放即可出画面
+    void play(initialEp.idx, false)
+  }
 }
-renderSpeed()
-applyHQ()
-applyDm()
 
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState !== 'hidden') return
-  const activeEp = document.querySelector('.ep.on')
-  if (!activeEp || !(video.currentTime > 0)) return
+  if (!(video.currentTime > 0)) return
   void saveProgress(
-    {
-      showId: show.id,
-      idx: Number(activeEp.dataset.ep),
-      position: video.currentTime || 0,
-      duration: video.duration || null,
-    },
+    { showId: show.id, idx: currentEpIdx(), position: video.currentTime || 0, duration: video.duration || null },
     { force: true }
   )
 })
 window.addEventListener('pagehide', () => void flushSavedProgress())
 
-hqBtn?.addEventListener('click', () => {
-  hq = !hq
-  localStorage.setItem('kj-hq', hq ? '1' : '0')
-  applyHQ()
-})
-dmBtn?.addEventListener('click', () => {
-  dmOn = !dmOn
-  localStorage.setItem('kj-dm', dmOn ? '1' : '0')
-  applyDm()
-})
-dmSend?.addEventListener('click', (e) => {
-  e.preventDefault()
-  sendDm()
-})
-dmText?.addEventListener('keydown', (e) => {
-  if (e.key === 'Enter') {
-    e.preventDefault()
-    sendDm()
+document.addEventListener('keydown', (event) => {
+  if (event.target.matches('input, textarea, select')) return
+  if (event.key === ' ' || event.key === 'k') {
+    event.preventDefault()
+    togglePlay()
+  }
+  if (event.key === 'f') toggleFullscreen()
+  if (event.key === 'Escape') {
+    if (webFull) setWebFull(false)
+    closePops()
+    plEps.hidden = true
   }
 })
-skipIntroBtn?.addEventListener('click', () => {
-  if (skipInfo?.introEnd) video.currentTime = skipInfo.introEnd
-})
-skipOutroBtn?.addEventListener('click', () => {
-  if (video.duration) video.currentTime = Math.max(0, video.duration - 0.5)
-})
-

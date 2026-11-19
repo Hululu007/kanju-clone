@@ -191,6 +191,7 @@ export function mobileTop() {
         <span class="tt-dark">${icon('moon', 18)}</span>
         <span class="tt-light">${icon('sun', 18)}</span>
       </button>
+      <button class="tb-btn tb-settings" type="button" data-action="settings" aria-label="设置" title="设置">${icon('settings', 18)}</button>
     </span>
   </header>`
 }
@@ -212,6 +213,7 @@ export function pageHead({ title, nav = null, back = null, big = false }) {
         <span class="tt-dark">${icon('moon', 18)}</span>
         <span class="tt-light">${icon('sun', 18)}</span>
       </button>
+      <button class="ph-menu ph-settings" type="button" data-action="settings" aria-label="设置" title="设置">${icon('settings', 18)}</button>
       <button class="ph-menu" type="button" data-action="drawer" aria-label="打开菜单">
         <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
       </button>
@@ -547,7 +549,10 @@ export function bindShell() {
       notice?.setAttribute('aria-hidden', 'true')
       try { localStorage.setItem('kj-notice-seen', '1') } catch {}
     }
-    if (a === 'settings') showToast('设置面板即将上线')
+    if (a === 'settings') {
+      // 懒加载：设置面板本身又要用 shell 的弹窗/主题函数，静态互相 import 会成环
+      import('./settings-panel.js').then((m) => m.toggleSettings()).catch(() => showToast('设置面板加载失败'))
+    }
     if (a === 'login') openModal()
     if (a === 'logout') {
       await logoutAccount()
