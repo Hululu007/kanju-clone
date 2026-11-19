@@ -208,7 +208,6 @@ final class DisplaySmokeUITests: XCTestCase {
             fail("我的下载页没有第19集的真实队列状态", "single-not-enqueued", app)
             return
         }
-        attachScreenshot("10-my-downloads-single-episode")
         guard let mineBack = requireButton(app, labels: ["返回"], exact: true, what: "my-downloads-back") else { return }
         mineBack.tap()
         guard let downloadBack = requireButton(app, labels: ["返回"], exact: true, what: "download-page-back") else { return }

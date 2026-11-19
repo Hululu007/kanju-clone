@@ -2,18 +2,7 @@ import XCTest
 
 /// 新版单集下载页和「我的下载」出包门禁。
 ///
-/// 这一项只有在下载队列那条分支合入之后才可能通过，所以这里**不做 skip**：
-/// 入口不存在就直接失败（并留下可访问性树），避免「悄悄跳过」被当成出包门槛全过。
-///
-/// run 44292507284 的两条真问题（本文件已按诊断树修正）：
-/// 1. 旧代码在 `.any` 里找第一个含「一键全集/批量」的节点，实际 tap 到的却是
-///    「从本集往后」；现在只按 **button role** + 精确 label 找真按钮。
-/// 2. 旧代码用 `label CONTAINS "设置"` 的 `.any` 第一个匹配，tap 到了工具条的
-///    「显示设置」（站点自己的面板），而按剧汇总的队列行渲染在注入层设置面板里
-///    （`downloadRoot()`：只有 `[data-action="settings"]` 打开的那一张）。现在精确点「设置」。
-///
-/// 真实入队证据必须是原生队列快照算出来的「任务 x/y 集 · 进行中 n · 排队 n」，
-/// 且 x/y 至少 2 集；仅有「已加入下载队列：N 集」这条桥接文案不算通过。
+/// 出包时通过真实播放页入口下载一集，再验证它落到「我的下载」列表。
 @MainActor
 final class BatchDownloadSmokeUITests: XCTestCase {
     private let fixtureBase = "http://127.0.0.1:8765"
@@ -44,15 +33,12 @@ final class BatchDownloadSmokeUITests: XCTestCase {
         add(tree)
     }
 
-    /// 切集页的批量条在 `.main` 滚动容器里、选集区上方：真机上经常在折叠线以下，
-    /// 直接按 isHittable 找会漏。先试着找，找不到就把网页往上滑，最多四次。
     private func fail(_ message: String, _ name: String, _ app: XCUIApplication) {
         attachDiagnostics(app, name: name)
         XCTFail(message)
     }
 
-    /// 只按 button role 找；exact 用精确 label，避免「显示设置」冒充「设置」、
-    /// 文本节点冒充「一键全集」。
+    /// 只按 button role 找，避免文本节点冒充可操作按钮。
     private func webButton(_ app: XCUIApplication, labels: [String], exact: Bool = true,
                            timeout: TimeInterval = 20) -> XCUIElement? {
         let buttons = app.buttons
@@ -70,7 +56,7 @@ final class BatchDownloadSmokeUITests: XCTestCase {
         return nil
     }
 
-    /// 一次性拍下网页可访问性树（逐条 element(boundBy:) 在 DOM 变化时会抛索引错）。
+    /// 一次性拍下网页可访问性树，避免 DOM 变化时索引失效。
     private func labelTexts(_ app: XCUIApplication) -> [String] {
         var texts: [String] = []
         for node in webLabels(app) {
@@ -79,7 +65,7 @@ final class BatchDownloadSmokeUITests: XCTestCase {
         return texts
     }
 
-    /// 只要节点的可读文案：用来按「同一个标签出现几次」区分页面选集按钮和片库集标签。
+    /// 收集页面当前可读文案供断言使用。
     private func webLabels(_ app: XCUIApplication) -> [XCUIElementSnapshot] {
         let web = app.webViews.firstMatch
         guard web.exists, let snapshot = try? web.snapshot() else { return [] }
