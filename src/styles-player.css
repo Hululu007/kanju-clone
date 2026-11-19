@@ -180,45 +180,34 @@ html.pl-webfull .pl { position: fixed; inset: 0; z-index: 9000; border-radius: 0
 @media (max-width: 639px) {
   .pl:not(.is-fullscreen):not(.is-webfull) { border-radius: 10px; }
   .pl-bigplay { width: 54px; height: 54px; }
-  .pl-epov { bottom: 64px; font-size: 12px; padding: 6px 10px; }
-  /* 手机底栏：三组都参与收缩，压缩图标/间距；画中画与网页全屏在窄屏隐藏，
-     保留清晰度 → 齿轮 → 全屏的顺序，弹幕/发送/时间等要求项全部保留。 */
-  .pl-ctrl { padding: 0 8px 8px; }
-  .pl-seek { margin: 0 -8px 8px; }
-  .pl-btns { gap: 4px; }
-  .pl-btns-l, .pl-btns-r { gap: 2px; min-width: 0; flex: 0 0 auto; }
-  .pl-btns-m { gap: 2px; min-width: 0; flex: 1 1 auto; }
-  .plb { width: 22px; min-width: 22px; height: 28px; padding: 0; }
-  .plb svg { width: 16px; height: 16px; }
-  .pl-time { font-size: 9px; padding: 0 1px; }
-  .dm-icon { width: 22px; height: 22px; font-size: 11px; }
-  .dm-icon i { display: none; }
-  .dm-input { min-width: 0; }
-  .dm-input input { flex: 0 1 auto; width: 52px; height: 28px; padding: 0 5px; font-size: 10px; }
-  .dm-input button { height: 28px; padding: 0 5px; font-size: 10px; }
-  .pl-quality { max-width: 48px; font-size: 10px; padding: 0; }
-  #btnPip, #btnWebFull { display: none; }
-  .pw-title { font-size: 17px; }
-  .pw-acts { gap: 5px; }
-  .pw-act { font-size: 10.5px; padding: 8px 0 6px; }
-}
-
-/* <=379px：单行放不下三组核心控件，改成两行 grid（顺序仍在 DOM 中保持）：
-   第一行 播放/下一集/音量/时间 + 清晰度/齿轮/全屏，第二行 弹幕开关/设置/输入/发送。 */
-@media (max-width: 379px) {
+  .pl-epov { bottom: 88px; font-size: 12px; padding: 6px 10px; }
+  /* 手机底栏改两行 grid（DOM 顺序不变，五个右侧功能一个不隐藏）：
+     第一行 播放/下一集/音量/时间 + 清晰度/齿轮/画中画/网页全屏/全屏；
+     第二行 弹幕开关/弹幕设置/输入框/绿色发送。图标与间距压缩以适配 300px。 */
   .pl-ctrl { padding: 0 8px 6px; }
+  .pl-seek { margin: 0 -8px 8px; }
   .pl-btns {
     display: grid;
     grid-template-columns: minmax(0, 1fr) auto;
     grid-template-areas: 'left right' 'mid mid';
     align-items: center;
-    gap: 5px 6px;
+    gap: 4px 4px;
   }
   .pl-btns-l { grid-area: left; }
   .pl-btns-r { grid-area: right; }
   .pl-btns-m { grid-area: mid; width: 100%; }
-  .pl-time { max-width: 52px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .dm-input { flex: 1 1 auto; }
-  .dm-input input { flex: 1 1 auto; width: auto; }
-  .pl-epov { bottom: 88px; }
+  .pl-btns-l, .pl-btns-r { gap: 1px; min-width: 0; }
+  .pl-btns-m { gap: 2px; min-width: 0; }
+  .plb { width: 20px; min-width: 20px; height: 26px; padding: 0; }
+  .plb svg { width: 15px; height: 15px; }
+  .pl-time { max-width: 40px; font-size: 8px; padding: 0 1px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .dm-icon { width: 20px; height: 20px; font-size: 10px; }
+  .dm-icon i { display: none; }
+  .dm-input { min-width: 0; flex: 1 1 auto; }
+  .dm-input input { flex: 1 1 auto; width: auto; min-width: 0; height: 26px; padding: 0 5px; font-size: 10px; }
+  .dm-input button { height: 26px; padding: 0 5px; font-size: 10px; }
+  .pl-quality { max-width: 40px; font-size: 9px; padding: 0; }
+  .pw-title { font-size: 17px; }
+  .pw-acts { gap: 5px; }
+  .pw-act { font-size: 10.5px; padding: 8px 0 6px; }
 }
