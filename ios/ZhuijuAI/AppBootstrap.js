@@ -150,9 +150,11 @@
     'kj-speed': '1', 'kj-skip-intro': '1', 'kj-skip-outro': '0', 'kj-hq': '0',
     'kj-dm': '1', 'kj-dm-opacity': '0.9', 'kj-dm-size': '18', 'kj-dm-speed': '8', 'kj-dm-area': '100'
   };
+  var settingValue;
+  var setSettingValue;
   function savedSpeed() {
     try {
-      var value = Number(localStorage.getItem('kj-speed') || 1);
+      var value = Number(localStorage.getItem('kj-speed') || SETTING_DEFAULTS['kj-speed']);
       return speeds.indexOf(value) >= 0 ? value : 1;
     } catch (error) { return 1; }
   }
@@ -166,6 +168,12 @@
   }
   document.addEventListener('play', applySpeed, true);
   document.addEventListener('loadedmetadata', applySpeed, true);
+  document.addEventListener('ratechange', function (event) {
+    if (event.target && event.target.id === 'video') {
+      var rate = Number(event.target.playbackRate);
+      if (speeds.indexOf(rate) >= 0) writeStore('kj-speed', String(rate));
+    }
+  }, true);
   document.addEventListener('loadedmetadata', function (event) {
     if (event.target.id === 'video') applyEnhancePreference(event.target);
   }, true);
@@ -187,8 +195,12 @@
     if (!event.target) return;
     var target = event.target.closest ? event.target : event.target.parentElement;
     if (!target) return;
-    /* 站点的设置按钮只会弹「设置面板即将上线」：换成注入层的设置面板，
-       下载进度和播放方式在首页也看得到。 */
+    var preferenceControl = target.closest ? target.closest('[data-setting-action],[data-theme-setting],[data-setting-toggle],#iosDanmakuExpand') : null;
+    if (preferenceControl && handleSettingsClick(preferenceControl)) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      return;
+    }
     if (settingsTriggerHit(event.target)) {
       event.preventDefault();
       event.stopImmediatePropagation();
@@ -217,12 +229,19 @@
   document.addEventListener('change', function (event) {
     if (event.target.id === 'lineSelect') invalidate();
     if (event.target.id === 'iosSettingSpeed') setRate(event.target.value);
+    var playerSpeed = document.getElementById('kjSettingSpeed');
+    if (event.target === playerSpeed) setRate(event.target.value);
     var key = event.target && event.target.getAttribute ? event.target.getAttribute('data-dm-setting') : null;
     if (key) setSettingValue(key, event.target.value);
   }, true);
   document.addEventListener('input', function (event) {
     var key = event.target && event.target.getAttribute ? event.target.getAttribute('data-dm-setting') : null;
     if (key && key !== 'kj-dm-area') setSettingValue(key, event.target.value);
+  }, true);
+  document.addEventListener('change', function (event) {
+    if (!event.target || !event.target.getAttribute) return;
+    var preference = event.target.getAttribute('data-ios-pref');
+    if (preference) setSettingValue(preference, event.target.value);
   }, true);
   document.addEventListener('visibilitychange', function () {
     if (document.visibilityState !== 'hidden') {
@@ -237,6 +256,9 @@
   });
 
   function prepareLayout() {
+    applyDanmakuPreference();
+    var initialTheme = readStore('kj-theme');
+    if (initialTheme) document.documentElement.setAttribute('data-theme', initialTheme);
     var style = document.createElement('style');
     style.id = 'iosShellStyle';
     style.textContent = [
@@ -1555,12 +1577,12 @@
     settingsSheet.className = 'ios-settings-sheet';
   }
 
-  var settingValue = function (key) {
+  settingValue = function (key) {
     var value = readStore(key);
     return value === null || value === '' ? SETTING_DEFAULTS[key] : value;
   }
 
-  var setSettingValue = function (key, value) {
+  setSettingValue = function (key, value) {
     writeStore(key, String(value));
     applySettingChange(key);
   }
@@ -1582,6 +1604,8 @@
     if (account) account.textContent = (user ? (user.nickname || user.username) + ' · ' : '') + '即将上线';
     var speed = document.getElementById('iosSettingSpeed');
     if (speed) speed.value = String(savedSpeed());
+    var playerSpeed = document.getElementById('kjSettingSpeed');
+    if (playerSpeed) playerSpeed.value = String(savedSpeed());
     var themes = body.querySelectorAll('[data-theme-setting]');
     var theme = document.documentElement.getAttribute ? (document.documentElement.getAttribute('data-theme') || 'dark') : 'dark';
     for (var i = 0; i < themes.length; i++) themes[i].className = themes[i].getAttribute('data-theme-setting') === theme ? 'on' : '';
@@ -1685,6 +1709,16 @@
     return box;
   }
 
+  function openMinePage() {
+    var page = document.getElementById('iosMinePage') || (typeof ensureMinePage === 'function' ? ensureMinePage() : null);
+    if (!page) return false;
+    page.hidden = false;
+    if (page.removeAttribute) page.removeAttribute('hidden');
+    renderMinePage();
+    storageText();
+    return true;
+  }
+
   /* 进度块只有一个，跟着用户看的那一面走：
      设置面板开着就放进面板，否则放回播放器页的「显示设置」。
      这样不会出现两份状态对不上，也不需要在页面里用重复 id。 */
@@ -1700,6 +1734,18 @@
   function mountDownloadPanel() {
     downloadPanelMounted = false;
     return false;
+  }
+
+  function syncLegacyDownloadStatus() {
+    if (!downloadState.busy && !downloadState.id && !downloadState.path && !downloadState.error) return;
+    var sheetBody = document.getElementById('iosSettingsBody');
+    if (sheetBody && !document.getElementById('iosDownloadStatus')) sheetBody.appendChild(downloadBoxElement());
+    var label = document.getElementById('iosDownloadLabel');
+    var fill = document.getElementById('iosDownloadFill');
+    var open = document.getElementById('iosOpenDownloaded');
+    if (label) label.textContent = '下载进度：' + downloadProgressNote();
+    if (fill) fill.style.width = (downloadState.busy ? downloadState.percent : (downloadState.path ? 100 : 0)) + '%';
+    if (open) open.hidden = !downloadState.path;
   }
 
   function hit(node, id) {
@@ -1862,6 +1908,8 @@
 
   function syncRateLabel() {
     var real = effectiveRate();
+    var saved = Number(savedSpeed());
+    if (Math.abs(real - saved) > 0.001) real = saved;
     var label = document.getElementById('ppRate');
     if (label) label.textContent = real + '×';
     var menu = document.getElementById('ppRateMenu');
@@ -1894,8 +1942,10 @@
       try { video.playbackRate = wanted; } catch (error) { /* 这条线路不可调速 */ }
     }
     /* 系统可能把倍速夹回去（比如只允许到 2×）：读回真实值再显示，不许谎报 */
-    var real = video ? effectiveRate() : wanted;
-    setSettingValue('kj-speed', speeds.indexOf(real) >= 0 ? real : wanted);
+    var actual = video ? effectiveRate() : wanted;
+    var stored = speeds.indexOf(actual) >= 0 ? actual : wanted;
+    setSettingValue('kj-speed', String(stored));
+    var real = actual;
     syncRateLabel();
     closeRateMenu();
     if (Math.abs(real - wanted) > 0.05) announce('本机最高只支持 ' + real + '×，' + wanted + '× 被系统夹回');
@@ -2103,6 +2153,7 @@
 
   function syncDownloadRow() {
     mountDownloadPanel();
+    syncLegacyDownloadStatus();
     var row = document.getElementById('ppDownload');
     if (row) row.className = 'pc-menu-row' + (downloadState.busy ? ' busy' : '');
     var open = document.getElementById('ppOpenLocal');
@@ -2129,8 +2180,10 @@
   var toolDownloadMounted = false;
 
   function mountToolDownload() {
+    var oldButton = document.getElementById('ppToolDownload');
+    if (oldButton && oldButton.parentNode) oldButton.parentNode.removeChild(oldButton);
     toolDownloadMounted = false;
-    return false;
+    return true;
   }
 
   function syncToolDownload() {
@@ -2975,7 +3028,26 @@
 
   /// 把「下载」按钮挂到投屏入口原来的位置；找不到投屏入口就退回选集区上方。
   function mountDlEntry() {
-    return false;
+    if (document.getElementById('iosDlEntry')) { syncDlSheet(); return true; }
+    var body = document.body;
+    var grid = document.getElementById('epGrid');
+    var host = grid && grid.parentNode ? grid.parentNode : body;
+    if (!host || typeof host.insertBefore !== 'function') return false;
+    var entry = document.createElement('div');
+    entry.id = 'iosDlEntry';
+    var button = document.createElement('button');
+    button.id = 'iosDlButton';
+    button.type = 'button';
+    button.textContent = '下载';
+    entry.appendChild(button);
+    var panel = document.createElement('div');
+    panel.id = 'iosDlPanel';
+    panel.hidden = true;
+    panel.setAttribute('hidden', '');
+    entry.appendChild(panel);
+    host.insertBefore(entry, grid && grid.parentNode === host ? grid : null);
+    syncDlSheet();
+    return true;
   }
 
   function toggleDlSheet() {
@@ -3506,14 +3578,15 @@
 
   function handleTencentUI(target, event) {
     var act = actionOf(target);
+    if (target && target.id === 'iosDlListBtn') act = 'open-mine';
     if (!act) return false;
     /* 集数格子：网格是一格一集，点一格立刻下载（§2） */
     if (act === '') return false;
     event.preventDefault();
     event.stopImmediatePropagation();
     if (act === 'back' || act === 'dl-back' || act === 'mine-back') {
-      if (document.getElementById('iosDlPage') && !document.getElementById('iosDlPage').hidden) closeDownloadPage();
-      else if (document.getElementById('iosMinePage') && !document.getElementById('iosMinePage').hidden) closeMinePage();
+      if (document.getElementById('iosMinePage') && !document.getElementById('iosMinePage').hidden) closeMinePage();
+      else if (document.getElementById('iosDlPage') && !document.getElementById('iosDlPage').hidden) closeDownloadPage();
       else if (immersiveNow()) setUserFullscreen(false);
       else if (window.history && window.history.length > 1) window.history.back();
       return true;
@@ -3538,7 +3611,6 @@
     }
     if (act === 'episodes') { if (!dlSheetOpen) toggleDlSheet(); announce('选集中'); return true; }
     if (act === 'next') { var nextBtn = document.getElementById('nextEpBtn'); if (nextBtn && typeof nextBtn.click === 'function') nextBtn.click(); else announce('已经是最后一集'); return true; }
-    if (act === 'ps-download') { closePlaySettings(); openDownloadPage(); return true; }
     if (act === 'ps-fill') {
       var modes = FIT_MODES;
       var at = modes.indexOf(fitMode);
@@ -3562,6 +3634,7 @@
     }
     if (act === 'ps-eptitle') { epTitleOn = !epTitleOn; savePlayPrefs(); syncPlaySettings(); var lbl = document.getElementById('playerLabel'); if (lbl) lbl.hidden = !epTitleOn; return true; }
     if (act === 'open-mine') { closeDownloadPage(); openMinePage(); return true; }
+    if (act === 'mine-download') { closeMinePage(); openDownloadPage(); return true; }
     if (act === 'mine-edit') { announce('左滑任意一集即可删除'); return true; }
     return false;
   }
@@ -3625,6 +3698,12 @@
     var target = event.target;
     if (!target) return false;
     if (handleTencentUI(target, event)) return true;
+    if (hit(target, 'iosDlButton')) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      toggleDlSheet();
+      return true;
+    }
     /* 选集页「选择」模式：点选集卡片是选中/取消，不再跳集 */
     if (batchSelecting) {
       var epNode = epNodeOf(target);
@@ -3638,7 +3717,7 @@
     if (hit(target, 'iosTitleDownload')) {
       event.preventDefault();
       event.stopImmediatePropagation();
-      openDownloadPage();
+      toggleDlSheet();
       return true;
     }
     if (target && target.getAttribute && String(target.getAttribute('data-dl-delete') || '') === '1') {
