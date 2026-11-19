@@ -992,8 +992,6 @@
      所以应用内自带一条控制栏：播放 · 时间 · 进度条 · 外放 · 倍速 · 全屏，
      全屏正好落在进度条右端，和倍速挨着。 */
   var ctrlMounted = false;
-  var downloadPanelMounted = false;
-  var downloadBox = null;
   var settingsSheet = null;
 
   /* 下载状态跨页面保留：原生下载在 WKWebView 外面跑，换页只换网页。
@@ -1052,7 +1050,6 @@
      「剧名 / 封面 / 这一集」记到 localStorage。分组用站点自己的媒体 id
      （播放页地址的 ?id=），拿不到 id 时退回剧名，同一部剧不会碎成两条。 */
   var LIBRARY_STORE = 'kj-ios-downloads';
-  var libraryBox = null;
 
   function readLibrary() {
     var parsed = null;
@@ -1195,25 +1192,6 @@
     return latest;
   }
 
-  function downloadLibraryElement() {
-    if (libraryBox) return libraryBox;
-    var box = document.createElement('div');
-    box.id = 'iosDownloadLibrary';
-    box.className = 'ios-dl-lib';
-    var running = document.createElement('div');
-    running.id = 'iosDlRunning';
-    running.className = 'ios-dl-running';
-    running.hidden = true;
-    if (typeof running.setAttribute === 'function') running.setAttribute('hidden', '');
-    box.appendChild(running);
-    var list = document.createElement('div');
-    list.id = 'iosDlShows';
-    list.className = 'ios-dl-shows';
-    box.appendChild(list);
-    libraryBox = box;
-    return box;
-  }
-
   function librarySig(shows) {
     var parts = [downloadState.busy ? 'run' : 'idle', String(downloadState.percent || 0), downloadState.show || '', downloadState.ep || '', downloadState.name || ''];
     for (var i = 0; i < shows.length; i++) {
@@ -1232,158 +1210,8 @@
     return true;
   }
   function renderLegacyDownloadLibrary() {
-    var root = downloadRoot();
-    if (!root || typeof root.appendChild !== 'function') return false;
-    var box = downloadLibraryElement();
-    if (box.parentNode !== root) root.appendChild(box);
-
-    var running = document.getElementById('iosDlRunning');
-    if (running) {
-      var busy = !!downloadState.busy;
-      running.hidden = !busy;
-      if (typeof running.removeAttribute === 'function' && busy) running.removeAttribute('hidden');
-      else if (typeof running.setAttribute === 'function') running.setAttribute('hidden', '');
-      if (busy) {
-        var who = downloadState.show || '';
-        var which = downloadState.ep || downloadState.name || '本集';
-        /* 规格 §2：设置里不再有多集队列/批量控制，只留这一句当前单集的状态 */
-        running.textContent = '正在下载 ' + (who ? who + ' · ' : '') + which + ' · '
-          + (downloadState.percent ? downloadState.percent + '%' : '准备中');
-      }
-    }
-
-    var list = document.getElementById('iosDlShows');
-    if (!list) return false;
-    /* 同一部剧可能带两种 id 进来：站点媒体 id（showId），和没有 ?id 时可以退回的剧名。
-       只按 id 比，同一部剧会在片库里出现两条，队列（按 showId 汇总）也挂不到第一条上：
-       复审的模拟器现场就是「剧名在、任务数/暂停取消全没了」。所以标题相同也算同一部，
-       并把队列里的真 showId 接下来，下面 queueSummary(show.id) 才找得到任务。 */
-    function sameShow(show, id, title) {
-      if (id && String(show.id) === String(id)) return true;
-      var want = String(title || '').trim();
-      return !!want && String(show.title || '').trim() === want;
-    }
-    function adoptId(show, id) {
-      if (!id || String(show.id) === String(id)) return;
-      for (var j = 0; j < shows.length; j++) if (String(shows[j].id) === String(id)) return;
-      show.id = String(id);
-    }
-    var shows = readLibrary().shows;
-    /* 排队中的剧也要出现在这里：还没下完一集时，也要能暂停/继续/取消整部剧 */
-    var batches = readBatchShows();
-    for (var b = 0; b < batches.length; b++) {
-      var batch = batches[b];
-      if (!batch || !batch.id) continue;
-      if (!queueSummary(batch.id).total) continue;
-      var known = false;
-      for (var k = 0; k < shows.length; k++) {
-        if (!sameShow(shows[k], batch.id, batch.title)) continue;
-        known = true;
-        adoptId(shows[k], batch.id);
-      }
-      if (known) continue;
-      shows.push({ id: String(batch.id), title: String(batch.title || ''), cover: String(batch.cover || ''), total: Number(batch.total) || 0, eps: [] });
-    }
-    /* 只在队列里（还没下完一集）的剧也要列出来，否则用户看不到进度也暂停不了 */
-    for (var t = 0; t < queueTasks.length; t++) {
-      var task = queueTasks[t];
-      var taskShow = String(task.showId || '');
-      if (!taskShow) continue;
-      var listed = false;
-      for (var s3 = 0; s3 < shows.length; s3++) {
-        if (!sameShow(shows[s3], taskShow, task.title)) continue;
-        listed = true;
-        adoptId(shows[s3], taskShow);
-      }
-      if (listed) continue;
-      shows.push({ id: taskShow, title: String(task.title || ''), cover: '', total: 0, eps: [] });
-    }
-    /* 没下过东西也没在下载：不挂一个空的「下载」标题在那儿 */
-    box.hidden = !shows.length && !downloadState.busy;
-    if (typeof box.setAttribute === 'function') {
-      if (box.hidden) box.setAttribute('hidden', '');
-      else box.removeAttribute('hidden');
-    }
-    var signature = librarySig(shows);
-    if (list.__iosLibrarySig === signature) return true;
-    list.__iosLibrarySig = signature;
-    if (typeof list.removeChild === 'function') {
-      while (list.firstChild) list.removeChild(list.firstChild);
-    } else if (list.children) {
-      list.children.length = 0;
-    }
-    for (var s = 0; s < shows.length; s++) {
-      list.appendChild(libraryItem(shows[s]));
-    }
-    bindSwipe(list);
-    return true;
+    return false;
   }
-
-  function libraryItem(show) {
-    /* 规格 §3：已下载列表按行列出，每行左滑露出红色「删除」，删除时同时删本地文件。
-       不做一键全部删除，也不做多选 —— 一行就是一个具体文件，滑哪行删哪行。 */
-    var wrap = document.createElement('div');
-    wrap.className = 'ios-dl-show';
-    if (typeof wrap.setAttribute === 'function') wrap.setAttribute('data-show', show.id);
-    /* 剧这一级：封面 + 剧名 + 「已下载 N/M 集」（REG-006 的片库信息不回退） */
-    if (show.cover) {
-      var cover = document.createElement('img');
-      cover.className = 'ios-dl-cover';
-      cover.src = show.cover;
-      cover.alt = show.title;
-      wrap.appendChild(cover);
-    }
-    var meta = document.createElement('div');
-    meta.className = 'ios-dl-meta';
-    var name = document.createElement('div');
-    name.className = 'ios-dl-name';
-    name.textContent = show.title;
-    meta.appendChild(name);
-    var count = document.createElement('div');
-    count.className = 'ios-dl-count';
-    /* 总集数不知道就不写分母：宁可少写，也不编一个错的。 */
-    count.textContent = '已下载 ' + show.eps.length + (show.total > 0 ? '/' + show.total : '') + ' 集';
-    meta.appendChild(count);
-    var chips = document.createElement('div');
-    chips.className = 'ios-dl-eps';
-    for (var c = 0; c < show.eps.length; c++) {
-      var chip = document.createElement('span');
-      chip.className = 'ios-dl-ep';
-      chip.textContent = show.eps[c].label || ('第' + show.eps[c].key + '集');
-      chips.appendChild(chip);
-    }
-    meta.appendChild(chips);
-    wrap.appendChild(meta);
-    for (var e = 0; e < show.eps.length; e++) {
-      var ep = show.eps[e];
-      var row = document.createElement('div');
-      row.className = 'ios-dl-row';
-      row.setAttribute('data-dl-show', show.id);
-      row.setAttribute('data-dl-key', String(ep.key));
-      row.setAttribute('data-dl-path', String(ep.path || ''));
-      row.setAttribute('aria-label', (ep.label || ('第' + ep.key + '集')) + ' 已下载，左滑可删除');
-      var body = document.createElement('div');
-      body.className = 'ios-dl-row-body';
-      var title = document.createElement('span');
-      title.className = 'ios-dl-row-title';
-      title.textContent = ep.label || ('第' + ep.key + '集');
-      body.appendChild(title);
-      var size = document.createElement('span');
-      size.className = 'ios-dl-row-size';
-      size.textContent = ep.size ? megabyte(ep.size) : '';
-      body.appendChild(size);
-      row.appendChild(body);
-      var del = document.createElement('button');
-      del.className = 'ios-dl-row-del';
-      del.type = 'button';
-      del.textContent = '删除';
-      del.setAttribute('data-dl-delete', '1');
-      row.appendChild(del);
-      wrap.appendChild(row);
-    }
-    return wrap;
-  }
-
   /// 滑动状态：一行一次，只允许同时露出一行
   var swipeRow = null;
   var swipeStart = null;
@@ -1666,33 +1494,6 @@
     return null;
   }
 
-  function downloadBoxElement() {
-    if (downloadBox) return downloadBox;
-    var box = document.createElement('div');
-    box.id = 'iosDownloadStatus';
-    box.className = 'ios-download-status';
-    box.setAttribute('aria-live', 'polite');
-    var label = document.createElement('div');
-    label.id = 'iosDownloadLabel';
-    label.textContent = '下载进度：尚未下载';
-    box.appendChild(label);
-    var track = document.createElement('div');
-    track.id = 'iosDownloadTrack';
-    var fill = document.createElement('div');
-    fill.id = 'iosDownloadFill';
-    track.appendChild(fill);
-    box.appendChild(track);
-    var open = document.createElement('button');
-    open.id = 'iosOpenDownloaded';
-    open.type = 'button';
-    open.textContent = '用其他播放器播放';
-    open.hidden = true;
-    if (typeof open.setAttribute === 'function') open.setAttribute('hidden', '');
-    box.appendChild(open);
-    downloadBox = box;
-    return box;
-  }
-
   function openMinePage() {
     var page = document.getElementById('iosMinePage') || (typeof ensureMinePage === 'function' ? ensureMinePage() : null);
     if (!page) return false;
@@ -1703,33 +1504,12 @@
     return true;
   }
 
-  /* 进度块只有一个，跟着用户看的那一面走：
-     设置面板开着就放进面板，否则放回播放器页的「显示设置」。
-     这样不会出现两份状态对不上，也不需要在页面里用重复 id。 */
-  function downloadRoot() {
-    if (settingsSheet && settingsSheet.hidden === false) {
-      var body = document.getElementById('iosSettingsBody');
-      if (body) return body;
-    }
-    return null;
-  }
-
-  /* 播放器页塞进站点自己的「显示设置」面板；首页没有那个面板，塞进注入层的设置面板。 */
   function mountDownloadPanel() {
-    downloadPanelMounted = false;
     return false;
   }
 
   function syncLegacyDownloadStatus() {
-    if (!downloadState.busy && !downloadState.id && !downloadState.path && !downloadState.error) return;
-    var sheetBody = document.getElementById('iosSettingsBody');
-    if (sheetBody && !document.getElementById('iosDownloadStatus')) sheetBody.appendChild(downloadBoxElement());
-    var label = document.getElementById('iosDownloadLabel');
-    var fill = document.getElementById('iosDownloadFill');
-    var open = document.getElementById('iosOpenDownloaded');
-    if (label) label.textContent = '下载进度：' + downloadProgressNote();
-    if (fill) fill.style.width = (downloadState.busy ? downloadState.percent : (downloadState.path ? 100 : 0)) + '%';
-    if (open) open.hidden = !downloadState.path;
+    return false;
   }
 
   function hit(node, id) {
