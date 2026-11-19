@@ -181,14 +181,22 @@ html.pl-webfull .pl { position: fixed; inset: 0; z-index: 9000; border-radius: 0
   .pl:not(.is-fullscreen):not(.is-webfull) { border-radius: 10px; }
   .pl-bigplay { width: 54px; height: 54px; }
   .pl-epov { bottom: 64px; font-size: 12px; padding: 6px 10px; }
-  .pl-hint { bottom: 104px; font-size: 11px; }
-  .pl-time { font-size: 10.5px; padding: 0 3px; }
-  .plb { height: 30px; min-width: 26px; padding: 0 3px; }
-  .pl-btns { gap: 6px; }
-  .pl-time { font-size: 11px; }
-  .dm-input input { width: 120px; font-size: 11px; }
-  .dm-input button { padding: 0 10px; font-size: 11px; }
-  .pl-quality { font-size: 11px; max-width: 100px; }
+  /* 手机底栏：三组都参与收缩，压缩图标/间距；画中画与网页全屏在窄屏隐藏，
+     保留清晰度 → 齿轮 → 全屏的顺序，弹幕/发送/时间等要求项全部保留。 */
+  .pl-ctrl { padding: 0 8px 8px; }
+  .pl-seek { margin: 0 -8px 8px; }
+  .pl-btns { gap: 4px; }
+  .pl-btns-l, .pl-btns-m, .pl-btns-r { gap: 2px; min-width: 0; flex: 0 1 auto; }
+  .plb { width: 22px; min-width: 22px; height: 28px; padding: 0; }
+  .plb svg { width: 16px; height: 16px; }
+  .pl-time { font-size: 9px; padding: 0 1px; }
+  .dm-icon { width: 22px; height: 22px; font-size: 11px; }
+  .dm-icon i { display: none; }
+  .dm-input { min-width: 0; }
+  .dm-input input { flex: 0 1 auto; width: 64px; height: 28px; padding: 0 6px; font-size: 10px; }
+  .dm-input button { height: 28px; padding: 0 7px; font-size: 10px; }
+  .pl-quality { max-width: 52px; font-size: 10px; padding: 0; }
+  #btnPip, #btnWebFull { display: none; }
   .pw-title { font-size: 17px; }
   .pw-acts { gap: 5px; }
   .pw-act { font-size: 10.5px; padding: 8px 0 6px; }
