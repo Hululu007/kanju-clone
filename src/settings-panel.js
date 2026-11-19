@@ -227,6 +227,8 @@ function showPage(page) {
   const isAccount = page === 'account' || page === 'security'
   if (account) account.hidden = !isAccount
   if (main) main.hidden = isAccount
+  const head = wrap.querySelector('.set-head:not(.set-head-sub)')
+  if (head) head.hidden = isAccount
   wrap.classList.toggle('is-sub', isAccount)
   const title = wrap.querySelector('#setAccountTitle')
   if (title) title.textContent = page === 'security' ? '账号安全' : '个人资料'

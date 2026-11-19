@@ -460,7 +460,8 @@ video.addEventListener('dblclick', () => toggleFullscreen())
 btnVol.addEventListener('click', () => {
   const muted = video.muted || video.volume === 0
   video.muted = !muted
-  volRange.value = String(muted ? 1 : 0)
+  if (muted && video.volume === 0) video.volume = 1
+  volRange.value = String(muted ? 1 : video.volume)
   syncVolumeIcon()
 })
 volRange.addEventListener('input', () => {
@@ -573,7 +574,7 @@ function applyDmStyle() {
   const speed = getSetting('dmSpeed')
   dmLayer.style.setProperty('--dm-opacity', String(opacity))
   dmLayer.style.setProperty('--dm-size', size + 'px')
-  dmLayer.style.setProperty('--dm-dur', speed + 's')
+  dmLayer.style.setProperty('--dur', speed + 's')
   dmLayer.style.height = getSetting('dmArea') + '%'
   dmLayer.style.bottom = 'auto'
   document.querySelectorAll('[data-dm-range]').forEach((input) => {
@@ -1272,7 +1273,7 @@ document.addEventListener('visibilitychange', () => {
 window.addEventListener('pagehide', () => void flushSavedProgress())
 
 document.addEventListener('keydown', (event) => {
-  if (event.target.matches('input, textarea, select')) return
+  if (event.target instanceof Element && event.target.matches('input, textarea, select')) return
   if (event.key === ' ' || event.key === 'k') {
     event.preventDefault()
     togglePlay()

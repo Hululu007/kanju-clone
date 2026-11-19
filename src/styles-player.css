@@ -156,7 +156,10 @@
 
 /* 网页全屏 / 原生全屏 */
 html.pl-webfull { overflow: hidden; }
-html.pl-webfull .main, html.pl-webfull .topbar, html.pl-webfull .tabbar, html.pl-webfull .sidebar, html.pl-webfull .page-head { display: none !important; }
+/* 播放器在 .main 里面，不能把 .main 整棵隐藏；只藏页面中与播放器无关的部分 */
+html.pl-webfull .topbar, html.pl-webfull .tabbar, html.pl-webfull .sidebar, html.pl-webfull .page-head,
+html.pl-webfull .page-body > *:not(.pw), html.pl-webfull .pw > *:not(.pw-grid),
+html.pl-webfull .pw-grid > *:not(.pw-stage) { display: none !important; }
 html.pl-webfull .pl { position: fixed; inset: 0; z-index: 9000; border-radius: 0; aspect-ratio: auto; }
 .pl.is-fullscreen { border-radius: 0; }
 .pl.is-fullscreen video, .pl.is-webfull video { height: 100%; }
