@@ -974,7 +974,7 @@ btnFull?.addEventListener('click', () => {
 })
 function syncFullscreen() {
   const isFullscreen = (document.fullscreenElement || document.webkitFullscreenElement) === player
-  player.classList.toggle('is-fullscreen', !!document.fullscreenElement)
+  player.classList.toggle('is-fullscreen', isFullscreen)
   showControls()
 }
 document.addEventListener('fullscreenchange', syncFullscreen)
