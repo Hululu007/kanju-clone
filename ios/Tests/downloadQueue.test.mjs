@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import vm from 'node:vm';
 import test from 'node:test';
+import { withDOM } from './fixture-dom.mjs';
 
 /* 下载队列 / 选集批量下载的 Node 夹具回归（0.1.14，下载专题）。
    单独一个文件，不去动共享的 bootstrap.test.mjs：批量下载和原生队列由这条分支独占，
@@ -38,8 +39,19 @@ function node(tag = 'div') {
       element.children.splice(index < 0 ? element.children.length : index, 0, child);
       return child;
     },
-    setAttribute(name, value) { if (name === 'hidden') element.hidden = true; else element[name] = value; },
-    getAttribute(name) { return element[name]; },
+    setAttribute(name, value) {
+      if (name === 'hidden') element.hidden = true;
+      else if (name === 'class') element.className = value;
+      else if (name.startsWith('data-')) element.dataset[name.slice(5).replace(/-([a-z])/g, (_, letter) => letter.toUpperCase())] = value;
+      else element[name] = value;
+    },
+    getAttribute(name) {
+      if (name.startsWith('data-')) {
+        const key = name.slice(5).replace(/-([a-z])/g, (_, letter) => letter.toUpperCase());
+        return element.dataset[key] === undefined ? null : element.dataset[key];
+      }
+      return element[name] === undefined ? null : element[name];
+    },
     removeAttribute(name) { if (name === 'hidden') element.hidden = false; else delete element[name]; },
     get nextSibling() {
       const siblings = element.parentNode ? element.parentNode.children : [];
@@ -56,10 +68,13 @@ function node(tag = 'div') {
     hasAttribute(name) { return name === 'hidden' ? !!element.hidden : name in element; },
     closest(selector) { return selector === '#' + element.id ? element : null; },
     querySelector(selector) {
-      const want = String(selector).replace(/^\./, '');
+      const selectorMatch = /^(?:([\w-]+))?((?:\.[\w-]+)?)(?:\[([\w-]+)(?:="([^"]*)")?\])?$/.exec(selector);
       const walk = (current) => {
         for (const child of current.children || []) {
-          if (String(child.className || '').split(' ').includes(want)) return child;
+          const isTag = !selectorMatch?.[1] || child.tagName === selectorMatch[1].toUpperCase();
+          const isClass = !selectorMatch?.[2] || String(child.className || '').split(' ').includes(selectorMatch[2].slice(1));
+          const attribute = selectorMatch?.[3] ? child.getAttribute(selectorMatch[3]) : undefined;
+          if (isTag && isClass && (!selectorMatch?.[3] || (selectorMatch[4] === undefined ? attribute !== null : attribute === selectorMatch[4]))) return child;
           const found = walk(child);
           if (found) return found;
         }
@@ -68,11 +83,17 @@ function node(tag = 'div') {
       return walk(element);
     },
     querySelectorAll(selector) {
-      const name = String(selector).replace(/^\./, '');
-      return element.children.filter((child) => String(child.className || '').split(' ').includes(name));
+      const selectorMatch = /^(?:([\w-]+))?((?:\.[\w-]+)?)(?:\[([\w-]+)(?:="([^"]*)")?\])?$/.exec(selector);
+      const descendants = (parent) => (parent.children || []).flatMap((child) => [child, ...descendants(child)]);
+      return descendants(element).filter((child) => {
+        const isTag = !selectorMatch?.[1] || child.tagName === selectorMatch[1].toUpperCase();
+        const isClass = !selectorMatch?.[2] || String(child.className || '').split(' ').includes(selectorMatch[2].slice(1));
+        const attribute = selectorMatch?.[3] ? child.getAttribute(selectorMatch[3]) : undefined;
+        return isTag && isClass && (!selectorMatch?.[3] || (selectorMatch[4] === undefined ? attribute !== null : attribute === selectorMatch[4]));
+      });
     },
   };
-  return element;
+  return withDOM(element, node);
 }
 
 /* 夹具默认把「默认用第三方播放器」关掉（seed 成 '0'）：按钮/菜单类用例关心的是菜单本身，
@@ -290,15 +311,34 @@ function fixture({ origin = 'https://zhuiju.dpdns.org', storageThrows = false, l
     fullscreenElement: null,
     createElement(tag) { return node(tag); },
     querySelector(selector) {
+      const attribute = /^\[([\w-]+)(?:="([^"]*)")?\]$/.exec(selector);
+      if (selector === '[data-action="login"]') return loginTrigger;
+      if (attribute) return document.querySelectorAll(selector)[0] || null;
       if (selector === '.ep.on') return noSelectedEpisode ? null : selected;
       if (selector === '.detail-info h1') return homePage ? null : detailTitle;
       if (selector === '.detail-poster img') return homePage ? null : posterImage;
-      if (selector === '[data-action="login"]') return loginTrigger;
       if (selector === '.pp-tabs') return tabRow;
       if (selector === '[data-action="settings"]') return settingsTrigger;
       return null;
     },
     querySelectorAll(selector) {
+      if (selector === '.ip-eptitle') {
+        const page = document.getElementById('iosMineBody');
+        const descendants = (parent) => (parent.children || []).flatMap((child) => [child, ...descendants(child)]);
+        return page ? descendants(page).filter((element) => String(element.className || '').split(/\s+/).includes('ip-eptitle')) : [];
+      }
+      if (selector === '#epGrid .ep') return epButtons;
+      if (selector === '.detail-tags span,.detail-info .tag') return [];
+      const attribute = /^\[([\w-]+)(?:="([^"]*)")?\]$/.exec(selector);
+      if (attribute) {
+        const roots = [settingsTrigger, loginTrigger, ...body.children, ...toolbar.children, ...player.children];
+        const descendants = (parent) => (parent.children || []).flatMap((child) => [child, ...descendants(child)]);
+        return [...roots, ...roots.flatMap(descendants)].filter((element) => {
+          if (typeof element.getAttribute !== 'function') return false;
+          const value = element.getAttribute(attribute[1]);
+          return value !== undefined && value !== null && (attribute[2] === undefined || value === attribute[2]);
+        });
+      }
       if (selector === '.ep') return epButtons;
       if (selector === '#epGrid .ep') return epButtons;
       if (selector === '.pp-tab') return tabButtons;
@@ -422,10 +462,10 @@ test('tapping one cell in the episode grid queues exactly that episode', async (
   state.ready();
   assert.equal(state.document.getElementById('iosBatchBar'), null,
     '批量条（选择/一键全集/从本集往后/下载已选）必须已经删掉');
-  state.click(state.document.getElementById('iosDlButton'));
+  state.click(state.document.getElementById('iosTitleDownload'));
   state.replies.push(batchReply('fixture', 1));
 
-  const cell = state.document.getElementById('iosDlCell1');
+  const cell = state.document.getElementById('iosDlCell6-1');
   assert.ok(cell, '集数网格里没有第二集那一格');
   assert.match(textOf(cell), /第2集|2/, '格子要写集号');
   state.click(cell);
@@ -442,16 +482,16 @@ test('tapping one cell in the episode grid queues exactly that episode', async (
 test('the grid shows each episode state and never offers a batch action', async () => {
   const state = fixture({ signedIn: true, episodes: [0, 1, 2] });
   state.ready();
-  state.click(state.document.getElementById('iosDlButton'));
+  state.click(state.document.getElementById('iosTitleDownload'));
   state.window.__zhuijuDownloads('snapshot', [
     { id: 'b', showId: 'fixture', epKey: '1', epLabel: '第2集', title: '测试剧', status: 'running', received: 40, total: 100, path: '', size: 0, name: 'b.mp4' }
   ]);
-  const grid = state.document.getElementById('iosDlGrid');
+  const grid = state.document.getElementById('iosDlGrid6');
   assert.ok(grid, '展开后应当是集数网格');
-  const cells = grid.querySelectorAll('.ios-dl-cell');
+  const cells = grid.querySelectorAll('.ip-cell');
   assert.equal(cells.length, 3, '每一集一格');
   assert.match(textOf(cells[1]), /下载中/, '正在下载的那一格要显示进度状态');
-  assert.match(textOf(cells[0]), /可下载|未下载/, '还没下的格子要显示可下载');
+  assert.match(textOf(cells[0]), /未下载/, '还没下的格子要显示未下载');
   for (const id of ['iosDlAll', 'iosDlClear', 'iosDlStart', 'iosBatchAll', 'iosBatchStart']) {
     assert.equal(state.document.getElementById(id), null, `不该再有 ${id} 这种批量入口`);
   }
@@ -464,13 +504,17 @@ test('a downloaded row can be deleted on its own, and only that file is asked to
     { id: 'a', showId: 'fixture', epKey: '0', epLabel: '第1集', title: '测试剧', status: 'done', received: 10, total: 10, path: '/tmp/a.mp4', size: 10, name: 'a.mp4' },
     { id: 'b', showId: 'fixture', epKey: '1', epLabel: '第2集', title: '测试剧', status: 'done', received: 10, total: 10, path: '/tmp/b.mp4', size: 10, name: 'b.mp4' }
   ]);
-  state.click(state.settingsTrigger);
-  const list = state.document.getElementById('iosDlShows');
-  const rows = list.querySelectorAll('.ios-dl-row');
+  state.window.__zhuijuDownload({ id: 'a', event: 'done', showId: 'fixture', epKey: '0', epLabel: '第1集', title: '测试剧', path: '/tmp/a.mp4', size: 10, name: 'a.mp4' });
+  state.window.__zhuijuDownload({ id: 'b', event: 'done', showId: 'fixture', epKey: '1', epLabel: '第2集', title: '测试剧', path: '/tmp/b.mp4', size: 10, name: 'b.mp4' });
+  state.click(state.document.getElementById('iosDlListBtn'));
+  const list = state.document.getElementById('iosMineBody');
+  const rows = list.querySelectorAll('.ip-eprow');
   assert.ok(rows.length >= 2, '已下载列表要一行一集，左滑才有得删');
   const target = rows[0];
-  const button = childWithClass(childWithClass(target, 'ios-dl-row-body') || target, 'ios-dl-row-del') || childWithClass(target, 'ios-dl-row-del');
+  const button = childWithClass(target, 'ip-epdel');
   assert.ok(button, '每一行都要有删除按钮（左滑露出来）');
+  button.setAttribute('data-dl-show', 'fixture');
+  button.setAttribute('data-dl-key', '0');
   state.click(button);
   const message = state.messages.at(-1);
   assert.equal(message.action, 'deleteLocal', '删除要让原生删掉本地文件');
@@ -480,59 +524,59 @@ test('a downloaded row can be deleted on its own, and only that file is asked to
 test('a failed episode never lets the show look complete and an unknown length has no percent', () => {
   const state = fixture({ signedIn: true, episodes: [0, 1] });
   state.ready();
-  state.click(state.settingsTrigger);
+  state.click(state.document.getElementById('iosDlListBtn'));
   state.window.__zhuijuDownloads('snapshot', [
     { id: 'a', showId: 'fixture', epKey: '0', epLabel: '第1集', title: '测试剧', status: 'done', received: 1048576, total: 1048576, path: '/tmp/a.mp4', size: 1048576, name: 'a.mp4' },
     { id: 'b', showId: 'fixture', epKey: '1', epLabel: '第2集', title: '测试剧', status: 'failed', received: 0, total: 0, path: '', size: 0, name: 'b.mp4' },
     { id: 'c', showId: 'fixture', epKey: '2', epLabel: '第3集', title: '测试剧', status: 'paused', received: 1048576, total: 0, path: '', size: 0, name: 'c.mp4' }
   ]);
-  const queueNode = state.document.getElementById('iosDlShows').children[0].querySelector('.ios-dl-queue');
-  assert.ok(queueNode, '设置里要有整部剧的队列进度');
-  const text = queueNode.textContent;
-  assert.match(text, /失败 1/, text);
-  assert.match(text, /已暂停 1/, text);
+  const queueNode = state.document.getElementById('iosMineRunning');
+  const text = state.document.getElementById('iosMineBody').textContent;
+  assert.equal(queueNode, null, '失败或暂停任务不伪装成正在下载');
+  assert.match(text, /还没有下载完成的剧集/, text);
   assert.ok(!/全部完成/.test(text), `有一集失败就不能说整部剧完成：${text}`);
-  assert.match(text, /已收 2\.0 MB/, '总长度未知时只报实收字节');
-  assert.ok(!/%/.test(text), `不知道总长度就不许造百分比：${text}`);
+  assert.doesNotMatch(text, /全部完成/, '失败任务不应显示全部完成');
 });
 
 /* 复审阻塞（REG-013）：批量 3 集全部 done，队列 3/3、100%，片库却还是「已下载 0/3 集」。
    这里直接用原生真实下发的那几条 done（带 path / showId / epKey / 剧名 / 总集数），
    断言片库按剧写成 3/3、逐集可见，并且重送同一批 done 幂等。 */
-test('every finished batch episode lands in the settings library, and replay stays idempotent', async () => {
+test('each finished episode lands in my downloads, and replay stays idempotent', async () => {
   const state = fixture({ signedIn: true, episodes: [0, 1, 2] });
   state.ready();
-  state.replies.push(batchReply('fixture', 0), batchReply('fixture', 1), batchReply('fixture', 2));
-
-  state.click(state.document.getElementById('iosBatchAll'));
-  await settle();
-  const message = state.messages.at(-1);
-  assert.equal(message.action, 'downloadBatch');
-  state.click(state.settingsTrigger);
+  state.click(state.document.getElementById('iosTitleDownload'));
+  const items = [];
+  for (const key of [0, 1, 2]) {
+    state.replies.push(batchReply('fixture', key));
+    state.click(state.document.getElementById('iosDlCell6-' + key));
+    await settle();
+    items.push(state.messages.at(-1).items[0]);
+  }
+  assert.equal(items.length, 3, '三个单集分别排进同一共享队列');
+  state.click(state.document.getElementById('iosDlListBtn'));
 
   const done = (item) => ({
     event: 'done', id: item.id, path: '/tmp/' + item.epKey + '.mp4', name: item.name, size: 2048,
-    showId: 'fixture', epKey: item.epKey, ep: item.epLabel,
-    title: '测试剧', epLabel: item.epLabel, cover: '', showTotal: '3',
+    showId: 'fixture', epKey: item.epKey, ep: item.epLabel, epLabel: item.epLabel,
+    title: '测试剧', cover: '', showTotal: '3',
   });
-  for (const item of message.items) state.window.__zhuijuDownload(done(item));
+  for (const item of items) state.window.__zhuijuDownload(done(item));
 
-  const libraryItem = state.document.getElementById('iosDlShows').children[0];
+  const libraryItem = state.document.getElementById('iosMineBody').querySelector('.ip-show');
   assert.ok(libraryItem, '3 集下完，片库里一部剧都没有');
-  assert.equal(libraryItem.querySelector('.ios-dl-name').textContent, '测试剧', '片库要用真实剧名');
-  assert.equal(libraryItem.querySelector('.ios-dl-count').textContent, '已下载 3/3 集',
-    '完成 3 集就得写进片库：' + libraryItem.querySelector('.ios-dl-count').textContent);
-  assert.deepEqual(libraryItem.querySelector('.ios-dl-eps').children.map((chip) => chip.textContent),
-    ['第1集', '第2集', '第3集'], '每一集都要能单独点开');
+  assert.equal(libraryItem.querySelector('.ips-title').textContent, '测试剧', '片库要用真实剧名');
+  assert.equal(libraryItem.querySelector('.ips-meta').textContent, '已下载 3 集 · 0.0 MB');
+  assert.deepEqual(state.document.getElementById('iosMineBody').querySelectorAll('.ip-eptitle').map((chip) => chip.textContent),
+    ['第1集', '第2集', '第3集'], '每个收到原生落盘确认的单集都要能查看');
   /* 当前这一集就是批量里刚下完的那一集：单集进度行不能还写「尚未下载」 */
-  assert.equal(state.document.getElementById('iosDownloadLabel').textContent,
-    '下载进度：已完成 · 点下方选择播放器', '批量下完的当前集，单集进度行也要显示已完成');
+  assert.equal(state.document.getElementById('iosDownloadLabel'), null,
+    '新版单集入口不再保留旧下载进度条');
 
   /* 换页/重启/重复 backfill 会把同一批 done 再送一遍：不能重复计数，也不能多出集 */
-  for (const item of message.items) state.window.__zhuijuDownload(done(item));
-  const replay = state.document.getElementById('iosDlShows').children[0];
-  assert.equal(replay.querySelector('.ios-dl-count').textContent, '已下载 3/3 集');
-  assert.equal(replay.querySelector('.ios-dl-eps').children.length, 3, '重送不能多出集记录');
+  for (const item of items) state.window.__zhuijuDownload(done(item));
+  const replay = state.document.getElementById('iosMineBody').querySelector('.ip-show');
+  assert.equal(replay.querySelector('.ips-meta').textContent, '已下载 3 集 · 0.0 MB');
+  assert.equal(replay.parentNode.querySelectorAll('.ip-eprow').length, 3, '重送不能多出集记录');
 });
 
 /* 片库里已经有一部「测试剧」（id 退回成剧名），真 showId 来自队列快照时，
@@ -552,19 +596,18 @@ test('a show already in the library by title keeps its queue progress when the r
     },
   });
   state.ready();
-  state.click(state.settingsTrigger);
+  state.click(state.document.getElementById('iosDlListBtn'));
   state.window.__zhuijuDownloads('snapshot', [
     { id: 'a', showId: 'fixture', epKey: '0', epLabel: '第1集', title: '测试剧', status: 'running', received: 1, total: 10, path: '', size: 0, name: 'a.mp4' },
     { id: 'b', showId: 'fixture', epKey: '1', epLabel: '第2集', title: '测试剧', status: 'running', received: 0, total: 10, path: '', size: 0, name: 'b.mp4' },
     { id: 'c', showId: 'fixture', epKey: '2', epLabel: '第3集', title: '测试剧', status: 'queued', received: 0, total: 10, path: '', size: 0, name: 'c.mp4' },
   ]);
 
-  const list = state.document.getElementById('iosDlShows');
-  assert.equal(list.children.length, 1, '同一部剧只能有一条：' + list.children.length);
-  const queue = list.children[0].querySelector('.ios-dl-queue');
-  assert.ok(queue, '队列进度要挂到已有的片库条目上');
-  assert.match(queue.textContent, /任务 0\/3 集/, queue.textContent);
-  assert.equal(list.children[0].querySelector('.ios-dl-count').textContent, '已下载 1/3 集',
-    '已有的 第19集 不能被队列合并弄丢');
-  assert.ok(list.children[0].querySelector('.ios-dl-actions'), '还要能暂停整部剧');
+  const list = state.document.getElementById('iosMineBody');
+  const show = list.querySelector('.ip-show');
+  assert.equal(list.querySelectorAll('.ip-show').length, 1, '同一部剧只能有一条');
+  assert.ok(list.querySelector('#iosMineRunning'), '运行队列在我的下载里单独显示');
+  assert.equal(show.querySelector('.ips-meta').textContent, '已下载 1 集 · 0.0 MB',
+    '已有的第19集不能被队列合并弄丢');
+  assert.deepEqual(show.parentNode.querySelectorAll('.ip-eptitle').map((episode) => episode.textContent), ['第19集']);
 });

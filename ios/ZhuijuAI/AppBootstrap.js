@@ -2716,7 +2716,7 @@
       id: String(payload.showId || (batch && batch.id) || meta.id || ''),
       title: String(payload.title || (batch && batch.title) || (task && task.title) || meta.title || ''),
       cover: String(payload.cover || (batch && batch.cover) || (task && task.cover) || meta.cover || ''),
-      total: Number(payload.showTotal) || (batch && Number(batch.total)) || (task && Number(task.total)) || Number(meta.total) || 0,
+      total: Number(payload.showTotal) || (batch && Number(batch.total)) || (pendingMeta && Number(pendingMeta.total)) || Number(meta.total) || 0,
       epKey: String(payload.epKey || (task && task.epKey) || ''),
       epLabel: String(payload.ep || (task && task.epLabel) || '')
     };
