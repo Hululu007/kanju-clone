@@ -285,14 +285,14 @@
       /* 全屏：竖屏也铺满，横屏时整屏播放，不再只有中间一条 */
       'html[data-ios-immersive] #pwGrid,html[data-ios-immersive] .pw-grid,html[data-ios-immersive] .pw-stage{position:fixed!important;inset:0!important;width:100vw!important;height:100vh!important;height:100dvh!important;max-width:none!important;margin:0!important;padding:0!important;overflow:hidden!important;z-index:9997!important;background:#000!important}',
       'html[data-ios-immersive] #player{position:fixed!important;inset:0!important;width:100vw!important;height:100vh!important;height:100dvh!important;max-width:none!important;aspect-ratio:auto!important;z-index:10000!important;border-radius:0!important;margin:0!important;padding:0!important;background:#000!important;overflow:hidden!important;display:block!important}',
-      'html[data-ios-immersive] #player video{position:absolute!important;inset:0!important;width:100%!important;height:100%!important;max-width:none!important;max-height:none!important;aspect-ratio:auto!important;object-fit:contain!important;background:#000}',
-      '#playTools,.pp-toolbar,.pl-top,.pl-controls,.pl-bottom,.pl-tools,#plControls,#btnWebFull,#btnFull,#btnGear,#btnPip{display:none!important;visibility:hidden!important;pointer-events:none!important}',
+      'html[data-ios-immersive] #player video:not([data-ios-fit-box]){position:absolute!important;inset:0!important;width:100%!important;height:100%!important;max-width:none!important;max-height:none!important;aspect-ratio:auto!important;object-fit:contain!important;background:#000}',
+      '#player>:not(video):not(.dm-layer):not(#iosTopBar):not(#iosFsTop):not(#iosFsMenu):not(#iosFsSide):not(#iosFsRow2):not(#ppCtrl):not(#iosPlaySettings):not(#iosTopBar):not(#iosFsTop),#playTools,.pp-toolbar,#plCtrl,.pl-top,.pl-ctrl,.pl-epov,.pl-bigplay,#btnWebFull,#btnFull,#btnGear,#btnPip{display:none!important;visibility:hidden!important;pointer-events:none!important}',
       /* 画面档位：三条写在沉浸态那条之后，同样的优先级下由它们覆盖 contain。
          适应=完整画面（可留边），裁剪=等比铺满（裁边），拉伸=不等比铺满。 */
       /* 画面填充不走 object-fit：真机上站点给 video 的盒子和内联样式会把它盖掉，
          用户看到的就是「点了没反应」。三档改成按 videoWidth/videoHeight 直接算元素
          几何（见 applyFitGeometry），渲染层必须照做，没有第二条样式可以顶掉它。 */
-      '#player video[data-ios-fit-box]{position:absolute!important;left:50%!important;top:50%!important;transform:translate(-50%,-50%)!important;max-width:none!important;max-height:none!important;object-fit:fill!important;background:#000}',
+      '#player video[data-ios-fit-box]{position:absolute!important;left:50%!important;top:50%!important;inset:auto!important;transform:translate(-50%,-50%)!important;max-width:none!important;max-height:none!important;object-fit:fill!important;background:#000}',
       'html[data-ios-immersive],html[data-ios-immersive] body{overflow:hidden!important}',
       /* 全屏：上方那一排「显示设置 / 线路 / 弹幕 / 画中画 / 下一集」整条收起。
          它原本被固定到右上角，正好压在画面上，是真机上最挡视线的一排；
@@ -313,7 +313,8 @@
          不管 fixed 以视口还是以它为参照，#player 都正好盖住整块屏幕。 */
       'html[data-ios-immersive] body{position:fixed!important;inset:0!important;width:100%!important;height:100%!important;margin:0!important;padding:0!important;overflow:hidden!important}',
       'html[data-ios-immersive] .main{position:fixed!important;inset:0!important;width:100vw!important;height:100vh!important;height:100dvh!important;min-height:100vh!important;margin:0!important;padding:0!important;overflow:hidden!important;-webkit-overflow-scrolling:auto!important;transform:none!important;z-index:9998!important}',
-      'html[data-ios-immersive] #iosTopBar,html[data-ios-immersive] #iosFsTop,html[data-ios-immersive] #ppCtrl,html[data-ios-immersive] #iosFsMenu{position:fixed!important;z-index:10006!important}',
+      'html[data-ios-immersive] #iosTopBar{display:none!important}',
+      'html[data-ios-immersive] #iosFsTop,html[data-ios-immersive] #ppCtrl,html[data-ios-immersive] #iosFsMenu{position:fixed!important;z-index:10006!important}',
       /* 老播放器的站点控件与新版原生式控制栏重叠；iOS 只显示新版这一套。 */
       '#playTools,.pp-toolbar,.pl-top,.pl-controls,.pl-bottom,.pl-tools,#plControls,#btnWebFull,#btnFull,#btnGear,#btnPip{display:none!important;visibility:hidden!important;pointer-events:none!important}',
       'html[data-ios-immersive] body{margin:0!important;padding:0!important}',
@@ -1021,6 +1022,7 @@
       id: downloadState.id, name: downloadState.name, path: downloadState.path,
       show: downloadState.show || '', ep: downloadState.ep || '',
       busy: !!downloadState.busy, percent: downloadState.percent || 0,
+      total: Number(downloadState.total) || 0, received: Number(downloadState.received) || 0,
       error: downloadState.error || '', state: phase,
       /* 换页/重启后原生才回「完成」时，也要能把这一集归到正确的剧名下 */
       meta: pendingMeta || null,
@@ -1042,6 +1044,7 @@
       path: saved.path || '',
       busy: !!saved.busy && !saved.path,
       percent: Number(saved.percent) || 0,
+      total: Number(saved.total) || 0, received: Number(saved.received) || 0,
       error: saved.state === 'failed' ? (saved.error || '下载中断') : '',
     };
     if (saved.meta && typeof saved.meta === 'object' && saved.meta.title) pendingMeta = saved.meta;
@@ -1595,11 +1598,9 @@
     var wanted = Number(value);
     if (speeds.indexOf(wanted) < 0) return savedSpeed();
     if (video) {
-      var currentTime = Number(video.currentTime) || 0;
       try {
         video.defaultPlaybackRate = wanted;
         video.playbackRate = wanted;
-        if (video.paused === false && Math.abs((Number(video.currentTime) || 0) - currentTime) > 0.35) video.currentTime = currentTime;
       } catch (error) { /* 这条线路不可调速 */ }
     }
     /* 系统可能把倍速夹回去（比如只允许到 2×）：读回真实值再显示，不许谎报 */
@@ -1797,7 +1798,7 @@
   function syncDownloadRow() {
     renderDownloadLibrary();
     syncTencentUI();
-    saveDownload();
+    saveDownload(false);
   }
 
   function closeCastMenu() {
@@ -1975,6 +1976,22 @@
       queueTasks[index].received = Number(payload.received) || 0;
       saveQueue();
       return;
+    }
+  }
+
+  function updateMineProgress(total, received) {
+    var page = document.getElementById('iosMinePage');
+    if (!page || page.hidden) return;
+    var meta = document.getElementById('iosMineRunningMeta');
+    if (meta) {
+      var percent = total > 0 ? Math.min(100, Math.round(received / total * 100)) : 0;
+      meta.textContent = '接收中 · ' + (total > 0 ? percent + '% · ' : '') + megabyte(received);
+    }
+    var progress = document.getElementById('iosMineRunningProgress');
+    if (progress) {
+      progress.max = total || 1;
+      progress.value = total > 0 ? Math.min(received, total) : 0;
+      progress.hidden = total <= 0;
     }
   }
 
@@ -2167,7 +2184,12 @@
         saveDownload(true);
         return;
       }
-      if (event === 'progress') updateQueueProgress(payload);
+      if (event === 'progress') {
+        updateQueueProgress(payload);
+        updateMineProgress(Number(payload.total) || 0, Number(payload.received) || 0);
+        var downloadPage = document.getElementById('iosDlPage');
+        if (downloadPage && !downloadPage.hidden) syncDownloadPage();
+      }
       if (event === 'done' || event === 'failed' || event === 'cancelled') removeQueueTask(payload.id);
       if (event === 'done') { syncDownloadRow(); renderMinePageIfOpen(); }
       return;
@@ -2181,8 +2203,10 @@
       downloadState.total = total;
       downloadState.received = received;
       downloadState.path = payload.path || downloadState.path || '';
-      syncDownloadRow();
-      renderMinePageIfOpen();
+      saveDownload(false);
+      updateMineProgress(total, received);
+      var downloadPage = document.getElementById('iosDlPage');
+      if (downloadPage && !downloadPage.hidden) syncDownloadPage();
       return;
     }
     if (event === 'done') {
@@ -2222,6 +2246,7 @@
     renderDownloadLibrary();
     syncDownloadPage();
     syncTencentUI();
+    renderMinePageIfOpen();
   };
 
   /// 这一集在共享队列里的状态（同一集可能有多条历史记录，取最「活跃」的一条）。
@@ -2546,7 +2571,7 @@
     page.hidden = true;
     page.innerHTML = ''
       + '<div class="ip-head">'
-      + '  <button type="button" data-ios-act="mine-back" aria-label="返回">‹</button>'
+      + '  <button type="button" data-ios-act="mine-back" aria-label="返回下载页">‹</button>'
       + '  <span class="ip-title">我的下载</span>'
       + '  <button type="button" data-ios-act="mine-edit" aria-label="编辑">编辑</button>'
       + '</div>'
@@ -2559,6 +2584,8 @@
   function openMinePage() {
     var page = ensureMinePage();
     if (!page) return false;
+    var downloadPage = document.getElementById('iosDlPage');
+    page.__iosReturnToDownloads = !!(downloadPage && !downloadPage.hidden);
     page.hidden = false;
     if (typeof page.removeAttribute === 'function') page.removeAttribute('hidden');
     renderMinePage();
@@ -2593,7 +2620,10 @@
       var row = document.createElement('div');
       row.id = 'iosMineRunning';
       var currentTask = running.length ? running[0] : downloadState;
-      var activeDownload = currentTask === downloadState ? downloadState : currentTask;
+      var activeDownload = running.length ? currentTask : {
+        total: downloadState.total,
+        received: downloadState.received
+      };
       var total = Number(activeDownload.total) || 0;
       var received = Number(activeDownload.received) || 0;
       var percent = total > 0 ? Math.min(100, Math.round(received / total * 100)) : 0;
@@ -2601,7 +2631,7 @@
         + '<div class="imr-main">'
         + '  <div class="imr-title" id="iosMineRunningTitle"></div>'
         + '  <div class="imr-meta" id="iosMineRunningMeta"></div>'
-        + '  <progress class="imr-progress" id="iosMineRunningProgress" max="100"></progress>'
+        + '  <progress class="imr-progress" id="iosMineRunningProgress" max="1"></progress>'
         + '  <code class="imr-path" id="iosMineRunningPath"></code>'
         + '</div>';
       var badge = document.createElement('span');
@@ -2612,12 +2642,13 @@
       if (t) t.textContent = (currentTask.title || currentTask.show || showMeta().title || '') + ' ' + (currentTask.epLabel || currentTask.ep || '');
       var m = document.getElementById('iosMineRunningMeta');
       if (m) {
-        m.textContent = (total > 0 ? percent + '% · ' : '接收中 · ')
+        m.textContent = '接收中 · ' + (total > 0 && received > 0 ? percent + '% · ' : '')
           + megabyte(received) + (running.length > 1 ? ' · 其余 ' + (running.length - 1) + ' 集排队' : '');
       }
       var progress = document.getElementById('iosMineRunningProgress');
       if (progress) {
-        progress.value = percent;
+        progress.max = total || 1;
+        progress.value = total > 0 ? Math.min(received, total) : 0;
         progress.hidden = total <= 0;
       }
       var path = document.getElementById('iosMineRunningPath');
@@ -2821,8 +2852,13 @@
     if (act === 'open-download') { closeMinePage(); openDownloadPage(); return true; }
     if (act === 'back' || act === 'dl-back' || act === 'mine-back') {
       if (document.getElementById('iosMinePage') && !document.getElementById('iosMinePage').hidden) {
+        var minePage = document.getElementById('iosMinePage');
+        var returnToDownloads = minePage.__iosReturnToDownloads;
         closeMinePage();
-      } else if (document.getElementById('iosDlPage') && !document.getElementById('iosDlPage').hidden) closeDownloadPage();
+        if (returnToDownloads) openDownloadPage();
+      } else if (document.getElementById('iosDlPage') && !document.getElementById('iosDlPage').hidden) {
+        closeDownloadPage();
+      }
       else if (immersiveNow()) toggleFullscreen();
       else if (window.history && window.history.length > 1) window.history.back();
       return true;
