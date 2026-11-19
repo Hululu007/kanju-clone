@@ -119,6 +119,7 @@ const body = `<section class="page-body"><div class="wrap page pw" style="--h:${
         <button class="pl-bigplay" id="bigPlay" type="button" aria-label="播放">${icon('play', 30)}</button>
 
         <button class="pl-epov" id="epOverlay" type="button">≡▷ <span id="playerLabel">${epLabel(startIdx)}</span> ›</button>
+        <p class="pl-status" id="playStatus" role="status" aria-live="polite" hidden></p>
 
         <div class="pl-ctrl" id="plCtrl">
           <div class="pl-seek" id="plSeek" role="slider" tabindex="0" aria-label="播放进度" aria-valuemin="0" aria-valuemax="0" aria-valuenow="0">
@@ -289,6 +290,7 @@ const $ = (sel) => document.querySelector(sel)
 const player = document.getElementById('player')
 const video = document.getElementById('video')
 const label = document.getElementById('playerLabel')
+const playStatus = document.getElementById('playStatus')
 const dmLayer = document.getElementById('dmLayer')
 const ppCtrl = document.getElementById('plCtrl')
 const seekBar = document.getElementById('plSeek')
@@ -321,6 +323,20 @@ const epList = document.getElementById('pwEpList')
 const epGrid = document.getElementById('pwEpGrid')
 const epCount = document.getElementById('pwEpCount')
 const dmText = document.getElementById('dmText')
+
+function sayPlayStatus(message) {
+  if (playStatus) {
+    playStatus.textContent = message
+    playStatus.hidden = false
+  }
+  showToast(message)
+}
+
+function clearPlayStatus() {
+  if (!playStatus) return
+  playStatus.hidden = true
+  playStatus.textContent = ''
+}
 const dmSend = document.getElementById('dmSend')
 
 /* ---------------- 控制栏显隐（3 秒无操作隐藏） ---------------- */
@@ -1029,11 +1045,13 @@ function attach(url) {
         hls = new Hls({ maxBufferLength: 30 })
         hls.on(Hls.Events.ERROR, (_e, data) => {
           if (!data?.fatal) return
+          sayPlayStatus('这条 HLS 线路播不动，换一集或稍后再试。')
         })
         hls.loadSource(url)
         hls.attachMedia(video)
       })
       .catch(() => {
+        sayPlayStatus('HLS 线路加载失败，请换一集或稍后重试。')
       })
     return
   }
@@ -1082,21 +1100,26 @@ async function play(idx, autoplay = true, preferred = '') {
   if (!ep) return
   playRetried = false
   skipDone = { intro: false, outro: false }
+  clearPlayStatus()
   paintEpSelection(ep.idx)
   await ensureLines(ep.idx)
   if (!preferred) preferred = currentProvider
   const fresh = await resolvePlay(show.id, ep.idx, preferred).catch(() => null)
   if (!fresh) {
+    sayPlayStatus('片源服务响应超时或未连接，请稍后重试本集。')
     return
   }
   if (fresh?.error === 'login_required') {
+    sayPlayStatus('这一集在原站是会员片源，匿名拿不到地址。换一部标着「可播放」的片子就能直接看。')
     return
   }
   const url = fresh?.url || ep.url
   if (fresh?.error) {
+    sayPlayStatus('这一集的片源暂时取不到（线路维护或需要会员），换一集或换一部试试。')
     return
   }
   if (!url) {
+    sayPlayStatus('这一集暂时取不到片源（可能是会员片源或线路维护），换一集或换一部试试。')
     return
   }
   if (fresh?.provider) currentProvider = fresh.provider
@@ -1104,6 +1127,7 @@ async function play(idx, autoplay = true, preferred = '') {
   updateQuality()
   renderLineList()
   attach(url)
+  clearPlayStatus()
   skipInfo = fresh?.skip || null
   loadDm(ep.idx)
   if (resumeTime > 0 && Number(ep.idx) === Number(resumeIdx)) {
@@ -1129,19 +1153,25 @@ function startPlayback() {
     const name = (error && error.name) || 'Error'
     if (!playRetried) {
       playRetried = true
+      sayPlayStatus('播放器还没开始播放（' + name + '），点一下画面重试。')
       const retry = () => {
         document.removeEventListener('pointerup', retry, true)
         document.removeEventListener('touchend', retry, true)
         const again = video.play()
+        if (again && again.catch) {
+          again.catch(() => sayPlayStatus('播放器没有开始播放（' + name + '），请再点一次本集或换一条线路。'))
+        }
       }
       document.addEventListener('pointerup', retry, true)
       document.addEventListener('touchend', retry, true)
       return
     }
+    sayPlayStatus('播放器没有开始播放（' + name + '），请再点一次本集或换一条线路。')
   })
 }
 
 video.addEventListener('error', () => {
+  sayPlayStatus('这条线路在浏览器里播不动。请再点一次本集（会自动换线），或换一条线路。')
 })
 video.addEventListener('loadedmetadata', () => {
   applyRate()
