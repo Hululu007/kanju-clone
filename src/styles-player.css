@@ -72,11 +72,13 @@
 /* 底栏右侧：清晰度文字 + 四个功能键 */
 .pl-quality { min-width: 0; padding: 0 4px; border: 0; background: transparent; color: rgba(255,255,255,.9); font-size: 14px; white-space: nowrap; cursor: pointer; }
 .pl-quality [data-quality-text] { display: block; overflow: hidden; text-overflow: ellipsis; }
-.pl-quality-pill { display: flex; align-items: center; gap: 8px; max-width: min(70%, 190px); padding: 6px 12px; border: 1px solid rgba(22,224,157,.55); border-radius: 999px; background: #101418; }
+.pl-quality-pill { display: inline-flex; align-items: center; gap: 8px; max-width: min(70%, 190px); padding: 6px 12px; border: 1px solid rgba(22,224,157,.55); border-radius: 999px; background: #101418; }
 .pl-quality-pill [data-quality-text] { max-width: 110px; }
 .pl-quality-dot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: #ffcc53; }
 .pl-quality-auto { color: #16e09d; font-size: 12px; }
 .pl-quality-inline { display: none; max-width: 180px; }
+.pl:is(.is-webfull, .is-fullscreen) .pl-quality-pill { display: none; }
+.pl:is(.is-webfull, .is-fullscreen) .pl-quality-inline { display: block; }
 .pw-grid.collapsed .pl-quality-pill { max-width: min(70%, 270px); }
 .pw-grid.collapsed .pl-quality-pill [data-quality-text] { max-width: 190px; }
 .pl:not(.is-webfull, .is-fullscreen) .pl-lines { top: 46px; bottom: auto; }
@@ -189,7 +191,6 @@ html.pl-webfull .pl { position: fixed; inset: 0; z-index: 9000; border-radius: 0
 .pl:is(.is-fullscreen, .is-webfull) .pl-btns { justify-content: space-between; }
 .pl:is(.is-fullscreen, .is-webfull) .pl-btns-m { margin-left: 0; min-width: 0; }
 .pl:is(.is-fullscreen, .is-webfull) .dm-input { display: flex; }
-.pl:is(.is-fullscreen, .is-webfull) .pl-quality-inline { display: block; }
 
 @media (max-width: 1099px) {
   .pw-grid { grid-template-columns: minmax(0, 1fr); gap: 12px; }
