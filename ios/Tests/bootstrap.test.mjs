@@ -988,13 +988,12 @@ test('entering fullscreen closes the top toolbar panels', () => {
   assert.equal(state.settingsPanel.hidden, true, '退出全屏不该自己把面板弹回来');
 });
 
-test('cast menu lists share, copy and download, and hides the player row until a file exists', () => {
+test('cast menu lists playback actions without download or local-player entries', () => {
   const state = fixture(); state.ready();
   const menu = state.document.getElementById('ppCastMenu');
   assert.deepEqual(menu.children.map((row) => row.id),
-    ['ppPlayExternal', 'ppShareLink', 'ppCopyLink', 'ppOpenLocal'],
-    '外放菜单只保留播放器、分享和复制入口');
-  assert.equal(state.document.getElementById('ppOpenLocal').hidden, true, '还没下载就没有「用其他播放器打开」');
+    ['ppPlayExternal', 'ppShareLink', 'ppCopyLink'],
+    '下载已迁到独立下载页，外放菜单只保留播放器、分享和复制入口');
   assert.equal(state.document.getElementById('iosDlPage').hidden, true);
 
   state.click(state.document.getElementById('ppCast'));
@@ -1240,12 +1239,11 @@ test('a long press on the cast button still opens the full menu', () => {
 });
 
 test('the cast menu keeps playback actions and excludes downloads', () => {
-    const state = fixture({ signedIn: true, episodes: [0] }); state.ready();
+  const state = fixture({ signedIn: true, episodes: [0] }); state.ready();
   const menu = state.document.getElementById('ppCastMenu');
   assert.deepEqual(menu.children.map((row) => row.id),
-    ['ppPlayExternal', 'ppShareLink', 'ppCopyLink', 'ppOpenLocal'],
-    '下载不再混在外放菜单里');
-  assert.equal(state.document.getElementById('ppOpenLocal').hidden, true);
+    ['ppPlayExternal', 'ppShareLink', 'ppCopyLink'],
+    '外放菜单不包含已迁到独立下载页的入口');
 
   state.click(state.document.getElementById('ppPlayExternal'));
   const message = state.messages.at(-1);

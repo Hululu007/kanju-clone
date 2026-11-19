@@ -684,5 +684,13 @@ testToolbarDownloadButtonReplacesTheDanmakuSlot → missing-button
 
 ## 历史条目
 
+## REG-019 单集下载页与设置账号状态
+
+- **现象**：下载入口曾分散在播放器工具栏、选集内嵌区域与设置下载库，用户无法确认点一次究竟下载什么；设置里的账号入口也没有未开放状态。
+- **复现步骤**：打开播放页，点剧名旁「下载」，点一集并打开「查看下载列表」；另从设置面板检查个人资料与账号安全行。
+- **根因**：旧版同时保留批量下载交互和多处下载入口；新版账号资料接口尚未开放。
+- **对应测试名**：`EpisodeDownloadSheetUITests.testTitleDownloadOpensTheStandaloneEpisodeGrid`、`EpisodeDownloadSheetUITests.testTappingAnEpisodeDownloadsOnlyThatEpisode`、`BatchDownloadSmokeUITests.testTheEpisodePageOffersSingleDownloadAndShowsItsLibraryEntry`、`InjectedUITests.testSettingsSheetShowsTheRunningDownload`。
+- **修复版本**：0.1.18（build 19）；账号两行暂显示「即将上线」。
+
 0.1.1~0.1.9 的问题与修复过程记录在 `IOS_FIXES_0.1.2.md` ~ `IOS_FIXES_0.1.6.md`、`IOS_REVIEW_0.1.1.md`；
 本表从 0.1.10 起作为新增回归的正式清单。

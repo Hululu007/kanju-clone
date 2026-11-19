@@ -445,14 +445,6 @@
       "html[data-theme='light'] #iosDlGrid .ios-dl-cell{background:rgba(15,20,24,.06);color:#141a1e;border-color:rgba(15,20,24,.14)}",
       '#iosDlGrid .ios-dl-cell .ios-dl-cell-name{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}',
       /* 已下载列表：每行左滑露出红色删除（规格 §3），不做批量 */
-      '#iosDlShows .ios-dl-row{position:relative;overflow:hidden;border-radius:10px;margin-top:8px;background:rgba(255,255,255,.05)}',
-      '#iosDlShows .ios-dl-row-body{display:flex;align-items:center;gap:10px;padding:11px 12px;background:inherit;transition:transform .16s ease;will-change:transform;touch-action:pan-y}',
-      '#iosDlShows .ios-dl-row-title{flex:1 1 auto;font-size:13px;font-weight:600;color:#e8f1f5}',
-      '#iosDlShows .ios-dl-row-size{flex:0 0 auto;font-size:11px;color:rgba(232,241,245,.6)}',
-      '#iosDlShows .ios-dl-row-del{position:absolute;right:0;top:0;bottom:0;width:84px;border:0;background:#e5484d;color:#fff;font-size:13px;font-weight:700;border-radius:0 10px 10px 0}',
-      "html[data-theme='light'] #iosDlShows .ios-dl-row{background:rgba(15,20,24,.05)}",
-      "html[data-theme='light'] #iosDlShows .ios-dl-row-title{color:#141a1e}", 
-      '#iosDownloadStatus{margin:12px 0;padding:12px;border:1px solid rgba(255,255,255,.14);border-radius:10px;background:rgba(0,0,0,.12);color:inherit;font-size:13px}',
       /* 首页没有站点面板（只有一句「设置面板即将上线」），注入层自带一个：
          下载进度和播放方式都在里面，任何页面都能打开。 */
       '#iosSettingsSheet{position:fixed;left:0;right:0;top:0;bottom:0;z-index:12000;display:flex;align-items:flex-end;background:rgba(4,8,11,.62)}',
@@ -476,8 +468,6 @@
       '#iosOpenDownloaded{margin-top:10px;padding:8px 12px;border-radius:8px;background:#16e09d;color:#04241a;font-weight:700}',
       '#iosOpenDownloaded[hidden]{display:none!important}',
       /* 设置里的下载：按剧列出封面/片名/下了哪几集，再跟正在下载的进度 */
-      '#iosDownloadLibrary{margin:2px 0 12px}',
-      '#iosDownloadLibrary[hidden]{display:none!important}',
       '.ios-dl-heading{font-size:14px;font-weight:700;margin:0 0 8px}',
       '.ios-dl-running{padding:10px 12px;margin-bottom:8px;border-radius:10px;background:rgba(22,224,157,.14);color:#b8f5dd;font-size:12px;line-height:1.4}',
       '.ios-dl-running[hidden]{display:none!important}',
@@ -489,23 +479,6 @@
       '.ios-dl-count{font-size:12px;color:rgba(244,247,248,.72);margin-top:2px}',
       '.ios-dl-eps{display:flex;flex-wrap:wrap;gap:4px;margin-top:6px}',
       '.ios-dl-ep{font-size:11px;line-height:1;padding:4px 6px;border-radius:5px;background:rgba(255,255,255,.1);color:#e9f2f4}',
-      /* 整部剧的队列进度 + 暂停/继续/取消：按钮在设置面板的下载列表里 */
-      '.ios-dl-queue{margin-top:6px;font-size:12px;color:#b8f5dd;line-height:1.4}',
-      '.ios-dl-actions{display:flex;gap:6px;margin-top:8px;flex-wrap:wrap}',
-      '.ios-dl-actions button{border:0;border-radius:8px;padding:9px 12px;font-size:12px;font-weight:700;background:rgba(255,255,255,.14);color:#f4f7f8;min-height:38px}',
-      '.ios-dl-actions button[data-batch-action="cancel"]{background:rgba(255,86,86,.22);color:#ffd9d9}',
-      /* 选集页的批量下载条：选择 / 一键全集 / 从本集往后 / 下载已选 */
-      '#iosBatchBar{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:8px 0;padding:8px;border-radius:10px;background:rgba(255,255,255,.06)}',
-      '#iosBatchBar button{border:0;border-radius:8px;padding:9px 11px;font-size:12px;font-weight:700;background:rgba(255,255,255,.14);color:#f4f7f8;min-height:38px}',
-      '#iosBatchBar button#iosBatchStart{background:#16e09d;color:#04241a}',
-      '#iosBatchBar span{font-size:12px;color:rgba(244,247,248,.76)}',
-      /* 选集旁的下载入口与它下面就地展开的列表（0.1.15）。
-         列表是普通文档流里的一块，不是浮层：它把下方面板推开，不会盖住画面。 */
-      '#iosDlEntry{display:block;margin:8px 0 0;padding:0 12px}',
-      '#epGrid .ep.ios-pick{outline:2px solid #16e09d!important;outline-offset:-2px}',
-      'html[data-theme=\'light\'] #iosBatchBar{background:rgba(15,20,24,.06)}',
-      'html[data-theme=\'light\'] #iosBatchBar button{background:rgba(15,20,24,.1);color:#141a1e}',
-      'html[data-theme=\'light\'] #iosBatchBar span{color:rgba(15,20,24,.66)}',
       '#ppRateMenu{position:absolute;right:6px;bottom:calc(100% + 6px);display:none;flex-direction:column;gap:2px;padding:6px;border-radius:12px;background:rgba(12,18,22,.97);border:1px solid rgba(255,255,255,.14)}',
       '#ppRateMenu.on{display:flex}',
       '#ppRateMenu .pc-rate-opt{border:0;background:transparent;color:#fff;font-size:13px;line-height:1;padding:9px 18px;border-radius:8px;white-space:nowrap;cursor:pointer}',
@@ -549,8 +522,6 @@
     ].join('\n');
     document.head.appendChild(style);
     mountCtrlBar();
-    mountDownloadPanel();
-    mountDlEntry();
     mountFitBar();
     mountTencentUI();
     applyImmersive();
@@ -1192,49 +1163,11 @@
     return latest;
   }
 
-  function librarySig(shows) {
-    var parts = [downloadState.busy ? 'run' : 'idle', String(downloadState.percent || 0), downloadState.show || '', downloadState.ep || '', downloadState.name || ''];
-    for (var i = 0; i < shows.length; i++) {
-      parts.push(shows[i].id + '|' + shows[i].title + '|' + shows[i].cover + '|' + shows[i].total + '|' + shows[i].eps.length);
-    }
-    /* 队列状态变化也要重渲染：暂停/排队/失败都要马上看到 */
-    for (var q = 0; q < queueTasks.length; q++) {
-      parts.push('q:' + queueTasks[q].id + ':' + queueTasks[q].status + ':' + queueTasks[q].received + ':' + queueTasks[q].total);
-    }
-    return parts.join(';');
-  }
-
   function renderDownloadLibrary() {
     var page = document.getElementById('iosMinePage');
     if (page && !page.hidden) renderMinePage();
     return true;
   }
-  function renderLegacyDownloadLibrary() {
-    return false;
-  }
-  /// 滑动状态：一行一次，只允许同时露出一行
-  var swipeRow = null;
-  var swipeStart = null;
-
-  function setRowOffset(row, dx) {
-    if (!row) return;
-    var body = row.querySelector ? row.querySelector('.ios-dl-row-body') : null;
-    if (!body || !body.style) return;
-    var width = row.getBoundingClientRect ? row.getBoundingClientRect().width : 320;
-    var limit = Math.min(96, Math.max(64, width * 0.28));
-    var offset = Math.max(-limit, Math.min(0, dx));
-    body.style.transform = offset ? 'translateX(' + offset + 'px)' : '';
-    if (offset < 0) row.setAttribute('data-dl-open', '1');
-    else row.removeAttribute('data-dl-open');
-  }
-
-  function closeOtherRows(keep) {
-    var rows = document.querySelectorAll ? document.querySelectorAll('#iosDlShows .ios-dl-row') : [];
-    for (var i = 0; i < rows.length; i++) {
-      if (rows[i] !== keep) setRowOffset(rows[i], 0);
-    }
-  }
-
   /// 真的删除：先把记录从片库里去掉，再让原生删掉那个文件（只删这一行）
   function deleteDownloaded(showId, key) {
     var library = readLibrary();
@@ -1267,59 +1200,11 @@
     var cursor = node;
     while (cursor) {
       if (cursor.getAttribute && cursor.getAttribute('data-dl-key') !== null) {
-        setRowOffset(cursor, 0);
         return deleteDownloaded(String(cursor.getAttribute('data-dl-show') || ''), String(cursor.getAttribute('data-dl-key')));
       }
       cursor = cursor.parentNode;
     }
     return false;
-  }
-
-  /* 左滑手势：touch 事件在 iOS WKWebView 里最可靠（pointer 事件在滚动容器里会被吞） */
-  function bindSwipe(list) {
-    if (!list || list.__iosSwipeBound) return;
-    if (typeof list.addEventListener !== 'function') return;
-    list.__iosSwipeBound = true;
-    function rowOf(node) {
-      var cursor = node;
-      while (cursor) {
-        if (cursor.className && String(cursor.className).split(' ').indexOf('ios-dl-row') >= 0) return cursor;
-        cursor = cursor.parentNode;
-      }
-      return null;
-    }
-    list.addEventListener('touchstart', function (event) {
-      var touch = event.touches && event.touches[0];
-      if (!touch) return;
-      swipeStart = { x: touch.clientX, y: touch.clientY, row: rowOf(event.target) };
-    }, { passive: true });
-    list.addEventListener('touchmove', function (event) {
-      if (!swipeStart || !swipeStart.row) return;
-      var touch = event.touches && event.touches[0];
-      if (!touch) return;
-      var dx = touch.clientX - swipeStart.x;
-      var dy = touch.clientY - swipeStart.y;
-      /* 竖向多于横向就交还给列表滚动，不抢手势 */
-      if (Math.abs(dy) > Math.abs(dx) + 6) { swipeStart = null; return; }
-      if (dx > 0) return;
-      closeOtherRows(swipeStart.row);
-      setRowOffset(swipeStart.row, dx);
-    }, { passive: true });
-    list.addEventListener('touchend', function () {
-      if (!swipeStart || !swipeStart.row) return;
-      var row = swipeStart.row;
-      swipeStart = null;
-      var body = row.querySelector ? row.querySelector('.ios-dl-row-body') : null;
-      var shifted = body && body.style ? /translateX\(/.test(String(body.style.transform)) : false;
-      /* 滑过一半就停在删除按钮上，否则弹回 */
-      if (!shifted) setRowOffset(row, 0);
-      else {
-        var width = row.getBoundingClientRect ? row.getBoundingClientRect().width : 320;
-        var limit = Math.min(96, Math.max(64, width * 0.28));
-        var current = Math.abs(Number(String(body.style.transform).replace(/[^0-9.-]/g, '')) || 0);
-        setRowOffset(row, current > limit / 2 ? -limit : 0);
-      }
-    }, { passive: true });
   }
 
   /* ---------- 设置面板：任何页面都能打开，首页也有 ---------- */
@@ -1504,14 +1389,6 @@
     return true;
   }
 
-  function mountDownloadPanel() {
-    return false;
-  }
-
-  function syncLegacyDownloadStatus() {
-    return false;
-  }
-
   function hit(node, id) {
     var cursor = node;
     while (cursor) {
@@ -1557,8 +1434,6 @@
   }
 
   function mountCtrlBar() {
-    /* 工具条上的「下载」不依赖播放器，先补上再说 */
-    mountToolDownload();
     if (ctrlMounted) return true;
     var player = document.getElementById('player');
     var video = document.getElementById('video');
@@ -1605,7 +1480,7 @@
     /* 画面档位放在全屏左边：全屏仍然是控制栏最右端那一个（真机上习惯的位置）。 */
     barButton('ppFull', '全屏', '全屏播放');
 
-    /* 外放菜单：分享直链 / 复制直链 / 下载（登录后）/ 用其他播放器打开（下载后） */
+    /* 外放菜单：第三方播放器、分享和复制播放地址 */
     var castMenu = document.createElement('div');
     castMenu.id = 'ppCastMenu';
     castMenu.className = 'pc-cast-menu';
@@ -1613,10 +1488,6 @@
     castMenu.appendChild(castRow('ppPlayExternal', '用第三方播放器播放', '当前线路'));
     castMenu.appendChild(castRow('ppShareLink', '分享播放地址', '系统面板'));
     castMenu.appendChild(castRow('ppCopyLink', '复制播放地址', '手动粘贴'));
-    var localRow = castRow('ppOpenLocal', '用其他播放器播放', '已下载');
-    if (typeof localRow.setAttribute === 'function') localRow.setAttribute('hidden', '1');
-    localRow.hidden = true;
-    castMenu.appendChild(localRow);
     bar.appendChild(castMenu);
 
     var menu = document.createElement('div');
@@ -1897,63 +1768,10 @@
     return row;
   }
 
-  function noteOf(id, text) {
-    var row = document.getElementById(id);
-    if (!row) return;
-    var note = row.querySelector ? row.querySelector('.pc-menu-note') : null;
-    if (note) note.textContent = text;
-    else row.textContent = text;
-  }
-
-  function downloadNote() {
-    if (downloadState.busy) return downloadState.percent ? downloadState.percent + '%' : '准备中';
-    if (downloadState.path) return '已下载';
-    if (!signedIn()) return '需登录';
-    var state = mediaState();
-    if (!state.url) return state.reason === 'opaque' ? '线路不可下载' : '还没拿到直链';
-    if (/\.m3u8(?:[?#]|$)/i.test(state.url)) return '分片线路不可下载';
-    return '开始下载';
-  }
-
   function syncDownloadRow() {
-    mountDownloadPanel();
-    syncLegacyDownloadStatus();
     renderDownloadLibrary();
     syncTencentUI();
     saveDownload();
-  }
-
-  /* 播放器下方那排工具里，「弹幕」按钮给换成「下载」：
-     下载入口原来藏在「外放」里（而外放默认又交给了第三方播放器），真机上根本找不到。 */
-  var toolDownloadMounted = false;
-
-  function mountToolDownload() {
-    var oldButton = document.getElementById('ppToolDownload');
-    if (oldButton && oldButton.parentNode) oldButton.parentNode.removeChild(oldButton);
-    toolDownloadMounted = false;
-    return true;
-  }
-
-  function syncToolDownload() {
-    var button = document.getElementById('ppToolDownload');
-    if (!button) return;
-    if (downloadState.busy) {
-      button.textContent = '下载 ' + (downloadState.percent ? downloadState.percent + '%' : '0%');
-      button.className = 'pp-tool on';
-      return;
-    }
-    /* 这一格永远是「下载本集」：已经下过一集也不能变成「用播放器打开」，
-       否则下一集就再也找不到下载入口（0.1.12 的真机回归，REG-008）。
-       「用其他播放器播放」继续留在「外放」菜单和设置面板里。 */
-    button.textContent = '下载本集';
-    button.className = 'pp-tool';
-  }
-
-  function downloadProgressNote() {
-    if (downloadState.busy) return downloadState.percent ? downloadState.percent + '%' : '正在连接';
-    if (downloadState.path) return '已完成 · 点下方选择播放器';
-    if (downloadState.error) return downloadState.error;
-    return '尚未下载';
   }
 
   function closeCastMenu() {
@@ -2069,87 +1887,14 @@
     announce('这台设备没有剪贴板通道，地址：' + url.slice(0, 56));
   }
 
-  /* 下载：登录门控 + 一次只下一个；真正的传输在原生层做，避免 Blob 把内存拖爆 */
-  function startDownload() {
-    if (!signedIn()) {
-      closeCastMenu();
-      askLogin();
-      return;
-    }
-    if (downloadState.busy) {
-      cancelDownload();
-      return;
-    }
-    var url = mediaUrl();
-    if (!url) {
-      closeCastMenu();
-      var state = mediaState();
-      announce(state.reason === 'opaque' ? LINK_UNSUPPORTED
-        : '还没拿到直链：先点播放让这一集解析出地址，再回来下载。');
-      return;
-    }
-    if (/\.m3u8(?:[?#]|$)/i.test(url)) {
-      closeCastMenu();
-      announce('HLS 分片线路没法整集下载；换一条 MP4 线路再试。');
-      return;
-    }
-    var bridge = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.iosPlayer;
-    closeCastMenu();
-    if (!bridge) {
-      announce('当前环境没有下载通道');
-      return;
-    }
-    var name = downloadName();
-    var meta = showMeta();
-    meta.epKey = episodeKey();
-    meta.epLabel = episodeLabel() || (meta.total === 1 ? '正片' : '');
-    pendingMeta = meta;
-    syncNowPlaying();
-    downloadState = { id: 'dl' + Date.now(), name: name, show: meta.title, ep: meta.epLabel, path: '', busy: true, percent: 0 };
-    syncDownloadRow();
-    saveDownload(true);
-    postNative({
-      action: 'download', id: downloadState.id, url: url, name: name, signedIn: true,
-      /* 原生层只有拿到这组元数据，才能在 App 被回收后把这一集归到正确的剧名下 */
-      meta: {
-        id: meta.id || '', title: meta.title || '', cover: meta.cover || '',
-        total: meta.total || 0, epKey: meta.epKey === undefined ? '' : String(meta.epKey),
-        epLabel: meta.epLabel || '',
-      },
-    });
-    announce('开始下载 ' + name);
-  }
-
-  function cancelDownload() {
-    if (!downloadState.busy || !downloadState.id) return;
-    postNative({ action: 'cancelDownload', id: downloadState.id });
-    announce('已取消下载');
-  }
-
-  function openLocal() {
-    if (!downloadState.path) {
-      announce('这一集还没下载完');
-      return;
-    }
-    stopInAppPlayback();
-    closeCastMenu();
-    closeSettingsSheet();
-    postNative({ action: 'openLocal', path: downloadState.path, name: downloadState.name });
-    announce('正在打开系统应用列表');
-  }
-
   function megabyte(bytes) {
     var size = Number(bytes) || 0;
     return (size / 1048576).toFixed(1) + ' MB';
   }
 
-  /* ---------- 选集批量下载：多选 / 一键全集 / 从本集往后 ----------
-     单集和批量共用原生那条持久队列（并发 2、按 showId+集号去重）。
-     每一集都从站点接口解析真实媒体地址，绝不把播放页地址当成视频。 */
+  /* ---------- 持久下载队列 ---------- */
   var BATCH_STORE = 'kj-ios-batch';
   var QUEUE_STORE = 'kj-ios-queue';
-  var batchSelecting = false;
-  var batchPicked = [];
   var queueTasks = [];
 
   function readBatchShows() {
@@ -2195,103 +1940,6 @@
     writeStore(QUEUE_STORE, JSON.stringify(queueTasks.slice(0, 300)));
   }
 
-  function queueFor(showIdValue) {
-    var list = [];
-    for (var i = 0; i < queueTasks.length; i++) {
-      if (String(queueTasks[i].showId || '') === String(showIdValue)) list.push(queueTasks[i]);
-    }
-    return list;
-  }
-
-  /* 整部剧的总体进度：总字节未知时不算百分比，只报已经收了多少（不造 100%）。 */
-  function queueSummary(showIdValue) {
-    var tasks = queueFor(showIdValue);
-    var summary = { total: tasks.length, done: 0, failed: 0, cancelled: 0, running: 0, queued: 0, paused: 0, received: 0, bytesTotal: 0, unknown: 0 };
-    for (var i = 0; i < tasks.length; i++) {
-      var task = tasks[i];
-      var status = String(task.status || '');
-      if (summary[status] !== undefined) summary[status] += 1;
-      if (status === 'cancelled') continue;
-      summary.received += Number(task.received) || 0;
-      summary.bytesTotal += Number(task.total) || 0;
-      /* 只要有一条没拿到总长度，整部剧就不能算百分比 */
-      if ((Number(task.total) || 0) <= 0) summary.unknown += 1;
-    }
-    summary.busy = summary.running + summary.queued + summary.paused > 0;
-    summary.finished = !summary.busy && summary.done > 0;
-    summary.allDone = summary.finished && !summary.failed && !summary.cancelled;
-    return summary;
-  }
-
-  function queueText(summary) {
-    if (!summary.total) return '';
-    var parts = ['任务 ' + summary.done + '/' + summary.total + ' 集'];
-    if (summary.running) parts.push('进行中 ' + summary.running);
-    if (summary.queued) parts.push('排队 ' + summary.queued);
-    if (summary.paused) parts.push('已暂停 ' + summary.paused);
-    if (summary.failed) parts.push('失败 ' + summary.failed);
-    if (summary.cancelled) parts.push('已取消 ' + summary.cancelled);
-    if (summary.bytesTotal > 0 && !summary.unknown) {
-      parts.push('总进度 ' + Math.min(100, Math.round(summary.received / summary.bytesTotal * 100)) + '%');
-    } else if (summary.received > 0) {
-      /* 服务器没给总长度：只说实收字节，不编百分比 */
-      parts.push('已收 ' + megabyte(summary.received));
-    }
-    if (summary.allDone) parts.push('全部完成');
-    else if (summary.finished && summary.failed) parts.push('部分失败');
-    return parts.join(' · ');
-  }
-
-  function queueActionButton(showIdValue, action, label) {
-    var button = document.createElement('button');
-    button.type = 'button';
-    button.textContent = label;
-    if (typeof button.setAttribute === 'function') {
-      button.setAttribute('data-batch-action', action);
-      button.setAttribute('data-show-id', String(showIdValue));
-    }
-    if (button.dataset) {
-      button.dataset.batchAction = action;
-      button.dataset.showId = String(showIdValue);
-    }
-    return button;
-  }
-
-  function batchActionOf(node) {
-    var cursor = node;
-    while (cursor) {
-      var action = cursor.dataset && cursor.dataset.batchAction ? cursor.dataset.batchAction : '';
-      if (!action && typeof cursor.getAttribute === 'function') action = cursor.getAttribute('data-batch-action') || '';
-      if (action) {
-        var showIdValue = cursor.dataset && cursor.dataset.showId ? cursor.dataset.showId : '';
-        if (!showIdValue && typeof cursor.getAttribute === 'function') showIdValue = cursor.getAttribute('data-show-id') || '';
-        return { action: String(action), showId: String(showIdValue || '') };
-      }
-      cursor = cursor.parentNode;
-    }
-    return null;
-  }
-
-  function handleBatchAction(info) {
-    if (!info || !info.showId) return false;
-    if (info.action === 'pause') {
-      postNative({ action: 'downloadPause', showId: info.showId });
-      announce('已暂停这部剧的下载');
-      return true;
-    }
-    if (info.action === 'resume') {
-      postNative({ action: 'downloadResume', showId: info.showId });
-      announce('继续下载这部剧');
-      return true;
-    }
-    if (info.action === 'cancel') {
-      postNative({ action: 'downloadCancel', showId: info.showId });
-      announce('已取消这部剧的下载（已下载的文件保留）');
-      return true;
-    }
-    return false;
-  }
-
   function epNodes() {
     return document.querySelectorAll ? document.querySelectorAll('#epGrid .ep') : [];
   }
@@ -2301,26 +1949,17 @@
     return String(node.dataset.ep);
   }
 
+  function currentEpIndex() {
+    var episodes = epNodes();
+    for (var index = 0; index < episodes.length; index++) {
+      if (String(episodes[index].className).split(' ').indexOf('on') >= 0) return index;
+    }
+    return 0;
+  }
+
   function epLabelOf(node) {
     var text = node && node.textContent ? String(node.textContent).trim() : '';
     return text.replace(/\s+/g, '').slice(0, 16);
-  }
-
-  function epNodeOf(node) {
-    var cursor = node;
-    while (cursor) {
-      if (cursor.className && String(cursor.className).split(' ').indexOf('ep') >= 0 && cursor.dataset && cursor.dataset.ep !== undefined) return cursor;
-      cursor = cursor.parentNode;
-    }
-    return null;
-  }
-
-  function currentEpIndex() {
-    var list = epNodes();
-    for (var i = 0; i < list.length; i++) {
-      if (String(list[i].className).split(' ').indexOf('on') >= 0) return i;
-    }
-    return 0;
   }
 
   function currentLine() {
@@ -2362,48 +2001,6 @@
       batchResolving = Math.max(0, batchResolving - 1);
       return { reason: '第' + key + '集解析失败' };
     });
-  }
-
-  function syncPickClass(node, on) {
-    var parts = String(node.className || '').split(' ').filter(function (part) { return part && part !== 'ios-pick'; });
-    if (on) parts.push('ios-pick');
-    node.className = parts.join(' ');
-  }
-
-  function togglePick(node) {
-    var key = epKeyOf(node);
-    if (!key) return;
-    var at = batchPicked.indexOf(key);
-    if (at >= 0) batchPicked.splice(at, 1);
-    else batchPicked.push(key);
-    syncPickClass(node, at < 0);
-    syncBatchBar();
-  }
-
-  function batchBarNote() {
-    if (!batchSelecting) return '选择后可批量下载（单集下载仍在工具条上）';
-    return batchPicked.length ? '已选 ' + batchPicked.length + ' 集' : '点选集卡片选中要下载的集';
-  }
-
-  function syncBatchBar() {
-    var bar = document.getElementById('iosBatchBar');
-    if (!bar) return;
-    var pick = document.getElementById('iosBatchSelect');
-    if (pick) pick.textContent = batchSelecting ? '完成选择' : '选择';
-    var start = document.getElementById('iosBatchStart');
-    if (start) start.textContent = batchPicked.length ? '下载已选 (' + batchPicked.length + ')' : '下载已选';
-    var note = document.getElementById('iosBatchNote');
-    if (note) note.textContent = batchBarNote();
-    /* 选集旁的下载列表和批量条是同一份选中状态与同一条队列，任何一边变了都要一起刷新 */
-    if (document.getElementById('iosDlPanel')) syncDlSheet();
-  }
-
-  /* 0.1.16 规格 §2：不再有「选择 / 一键全集 / 从本集往后 / 下载已选」这条批量条，
-     下载入口只有选集旁的「下载」按钮 + 它下面那张集数网格（点一格下一集）。 */
-  function mountBatchBar() {
-    var bar = document.getElementById('iosBatchBar');
-    if (bar && bar.parentNode) bar.parentNode.removeChild(bar);
-    return false;
   }
 
   /* 批量入队：先逐集解析真实片源，再把整批交给原生那条队列（并发/去重都在原生层）。 */
@@ -2455,28 +2052,6 @@
         + '；同时最多下 2 集');
       return items.length;
     });
-  }
-
-  function pickedNodes() {
-    var list = [];
-    var nodes = epNodes();
-    for (var i = 0; i < nodes.length; i++) {
-      if (batchPicked.indexOf(epKeyOf(nodes[i])) >= 0) list.push(nodes[i]);
-    }
-    return list;
-  }
-
-  function allEpNodes() {
-    var list = [];
-    var nodes = epNodes();
-    for (var i = 0; i < nodes.length; i++) list.push(nodes[i]);
-    return list;
-  }
-
-  function forwardEpNodes() {
-    var nodes = allEpNodes();
-    var start = currentEpIndex();
-    return nodes.slice(start);
   }
 
   /* 原生 done 事件自带 showId / 集号 / 剧名；旧版事件没有剧名时，
@@ -2584,48 +2159,9 @@
     queueTasks = tasks;
     saveQueue();
     renderDownloadLibrary();
-    syncBatchBar();
-    syncDlSheet();
+    syncDownloadPage();
     syncTencentUI();
   };
-
-
-  /* ---------- 选集旁的下载按钮（0.1.15） ----------
-     站点在选集标题旁边放了一个「投屏」入口；App 里没有对应的能力，点了只会弹出一个
-     不属于这里的菜单。这里让它让位：隐藏站点节点（不删除，退出后原样可用），
-     就在同一个位置换成一个「下载」按钮。点它**不跳页、不弹层**，只在按钮下面就地
-     展开可下载的集数列表：总集数、每集状态（已下载 / 下载中 N% / 排队 / 已暂停 /
-     失败 / 未下载）、单选 / 多选 / 全选，选完交给 0.1.14 那条共享下载队列
-     （并发上限、去重、暂停取消全部沿用原生层，网页侧不另起一套）。 */
-  var dlSheetOpen = false;
-
-  /// 站点那个投屏入口：按文字/无障碍名/类名认，跳过自己的控制栏（那里也有「投屏」字样）。
-  /// 自己的节点：控制栏、外放菜单、批量条、这个下载入口本身。
-  function ownNode(node) {
-    var cursor = node;
-    while (cursor) {
-      var id = String(cursor.id || '');
-      if (id === 'ppCtrl' || id === 'ppCastMenu' || id === 'iosBatchBar' || id === 'iosDlEntry') return true;
-      cursor = cursor.parentNode;
-    }
-    return false;
-  }
-
-  function castEntryNode() {
-    var all = document.querySelectorAll ? document.querySelectorAll('button,a,[role="button"]') : [];
-    for (var i = 0; i < all.length; i++) {
-      var node = all[i];
-      if (!node) continue;
-      if (ownNode(node)) continue;
-      var text = String(node.textContent || '').replace(/\s+/g, '');
-      var aria = node.getAttribute ? String(node.getAttribute('aria-label') || '') : '';
-      var marks = String(node.id || '') + ' ' + String(node.className || '');
-      if (text === '投屏' || text === '投影' || /投屏|投影/.test(aria) || /(^|\s|-)(cast|dlna|airplay|tvcast)(\s|-|$)/i.test(marks)) {
-        if (node.parentNode) return node;
-      }
-    }
-    return null;
-  }
 
   /// 这一集在共享队列里的状态（同一集可能有多条历史记录，取最「活跃」的一条）。
   function dlTaskState(showId, key) {
@@ -2681,82 +2217,6 @@
     return String(meta.id || meta.title || '');
   }
 
-  function syncDlEntry() {
-    var button = document.getElementById('iosDlButton');
-    if (!button) return;
-    var total = epNodes().length || Number(showMeta().total) || 0;
-    button.textContent = dlSheetOpen ? '收起可下载集数' : '下载';
-    if (typeof button.setAttribute === 'function') {
-      button.setAttribute('aria-label', dlSheetOpen ? '收起可下载集数' : '下载：展开可下载的集数');
-    }
-    button.setAttribute('data-total', String(total));
-  }
-
-  /// 就地展开的集数网格：点一格 = 立刻把这一集加进共享下载队列（规格 §2）。
-  /// 没有全选、没有「一键全集」、没有「下载已选」二次确认。
-  function syncDlPanel() {
-    var panel = document.getElementById('iosDlPanel');
-    if (!panel) return;
-    var showId = dlShowId();
-    var nodes = epNodes();
-    panel.hidden = !dlSheetOpen;
-    if (!nodes.length) {
-      panel.innerHTML = '';
-      return;
-    }
-    var head = document.getElementById('iosDlHead');
-    if (!head) {
-      panel.innerHTML = '';
-      head = document.createElement('div');
-      head.className = 'ios-dl-head';
-      head.id = 'iosDlHead';
-      var title = document.createElement('span');
-      title.id = 'iosDlTitle';
-      head.appendChild(title);
-      panel.appendChild(head);
-    }
-    var titleNode = document.getElementById('iosDlTitle');
-    if (titleNode) titleNode.textContent = '选集下载 · 共 ' + nodes.length + ' 集（点一集即开始下载）';
-    var grid = document.getElementById('iosDlGrid');
-    if (!grid) {
-      grid = document.createElement('div');
-      grid.id = 'iosDlGrid';
-      panel.appendChild(grid);
-    }
-    for (var i = 0; i < nodes.length; i++) {
-      var node = nodes[i];
-      var key = epKeyOf(node);
-      var label = epLabelOf(node) || ('第' + key + '集');
-      var state = dlStateText(showId, key);
-      var cell = document.getElementById('iosDlCell' + key);
-      if (!cell) {
-        cell = document.createElement('button');
-        cell.type = 'button';
-        cell.id = 'iosDlCell' + key;
-        cell.className = 'ios-dl-cell';
-        cell.setAttribute('data-dl-ep', key);
-        var nameNode = document.createElement('span');
-        nameNode.className = 'ios-dl-cell-name';
-        cell.appendChild(nameNode);
-        var stateNode = document.createElement('span');
-        stateNode.className = 'ios-dl-cell-state';
-        cell.appendChild(stateNode);
-        /* 直接握在元素上：不依赖 querySelector（老内核和测试夹具里它不一定支持类选择器） */
-        cell.__iosName = nameNode;
-        cell.__iosState = stateNode;
-        grid.appendChild(cell);
-      }
-      var shortLabel = /^第\d+集$/.test(label) ? label.replace('集', '') : label;
-      if (cell.__iosName) cell.__iosName.textContent = shortLabel;
-      if (cell.__iosState) cell.__iosState.textContent = state;
-      cell.className = 'ios-dl-cell'
-        + (state === '已下载' ? ' done' : '')
-        + (state.indexOf('下载中') === 0 || state === '排队中' ? ' busy' : '');
-      /* 无障碍名把集号和状态一起报出来：读屏与自动化都读得到 */
-      cell.setAttribute('aria-label', label + ' ' + state);
-    }
-  }
-
   /// 点一格：立刻入队（单集），格子马上变「下载中」并给一句轻提示。
   function startEpisodeDownload(key) {
     var nodes = epNodes();
@@ -2767,27 +2227,6 @@
       return true;
     }
     return false;
-  }
-
-  function syncDlSheet() {
-    syncDlEntry();
-    syncDlPanel();
-  }
-
-  /// 把「下载」按钮挂到投屏入口原来的位置；找不到投屏入口就退回选集区上方。
-  function mountDlEntry() {
-    var tool = document.getElementById('ppToolDownload');
-    if (tool && tool.parentNode) tool.parentNode.removeChild(tool);
-    var legacy = document.getElementById('iosDlEntry');
-    if (legacy && legacy.parentNode) legacy.parentNode.removeChild(legacy);
-    return true;
-  }
-
-  function toggleDlSheet() {
-    dlSheetOpen = !dlSheetOpen;
-    syncDlSheet();
-    /* 不弹 toast：它会盖在刚展开的列表上，点选和截图都受干扰 */
-    return dlSheetOpen;
   }
 
   function dlRowKeyOf(node) {
@@ -2802,23 +2241,6 @@
     }
     return '';
   }
-
-  /// 列表里点一行 = 选中/取消这一集，和选集网格上的选中状态是同一份。
-  function toggleDlRow(node) {
-    var key = dlRowKeyOf(node);
-    if (!key) return false;
-    var at = batchPicked.indexOf(key);
-    if (at >= 0) batchPicked.splice(at, 1);
-    else batchPicked.push(key);
-    var nodes = epNodes();
-    for (var i = 0; i < nodes.length; i++) {
-      if (epKeyOf(nodes[i]) === key) syncPickClass(nodes[i], at < 0);
-    }
-    syncBatchBar();
-    syncDlSheet();
-    return true;
-  }
-
 
   /* ==================== 0.1.17 五屏 UI（ios/UX_SPEC.md） ====================
      只借布局与交互，图标全用文字/自绘；没有会员、广告、弹幕、二创、VIP 角标。
@@ -3435,15 +2857,6 @@
     if (!target) return false;
     if (handleTencentUI(target, event)) return true;
     /* 选集页「选择」模式：点选集卡片是选中/取消，不再跳集 */
-    if (batchSelecting) {
-      var epNode = epNodeOf(target);
-      if (epNode) {
-        event.preventDefault();
-        event.stopImmediatePropagation();
-        togglePick(epNode);
-        return true;
-      }
-    }
     if (hit(target, 'iosTitleDownload')) {
       event.preventDefault();
       event.stopImmediatePropagation();
@@ -3486,8 +2899,6 @@
       playExternal();
       return true;
     }
-    var batchAction = batchActionOf(target);
-    if (batchAction && handleBatchAction(batchAction)) return true;
     if (hit(target, 'ppPlay')) {
       event.preventDefault();
       event.stopImmediatePropagation();
@@ -3513,13 +2924,6 @@
         modeNode = modeNode.parentNode;
       }
     }
-    var batchAction = batchActionOf(target);
-    if (batchAction) {
-      event.preventDefault();
-      event.stopImmediatePropagation();
-      handleBatchAction(batchAction);
-      return true;
-    }
     if (hit(target, 'ppCast')) {
       event.preventDefault();
       event.stopImmediatePropagation();
@@ -3544,12 +2948,6 @@
       event.preventDefault();
       event.stopImmediatePropagation();
       copyLink();
-      return true;
-    }
-    if (hit(target, 'ppOpenLocal')) {
-      event.preventDefault();
-      event.stopImmediatePropagation();
-      openLocal();
       return true;
     }
     if (hit(target, 'ppRate')) {
@@ -3852,14 +3250,9 @@
     }, true);
   });
 
-  /* 下载状态先恢复：换页/重启后原生下载还在跑，进度条要接着显示 */
+  /* 恢复旧版单集回调元数据，避免迟到的原生完成事件丢失剧名和集号。 */
   restoreDownload();
   restoreQueue();
-  if (downloadState.id || downloadState.busy || downloadState.path) {
-    ensureSettingsSheet();
-    mountDownloadPanel();
-    syncDownloadRow();
-  }
   /* 问一次原生：后台下载可能在我们不知情时跑完了 */
   setTimeout(function () { postNative({ action: 'downloadSync' }); }, 800);
 
@@ -3870,14 +3263,11 @@
   }
   /* 站点是 SPA：换集或重渲染可能整块换掉 #player，几次补挂 */
   [0, 400, 1200, 2600].forEach(function (delay) {
-    setTimeout(function () { mountCtrlBar(); mountToolDownload(); mountDlEntry(); mountFitBar(); mountTencentUI(); }, delay);
+    setTimeout(function () { mountCtrlBar(); mountFitBar(); mountTencentUI(); }, delay);
   });
   /* 首页/播放页的站点渲染是异步的：面板和状态晚一步再补一次 */
   [0, 600, 1600].forEach(function (delay) {
     setTimeout(function () {
-      mountDownloadPanel();
-      mountToolDownload();
-      mountDlEntry();
       mountFitBar();
       mountTencentUI();
       syncExtToggle();
