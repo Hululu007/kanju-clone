@@ -1,8 +1,8 @@
 
-# 追剧AI iOS build24 下载修复（审核后返工稿）
+# 追剧AI iOS build24 下载修复（已出包，待真机）
 
 分支：`fix/ios-0.1.19-build24-downloads`
-提交：`21f88224d3e6cc5f31857b712d1bc185b57d3784`（分支 `fix/ios-0.1.19-build24-downloads`，未合 main、未出包）
+提交：代码修复 `21f8822`（审核通过），打包提交 `01014b5`（main）
 
 这份只说 build24 的下载修复。全屏和首页齿轮保持 build23 原样，本轮没碰。
 
@@ -53,5 +53,24 @@
 - B 全屏：本轮未改，build23 代码保持；真机未测。
 - C 首页无齿轮 / 仅网站播放器：本轮未改，本地相关回归通过；真机未测。
 - D 账号组与已删入口：本轮未改，本地相关回归通过。
+
+## 出包记录（build24，只打包不跑云端测试）
+
+- 打包提交（工作流实际 checkout SHA）：`01014b52580f57a589f2770ab6b2fe08a2841f61`
+- 工作流：`.github/workflows/ios-ipa-only.yml`（packaging-only），run id `44695952484`，结论 success
+- 产物（仓库工作流内名）：`ZhuijuAI-0.1.19-build24-unsigned.ipa`
+- 桌面副本：`C:\Users\kenzh\Desktop\ZhuijuAI-0.1.18-build24-unsigned.ipa`（按 Ken 指定文件名）
+- 包内版本：`CFBundleShortVersionString=0.1.19`、`CFBundleVersion=24`、`CFBundleIdentifier=org.dpdns.zhuiju.ios`、`MinimumOSVersion=15.0`
+- 大小：4,424,784 字节；zip 完整性 testzip=ok（12 项）
+- SHA256（源产物与桌面副本复算一致）：`33362f2be56bf4306fc9b41d33e684df461ce74d6b133066abd504550091be34`
+- 审核：21f8822 通过（复核 d2e22ae）；本地 Node 89/89 通过；日志见 `C:\Users\kenzh\AppData\Local\Temp\build24-logs\review-fix.log` 与 `ipa-verify-44695952484.log`
+- 推 main 触发的旧测试工作流（Build unsigned iOS IPA，run 44695872098）已按规则先后发起 cancel / force-cancel，未修改或禁用任何 workflow。
+
+## 出包前清单 A-D（源码证据，真机未测）
+
+- A 下载：本轮唯一改动面（MediaDownloader.swift / WebViewController.swift / AppBootstrap.js 下载段 + 测试 + 版本号）。本地 Node 覆盖：单集点击立刻出现在列表、进度百分比、完成入库、删除后重启/旧快照不复活、已完成行带外部播放入口。真机未测。
+- B 全屏：`git diff c2b688a..01014b5` 没有改全屏相关代码（WKWebView 全屏状态机、方向处理保持 build23 审核通过版本）。真机未测。
+- C 首页无齿轮 / 仅网站播放器：同一 diff 没有改首页顶栏、播放器注入层或原生叠加控件；相关 Node 断言仍全过。真机未测。
+- D 账号组与菜单：同一 diff 没有改账号/设置菜单，也没有加回讨论、反馈、等级、P2P、内容偏好、我的用量、全部下载。真机未测。
 
 **真机待办**：等 build24 桌面包生成、Ken 安装并确认后，才由 Lead 派手机测试；测试前先核对 build 24。当前没有真机证据，不说“修好了”。
