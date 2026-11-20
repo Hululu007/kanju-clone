@@ -398,6 +398,9 @@ final class WebViewController: UIViewController, UIDocumentInteractionController
         if !epKey.isEmpty { meta["epKey"] = epKey }
         if meta["epLabel"] == nil, let label = body["epLabel"] as? String { meta["epLabel"] = label }
         if meta["title"] == nil, let title = (body["show"] as? [String: Any])?["title"] as? String { meta["title"] = title }
+        /* HLS 线路要把「这是清单」和页面来源一起带下去：原生据此走分片下载、并带上正确的 Referer。 */
+        if let kind = body["kind"] as? String, !kind.isEmpty { meta["kind"] = kind }
+        if let referer = body["referer"] as? String, !referer.isEmpty { meta["referer"] = referer }
         downloader.start(
             id: id,
             url: link,
@@ -456,6 +459,8 @@ final class WebViewController: UIViewController, UIDocumentInteractionController
             meta["epKey"] = itemEpKey
             meta["epLabel"] = (item["epLabel"] as? String) ?? ""
             meta["title"] = (item["title"] as? String) ?? meta["title"] ?? ""
+            if let kind = item["kind"] as? String, !kind.isEmpty { meta["kind"] = kind }
+            if let referer = item["referer"] as? String, !referer.isEmpty { meta["referer"] = referer }
             requests.append(MediaDownloader.Request(id: id, url: link, name: name, meta: meta))
         }
         if !requests.isEmpty { downloader.enqueue(requests) }
@@ -533,6 +538,15 @@ final class WebViewController: UIViewController, UIDocumentInteractionController
         controller.modalPresentationStyle = .fullScreen
         let presenter = presentedViewController ?? self
         presenter.present(controller, animated: true) { player.play() }
+        /* TS 分片合成出来的 .ts 文件系统播放器打不开：1.5 秒内没进入播放就收掉播放器，
+           提示改用「用其他播放器打开」，不把用户丢在一个黑屏里。 */
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self, weak controller] in
+            guard let controller = controller, controller.presentingViewController != nil else { return }
+            guard let item = controller.player?.currentItem, item.status == .failed else { return }
+            controller.dismiss(animated: true) {
+                self?.notifyPlayerNotice("这个格式 App 内播不了，请点「用其他播放器打开」")
+            }
+        }
     }
 
     /// 下载器实际落盘的扩展名（MediaDownloader 只接受这五种，别的格式不会被下载成文件）。

@@ -8,6 +8,7 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
     ) -> Bool {
         /* 后台下载会话要在启动时就把 delegate 接上：完成事件可能早于界面 */
         _ = MediaDownloader.shared
+        _ = HLSDownloader.shared
         return true
     }
 
@@ -27,8 +28,12 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
         handleEventsForBackgroundURLSession identifier: String,
         completionHandler: @escaping () -> Void
     ) {
-        guard identifier == MediaDownloader.backgroundIdentifier else {
+        guard identifier == MediaDownloader.backgroundIdentifier || identifier == HLSDownloader.backgroundIdentifier else {
             completionHandler()
+            return
+        }
+        if identifier == HLSDownloader.backgroundIdentifier {
+            HLSDownloader.adoptBackgroundEvents(completion: completionHandler)
             return
         }
         MediaDownloader.shared.handleBackgroundEvents(completion: completionHandler)

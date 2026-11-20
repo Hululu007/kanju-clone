@@ -1,0 +1,735 @@
+import Foundation
+import CommonCrypto
+
+/// HLS 整集下载：主清单 → 媒体清单 → 逐片下载（并发 ≤ 4、每片失败重试 3 次）→ AES-128 解密 → 合成一个文件。
+///
+/// 分工：
+/// - 清单和密钥是小请求，用前台会话取；分片用**单独一条后台会话**下载，
+///   切后台/锁屏时由系统继续传（和整文件下载那条会话分开，互不占位）。
+/// - 解密与合成必须在 App 进程里做：进程被系统挂起时这一步停下来，
+///   回到前台继续；已经下完的分片留在缓存目录里，不会从 0 重来。
+///
+/// 明确不做的：SAMPLE-AES / DRM（解析到这种线路直接如实失败）、
+/// 锁屏期间完成解密合成（系统只允许后台传文件，不允许后台干活）。
+final class HLSDownloader: NSObject {
+    enum Container: String {
+        case mp4
+        case ts
+    }
+
+    /// 清单/密钥请求失败的载体：Result 的 Failure 必须是一个 Error 类型。
+    struct HLSFailure: Error {
+        var reason: String
+    }
+
+    struct Segment: Codable {
+        var url: String
+        var duration: Double
+        var sequence: Int
+        var byteRangeOffset: Int64
+        var byteRangeLength: Int64
+        var keyURI: String
+        var keyIV: String
+        var isInitialization: Bool
+        var done: Bool
+        var bytes: Int64
+        var attempts: Int
+    }
+
+    struct Job: Codable {
+        var id: String
+        var name: String
+        var manifestURL: String
+        var mediaURL: String
+        var referer: String
+        var userAgent: String
+        var container: String
+        var totalDuration: Double
+        var segments: [Segment]
+        var keys: [String: String]
+        /// plan（还没拿到清单）/ segments（正在下分片）/ finalize（正在合成）
+        var phase: String
+        var createdAt: Double
+    }
+
+    static let shared = HLSDownloader()
+
+    /// 分片专用的后台会话标识；App 被重新拉起时系统靠它把回调交回来。
+    static let backgroundIdentifier = "org.dpdns.zhuiju.ios.hls"
+    static let jobsKey = "kj-ios-hls-jobs"
+    static let maxSegmentConcurrency = 4
+    static let maxSegmentRetries = 3
+    static let maxPlaylistDepth = 3
+
+    private static var jobs: [String: Job] = [:]
+    private static var loaded = false
+    private static var sessionStorage: URLSession?
+    private static var foregroundStorage: URLSession?
+    private static var tasks: [Int: URLSessionDownloadTask] = [:]
+    private static var taskKeys: [Int: String] = [:]
+    private static var inFlight: Set<String> = []
+    /// 用户暂停过的任务：重试定时器和 pump 都不能再把分片拉起来。
+    private static var paused: Set<String> = []
+    private static var planning: Set<String> = []
+    private static var finalizing: Set<String> = []
+    private static var backgroundCompletion: (() -> Void)?
+
+    /// 这条线路是不是 HLS：网页给的 kind 优先，其次看扩展名。
+    static func isHLSSource(url: String, kind: String?) -> Bool {
+        if (kind ?? "").trimmingCharacters(in: .whitespaces).lowercased() == "hls" { return true }
+        let path = (URL(string: url)?.path ?? url).lowercased()
+        return path.hasSuffix(".m3u8") || path.hasSuffix(".m3u")
+    }
+
+    // MARK: - 对外
+
+    func start(record: MediaDownloader.Record) {
+        Self.begin(record)
+    }
+
+    static func hasJob(id: String) -> Bool {
+        ensureLoaded()
+        return jobs[id] != nil
+    }
+
+    /// 暂停：停掉正在传的分片，状态和已下好的分片都留着，继续时接着下。
+    static func pause(id: String) {
+        paused.insert(id)
+        cancelTasks(id: id)
+    }
+
+    /// 删除/取消：连缓存里的分片一起清掉。
+    static func discard(id: String) {
+        ensureLoaded()
+        paused.remove(id)
+        cancelTasks(id: id)
+        jobs.removeValue(forKey: id)
+        persist()
+        try? FileManager.default.removeItem(at: segmentDirectory(id: id))
+    }
+
+    /// App 重启后对账：清单还没解析的继续解析，分片没下完的接着下，合成没做完的重新合成。
+    static func resume(id: String) {
+        ensureLoaded()
+        guard let job = jobs[id] else { return }
+        switch job.phase {
+        case "segments":
+            pump(id: id)
+        case "finalize":
+            jobs[id]?.phase = "segments"
+            finalize(id: id)
+        default:
+            plan(id: id)
+        }
+    }
+
+    static func adoptBackgroundEvents(completion: @escaping () -> Void) {
+        ensureLoaded()
+        backgroundCompletion = completion
+        backgroundSession().getAllTasks { systemTasks in
+            for task in systemTasks {
+                guard let key = task.taskDescription, splitKey(key) != nil else { continue }
+                taskKeys[task.taskIdentifier] = key
+                inFlight.insert(key)
+                if let downloadTask = task as? URLSessionDownloadTask {
+                    tasks[task.taskIdentifier] = downloadTask
+                }
+            }
+            var ids: Set<String> = []
+            for key in taskKeys.values {
+                if let split = splitKey(key) { ids.insert(split.id) }
+            }
+            for id in ids where jobs[id]?.phase == "segments" {
+                pump(id: id)
+            }
+            if systemTasks.isEmpty, let pending = backgroundCompletion {
+                backgroundCompletion = nil
+                pending()
+            }
+        }
+    }
+
+    // MARK: - 会话
+
+    private static func backgroundSession() -> URLSession {
+        if let existing = sessionStorage { return existing }
+        let configuration = URLSessionConfiguration.background(withIdentifier: backgroundIdentifier)
+        configuration.isDiscretionary = false
+        configuration.sessionSendsLaunchEvents = true
+        configuration.timeoutIntervalForRequest = 30
+        configuration.timeoutIntervalForResource = 60 * 60
+        configuration.waitsForConnectivity = true
+        let created = URLSession(configuration: configuration, delegate: shared, delegateQueue: OperationQueue.main)
+        sessionStorage = created
+        return created
+    }
+
+    /// 清单/密钥这种小请求：前台会话，回调直接落在主队列，状态机不用加锁。
+    private static func foregroundSession() -> URLSession {
+        if let existing = foregroundStorage { return existing }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 30
+        configuration.timeoutIntervalForResource = 60
+        let created = URLSession(configuration: configuration, delegate: nil, delegateQueue: OperationQueue.main)
+        foregroundStorage = created
+        return created
+    }
+
+    // MARK: - 状态持久化
+
+    private static func ensureLoaded() {
+        if loaded { return }
+        loaded = true
+        guard let data = UserDefaults.standard.data(forKey: jobsKey),
+              let decoded = try? JSONDecoder().decode([String: Job].self, from: data) else { return }
+        jobs = decoded
+    }
+
+    private static func persist() {
+        guard let data = try? JSONEncoder().encode(jobs) else { return }
+        UserDefaults.standard.set(data, forKey: jobsKey)
+    }
+
+    private static func update(_ id: String, _ mutate: (inout Job) -> Void) {
+        ensureLoaded()
+        guard var job = jobs[id] else { return }
+        mutate(&job)
+        jobs[id] = job
+        persist()
+    }
+
+    // MARK: - 开始 / 解析清单
+
+    private static func begin(_ record: MediaDownloader.Record) {
+        ensureLoaded()
+        paused.remove(record.id)
+        let referer = record.meta["referer"] ?? ""
+        let userAgent = record.meta["userAgent"] ?? WebViewController.userAgent
+        if var existing = jobs[record.id], existing.manifestURL == record.url {
+            /* 暂停过或被系统回收过：保留已下好的分片，接着来。 */
+            existing.name = record.name
+            jobs[record.id] = existing
+            persist()
+            resume(id: record.id)
+            return
+        }
+        let job = Job(
+            id: record.id,
+            name: record.name,
+            manifestURL: record.url,
+            mediaURL: "",
+            referer: referer,
+            userAgent: userAgent,
+            container: Container.mp4.rawValue,
+            totalDuration: 0,
+            segments: [],
+            keys: [:],
+            phase: "plan",
+            createdAt: Date().timeIntervalSince1970
+        )
+        jobs[record.id] = job
+        persist()
+        plan(id: record.id)
+    }
+
+    private static func plan(id: String) {
+        ensureLoaded()
+        guard let job = jobs[id], job.phase == "plan" else { return }
+        guard !planning.contains(id) else { return }
+        guard URL(string: job.manifestURL) != nil else {
+            fail(id: id, reason: "这条线路的地址无效")
+            return
+        }
+        planning.insert(id)
+        loadPlaylist(url: job.manifestURL, referer: job.referer, userAgent: job.userAgent, depth: 0) { result in
+            planning.remove(id)
+            switch result {
+            case .failure(let failure):
+                fail(id: id, reason: failure.reason)
+            case .success(let loaded):
+                apply(id: id, playlist: loaded.playlist, mediaURL: loaded.url)
+            }
+        }
+    }
+
+    private static func loadPlaylist(
+        url: String,
+        referer: String,
+        userAgent: String,
+        depth: Int,
+        completion: @escaping (Result<(playlist: HLSPlaylist, url: String), HLSFailure>) -> Void
+    ) {
+        guard let link = URL(string: url) else {
+            completion(.failure(HLSFailure(reason: "清单地址无效")))
+            return
+        }
+        var request = URLRequest(url: link)
+        if !referer.isEmpty { request.setValue(referer, forHTTPHeaderField: "Referer") }
+        request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
+        foregroundSession().dataTask(with: request) { data, response, error in
+            if let error = error {
+                completion(.failure(HLSFailure(reason: "拿不到 HLS 清单：" + error.localizedDescription)))
+                return
+            }
+            if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
+                completion(.failure(HLSFailure(reason: "清单服务器返回 " + String(http.statusCode))))
+                return
+            }
+            guard let data = data, let text = String(data: data, encoding: .utf8) else {
+                completion(.failure(HLSFailure(reason: "清单内容读不出来")))
+                return
+            }
+            let playlist = HLSParser.parse(text, baseURL: link)
+            if playlist.isMaster {
+                guard depth < maxPlaylistDepth else {
+                    completion(.failure(HLSFailure(reason: "HLS 清单层级太深")))
+                    return
+                }
+                guard let variant = HLSParser.bestVariant(playlist.variants) else {
+                    completion(.failure(HLSFailure(reason: "清单里没有可用码率")))
+                    return
+                }
+                loadPlaylist(url: variant.url.absoluteString, referer: referer, userAgent: userAgent, depth: depth + 1, completion: completion)
+                return
+            }
+            guard !playlist.segments.isEmpty else {
+                completion(.failure(HLSFailure(reason: "清单里没有可下载的分片")))
+                return
+            }
+            completion(.success((playlist: playlist, url: link.absoluteString)))
+        }.resume()
+    }
+
+    private static func apply(id: String, playlist: HLSPlaylist, mediaURL: String) {
+        ensureLoaded()
+        guard let job = jobs[id] else { return }
+        var segments: [Segment] = []
+        var pendingKeys: [String] = []
+        for segment in playlist.segments {
+            var keyURI = ""
+            var keyIV = ""
+            if let key = segment.key {
+                guard key.isAES128 else {
+                    fail(id: id, reason: "这条线路用了 " + key.method + " 加密，App 不能整集下载")
+                    return
+                }
+                guard let uri = key.uri else {
+                    fail(id: id, reason: "HLS 密钥地址缺失，没法解密")
+                    return
+                }
+                keyURI = uri.absoluteString
+                let iv = key.iv ?? HLSParser.defaultIV(sequence: segment.sequence)
+                keyIV = iv.base64EncodedString()
+                if job.keys[keyURI] == nil, !pendingKeys.contains(keyURI) {
+                    pendingKeys.append(keyURI)
+                }
+            }
+            segments.append(Segment(
+                url: segment.url.absoluteString,
+                duration: segment.duration,
+                sequence: segment.sequence,
+                byteRangeOffset: segment.byteRange?.offset ?? -1,
+                byteRangeLength: segment.byteRange?.length ?? -1,
+                keyURI: keyURI,
+                keyIV: keyIV,
+                isInitialization: segment.isInitialization,
+                done: false,
+                bytes: 0,
+                attempts: 0
+            ))
+        }
+        let container = playlist.container
+        fetchKeys(pendingKeys, referer: job.referer, userAgent: job.userAgent) { result in
+            switch result {
+            case .failure(let failure):
+                fail(id: id, reason: failure.reason)
+            case .success(let fetched):
+                guard var job = jobs[id] else { return }
+                for (uri, value) in fetched { job.keys[uri] = value }
+                job.segments = segments
+                job.mediaURL = mediaURL
+                job.container = container
+                job.totalDuration = playlist.totalDuration
+                job.name = renamed(job.name, container: container)
+                job.phase = "segments"
+                jobs[id] = job
+                persist()
+                pump(id: id)
+            }
+        }
+    }
+
+    private static func fetchKeys(
+        _ uris: [String],
+        referer: String,
+        userAgent: String,
+        completion: @escaping (Result<[String: String], HLSFailure>) -> Void
+    ) {
+        if uris.isEmpty {
+            completion(.success([:]))
+            return
+        }
+        for uri in uris where URL(string: uri) == nil {
+            completion(.failure(HLSFailure(reason: "HLS 密钥地址无效")))
+            return
+        }
+        var results: [String: String] = [:]
+        var remaining = uris.count
+        var failure: String?
+        for uri in uris {
+            guard let link = URL(string: uri) else { continue }
+            var request = URLRequest(url: link)
+            if !referer.isEmpty { request.setValue(referer, forHTTPHeaderField: "Referer") }
+            request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
+            foregroundSession().dataTask(with: request) { data, response, error in
+                remaining -= 1
+                if let error = error {
+                    if failure == nil { failure = "拿不到 HLS 密钥：" + error.localizedDescription }
+                } else if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
+                    if failure == nil { failure = "密钥服务器返回 " + String(http.statusCode) }
+                } else if let data = data, data.count == 16 {
+                    results[uri] = data.base64EncodedString()
+                } else if failure == nil {
+                    failure = "HLS 密钥长度不对"
+                }
+                guard remaining == 0 else { return }
+                if let failure = failure {
+                    completion(.failure(HLSFailure(reason: failure)))
+                } else {
+                    completion(.success(results))
+                }
+            }.resume()
+        }
+    }
+
+    // MARK: - 分片调度
+
+    private static func pump(id: String) {
+        ensureLoaded()
+        guard let job = jobs[id], job.phase == "segments" else { return }
+        guard !paused.contains(id) else { return }
+        var active = 0
+        for key in taskKeys.values where key.hasPrefix(id + "#") { active += 1 }
+        var slots = maxSegmentConcurrency - active
+        guard slots > 0 else { return }
+        for index in job.segments.indices {
+            if slots <= 0 { break }
+            let key = job.id + "#" + String(index)
+            if job.segments[index].done || inFlight.contains(key) { continue }
+            slots -= 1
+            startSegment(id: id, index: index)
+        }
+    }
+
+    private static func startSegment(id: String, index: Int) {
+        ensureLoaded()
+        guard let job = jobs[id], index < job.segments.count else { return }
+        let segment = job.segments[index]
+        guard let link = URL(string: segment.url) else {
+            retry(id: id, index: index, reason: "分片地址无效")
+            return
+        }
+        var request = URLRequest(url: link)
+        if !job.referer.isEmpty { request.setValue(job.referer, forHTTPHeaderField: "Referer") }
+        request.setValue(job.userAgent, forHTTPHeaderField: "User-Agent")
+        if segment.byteRangeLength > 0, segment.byteRangeOffset >= 0 {
+            let end = segment.byteRangeOffset + segment.byteRangeLength - 1
+            request.setValue("bytes=" + String(segment.byteRangeOffset) + "-" + String(end), forHTTPHeaderField: "Range")
+        }
+        let task = backgroundSession().downloadTask(with: request)
+        let key = id + "#" + String(index)
+        task.taskDescription = key
+        tasks[task.taskIdentifier] = task
+        taskKeys[task.taskIdentifier] = key
+        inFlight.insert(key)
+        update(id) { job in
+            if index < job.segments.count { job.segments[index].attempts += 1 }
+        }
+        task.resume()
+    }
+
+    private static func retry(id: String, index: Int, reason: String) {
+        ensureLoaded()
+        inFlight.remove(id + "#" + String(index))
+        guard let job = jobs[id], index < job.segments.count else { return }
+        let attempts = job.segments[index].attempts
+        guard attempts <= maxSegmentRetries else {
+            fail(id: id, reason: "分片下载失败（" + reason + "），已重试 " + String(maxSegmentRetries) + " 次")
+            return
+        }
+        let key = id + "#" + String(index)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+            ensureLoaded()
+            guard !paused.contains(id) else { return }
+            guard let current = jobs[id], index < current.segments.count, !current.segments[index].done, !inFlight.contains(key) else { return }
+            pump(id: id)
+        }
+    }
+
+    private static func finish(key: String, taskIdentifier: Int, location: URL?, response: URLResponse?, error: Error?) {
+        ensureLoaded()
+        inFlight.remove(key)
+        tasks.removeValue(forKey: taskIdentifier)
+        taskKeys.removeValue(forKey: taskIdentifier)
+        guard let split = splitKey(key) else { return }
+        let id = split.id
+        let index = split.index
+        guard let job = jobs[id], index < job.segments.count else { return }
+        let nsError = error.map { $0 as NSError }
+        if let nsError = nsError, nsError.domain == NSURLErrorDomain, nsError.code == NSURLErrorCancelled {
+            /* 用户暂停/删除/换页：不算分片失败，也不消耗重试次数。 */
+            return
+        }
+        if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
+            retry(id: id, index: index, reason: "分片服务器返回 " + String(http.statusCode))
+            return
+        }
+        if let nsError = nsError {
+            retry(id: id, index: index, reason: nsError.localizedDescription)
+            return
+        }
+        guard let location = location else {
+            retry(id: id, index: index, reason: "分片没有落地")
+            return
+        }
+        let directory = segmentDirectory(id: id)
+        let target = directory.appendingPathComponent("seg-" + String(index) + ".part")
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            if FileManager.default.fileExists(atPath: target.path) {
+                try FileManager.default.removeItem(at: target)
+            }
+            try FileManager.default.moveItem(at: location, to: target)
+        } catch {
+            retry(id: id, index: index, reason: "分片写不进本机：" + error.localizedDescription)
+            return
+        }
+        var size: Int64 = 0
+        if let attributes = try? FileManager.default.attributesOfItem(atPath: target.path),
+           let number = attributes[.size] as? NSNumber {
+            size = number.int64Value
+        }
+        update(id) { job in
+            guard index < job.segments.count else { return }
+            job.segments[index].done = true
+            job.segments[index].bytes = size
+            job.segments[index].attempts = 0
+        }
+        report(id: id)
+        guard let current = jobs[id] else { return }
+        let finished = current.segments.allSatisfy { $0.done }
+        if finished {
+            finalize(id: id)
+        } else {
+            pump(id: id)
+        }
+    }
+
+    /// 进度按「已完成的片」折算成字节上报：百分比就是已完成时长 / 总时长，
+    /// 这样长剧集不会因为一两个大分片提前跳到 100%。
+    private static func report(id: String) {
+        ensureLoaded()
+        guard let job = jobs[id] else { return }
+        var bytes: Int64 = 0
+        var duration = 0.0
+        for segment in job.segments where segment.done {
+            bytes += segment.bytes
+            if !segment.isInitialization { duration += segment.duration }
+        }
+        var total = bytes
+        if duration > 0, job.totalDuration > duration {
+            total = Int64(Double(bytes) * job.totalDuration / duration)
+        }
+        MediaDownloader.hlsProgress(id: id, received: bytes, total: max(total, bytes))
+    }
+
+    // MARK: - 解密 / 合成
+
+    private static func finalize(id: String) {
+        ensureLoaded()
+        guard var job = jobs[id], job.phase == "segments" else { return }
+        guard !finalizing.contains(id) else { return }
+        finalizing.insert(id)
+        job.phase = "finalize"
+        jobs[id] = job
+        persist()
+
+        guard let directory = MediaDownloader.directory() else {
+            finalizing.remove(id)
+            fail(id: id, reason: "找不到本机下载目录")
+            return
+        }
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        } catch {
+            finalizing.remove(id)
+            fail(id: id, reason: "下载目录建不出来：" + error.localizedDescription)
+            return
+        }
+        let target = directory.appendingPathComponent(job.name)
+        if FileManager.default.fileExists(atPath: target.path) {
+            try? FileManager.default.removeItem(at: target)
+        }
+        guard FileManager.default.createFile(atPath: target.path, contents: nil),
+              let handle = FileHandle(forWritingAtPath: target.path) else {
+            finalizing.remove(id)
+            fail(id: id, reason: "这个文件写不进去")
+            return
+        }
+        let directoryOfSegments = segmentDirectory(id: id)
+        for (index, segment) in job.segments.enumerated() {
+            let source = directoryOfSegments.appendingPathComponent("seg-" + String(index) + ".part")
+            do {
+                var data = try Data(contentsOf: source)
+                if !segment.keyURI.isEmpty {
+                    guard let keyText = job.keys[segment.keyURI],
+                          let key = Data(base64Encoded: keyText),
+                          let iv = Data(base64Encoded: segment.keyIV),
+                          let plain = decrypt(data: data, key: key, iv: iv) else {
+                        try? handle.close()
+                        try? FileManager.default.removeItem(at: target)
+                        finalizing.remove(id)
+                        fail(id: id, reason: "分片解密失败（密钥或 IV 不对）")
+                        return
+                    }
+                    data = plain
+                }
+                try handle.write(contentsOf: data)
+            } catch {
+                try? handle.close()
+                try? FileManager.default.removeItem(at: target)
+                finalizing.remove(id)
+                fail(id: id, reason: "合成这一集失败：" + error.localizedDescription)
+                return
+            }
+        }
+        do {
+            try handle.close()
+        } catch {
+            finalizing.remove(id)
+            fail(id: id, reason: "文件收尾失败：" + error.localizedDescription)
+            return
+        }
+        var size: Int64 = 0
+        if let attributes = try? FileManager.default.attributesOfItem(atPath: target.path),
+           let number = attributes[.size] as? NSNumber {
+            size = number.int64Value
+        }
+        try? FileManager.default.removeItem(at: directoryOfSegments)
+        jobs.removeValue(forKey: id)
+        persist()
+        finalizing.remove(id)
+        MediaDownloader.hlsComplete(id: id, path: target.path, size: size, name: job.name)
+    }
+
+    private static func decrypt(data: Data, key: Data, iv: Data) -> Data? {
+        guard key.count == Int(kCCKeySizeAES128), iv.count == Int(kCCBlockSizeAES128) else { return nil }
+        var output = Data(count: data.count + Int(kCCBlockSizeAES128))
+        let capacity = output.count
+        var written = 0
+        let status = output.withUnsafeMutableBytes { (raw: UnsafeMutableRawBufferPointer) -> CCCryptorStatus in
+            data.withUnsafeBytes { (input: UnsafeRawBufferPointer) -> CCCryptorStatus in
+                key.withUnsafeBytes { (keyBytes: UnsafeRawBufferPointer) -> CCCryptorStatus in
+                    iv.withUnsafeBytes { (ivBytes: UnsafeRawBufferPointer) -> CCCryptorStatus in
+                        CCCrypt(
+                            CCOperation(kCCDecrypt),
+                            CCAlgorithm(kCCAlgorithmAES128),
+                            CCOptions(kCCOptionPKCS7Padding),
+                            keyBytes.baseAddress,
+                            key.count,
+                            ivBytes.baseAddress,
+                            input.baseAddress,
+                            data.count,
+                            raw.baseAddress,
+                            capacity,
+                            &written
+                        )
+                    }
+                }
+            }
+        }
+        guard status == kCCSuccess else { return nil }
+        output.count = written
+        return output
+    }
+
+    private static func fail(id: String, reason: String) {
+        ensureLoaded()
+        cancelTasks(id: id)
+        jobs.removeValue(forKey: id)
+        persist()
+        try? FileManager.default.removeItem(at: segmentDirectory(id: id))
+        MediaDownloader.hlsFail(id: id, reason: reason)
+    }
+
+    private static func cancelTasks(id: String) {
+        for (identifier, key) in Array(taskKeys) where key.hasPrefix(id + "#") {
+            tasks[identifier]?.cancel()
+            tasks.removeValue(forKey: identifier)
+            taskKeys.removeValue(forKey: identifier)
+            inFlight.remove(key)
+        }
+    }
+
+    // MARK: - 小工具
+
+    private static func splitKey(_ text: String) -> (id: String, index: Int)? {
+        guard let separator = text.lastIndex(of: "#") else { return nil }
+        let id = String(text[text.startIndex..<separator])
+        let raw = String(text[text.index(after: separator)...])
+        guard !id.isEmpty, let index = Int(raw), index >= 0 else { return nil }
+        return (id, index)
+    }
+
+    private static func renamed(_ raw: String, container: String) -> String {
+        var base = (raw as NSString).deletingPathExtension
+        if base.isEmpty { base = "video" }
+        let suffix = "." + container
+        let allowed = max(1, 120 - suffix.count)
+        return String(base.prefix(allowed)) + suffix
+    }
+
+    private static func segmentDirectory(id: String) -> URL {
+        let base = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
+            ?? URL(fileURLWithPath: NSTemporaryDirectory())
+        var safe = ""
+        for character in id {
+            if character.isLetter || character.isNumber || character == "-" || character == "_" {
+                safe.append(character)
+            } else {
+                safe.append("_")
+            }
+        }
+        return base
+            .appendingPathComponent("hls", isDirectory: true)
+            .appendingPathComponent(String(safe.prefix(80)), isDirectory: true)
+    }
+}
+
+extension HLSDownloader: URLSessionDownloadDelegate {
+    func urlSession(
+        _ session: URLSession,
+        downloadTask: URLSessionDownloadTask,
+        didWriteData bytesWritten: Int64,
+        totalBytesWritten: Int64,
+        totalBytesExpectedToWrite: Int64
+    ) {
+        /* 分片级别的字节回调不单独上报：进度按「已完成的片」算，见 report(id:)。 */
+    }
+
+    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
+        guard let key = downloadTask.taskDescription else { return }
+        Self.finish(key: key, taskIdentifier: downloadTask.taskIdentifier, location: location, response: downloadTask.response, error: nil)
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        guard let error = error, let key = task.taskDescription else { return }
+        Self.finish(key: key, taskIdentifier: task.taskIdentifier, location: nil, response: task.response, error: error)
+    }
+
+    func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession) {
+        guard let completion = Self.backgroundCompletion else { return }
+        Self.backgroundCompletion = nil
+        completion()
+    }
+}

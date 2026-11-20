@@ -10,7 +10,8 @@ import UserNotifications
 /// 4. 暂停用 `cancel(byProducingResumeData:)` 拿到真实续传数据，拿不到就如实从 0 重来；
 /// 5. 取消只停任务、只标状态，不删除已经下载完成（或已经落盘）的文件；
 /// 6. 一集失败只影响这一集，绝不把整部剧标成完成；
-/// 7. 只接受 https 直链的 MP4/M4V/MOV/MKV/TS；HLS（.m3u8）、网页地址、其它扩展名如实拒绝；
+/// 7. 接受 https 直链的 MP4/M4V/MOV/MKV/TS 和 HLS 清单（.m3u8/.m3u）；网页地址、其它扩展名如实拒绝；
+///    HLS 走 HLSDownloader：逐片下载、AES-128 解密、合成一个文件（边界见那个文件顶部）；
 /// 8. 总长度未知（服务器没给 Content-Length）时不编百分比，只报已收字节。
 ///
 /// 0.1.12 起用后台会话（background URLSession），切到别的 App、锁屏时由系统继续传。
@@ -130,8 +131,9 @@ final class MediaDownloader: NSObject {
 
     /// 这条线路能不能整集下载。返回 nil 表示可以，否则是给用户看的原因。
     ///
-    /// 只收 https 的视频直链：播放页地址、HLS 清单、blob:/data: 一律拒绝 ——
+    /// 收 https 的视频直链和 HLS 清单：播放页地址、blob:/data: 一律拒绝 ——
     /// 把播放网页当成视频下下来的，是一张 HTML 而不是剧集。
+    /// HLS 清单本身能下，真正的分片、解密、合成在 HLSDownloader 里。
     static func rejection(of url: URL) -> String? {
         let scheme = (url.scheme ?? "").lowercased()
         let host = (url.host ?? "").lowercased()
@@ -147,7 +149,8 @@ final class MediaDownloader: NSObject {
         if url.host?.isEmpty != false { return "这条线路没有有效的主机名" }
         let path = url.path.lowercased()
         if path.hasSuffix(".m3u8") || path.hasSuffix(".m3u") {
-            return "HLS 分片线路没法整集下载；换一条 MP4 线路再试。"
+            /* HLS 清单：交给 HLSDownloader 逐片下载、解密、合成。 */
+            return nil
         }
         if path.hasSuffix(".html") || path.hasSuffix(".htm") {
             return "这是播放网页，不是视频文件，不能下载"
@@ -362,6 +365,8 @@ final class MediaDownloader: NSObject {
             records[index].resumeData = nil
             records[index].delivered = false
             if let task = tasks.removeValue(forKey: record.id) { task.cancel() }
+            /* HLS 的分片任务和缓存也一起清掉：删了就要真的不占空间。 */
+            HLSDownloader.discard(id: record.id)
             progressHandlers.removeValue(forKey: record.id)
             finishHandlers.removeValue(forKey: record.id)
             changed = true
@@ -519,6 +524,17 @@ final class MediaDownloader: NSObject {
     }
 
     private static func launch(_ record: Record) {
+        /* HLS 走分片下载器：一条记录内部并发下分片，全部到齐后合成一个文件。 */
+        if HLSDownloader.isHLSSource(url: record.url, kind: record.meta["kind"]) {
+            update(record.id) { current in
+                current.status = "running"
+                current.taskIdentifier = 0
+                current.resumeData = nil
+                current.reason = ""
+            }
+            HLSDownloader.shared.start(record: record)
+            return
+        }
         let session = sessionInstance()
         let task: URLSessionDownloadTask?
         if let text = record.resumeData, let data = Data(base64Encoded: text) {
@@ -557,6 +573,8 @@ final class MediaDownloader: NSObject {
             /* 先把状态改成 paused：delegate 收到取消回调时就不会再写成「失败」 */
             update(id) { $0.status = "paused"; $0.reason = "已暂停" }
             changed = true
+            /* HLS 的分片任务不在 tasks 里：单独停掉，已经下好的分片留着。 */
+            HLSDownloader.pause(id: id)
             if let task = tasks.removeValue(forKey: id) {
                 let generation = record(id)?.generation ?? 0
                 task.cancel(byProducingResumeData: { data in
@@ -624,6 +642,7 @@ final class MediaDownloader: NSObject {
             }
             changed = true
             if let task = tasks.removeValue(forKey: id(of: record)) { task.cancel() }
+            HLSDownloader.pause(id: record.id)
         }
         if changed { persist(force: true); pump(); emitStateEvents() }
     }
@@ -641,6 +660,7 @@ final class MediaDownloader: NSObject {
                 current.delivered = false
             }
             if let task = tasks.removeValue(forKey: id(of: record)) { task.cancel() }
+            HLSDownloader.pause(id: record.id)
         }
         let handlers = finishHandlers
         finishHandlers.removeAll()
@@ -671,6 +691,11 @@ final class MediaDownloader: NSObject {
             var changed = false
             for index in records.indices where records[index].status == "running" {
                 if alive.contains(records[index].id) { continue }
+                /* HLS 的分片跑在另一条后台会话里：状态还在就接着下，不能按整文件任务误判失败。 */
+                if HLSDownloader.hasJob(id: records[index].id) {
+                    HLSDownloader.resume(id: records[index].id)
+                    continue
+                }
                 /* 系统没给完成回调、任务也不在了：如实标失败，不许假装完成。 */
                 records[index].status = "failed"
                 records[index].reason = "下载被系统中断（App 被强制退出或任务被清理）"
@@ -952,6 +977,7 @@ final class MediaDownloader: NSObject {
         update(id) { record in
             record.status = "done"
             record.path = payload["path"] as? String ?? ""
+            if let finalName = payload["name"] as? String, !finalName.isEmpty { record.name = finalName }
             record.size = (payload["size"] as? NSNumber)?.int64Value ?? 0
             record.received = record.size
             record.total = max(record.total, record.size)
@@ -966,6 +992,39 @@ final class MediaDownloader: NSObject {
         emitStateEvents()
         handler?(.success(payload))
         pump()
+    }
+
+    // MARK: - HLS 分片下载回调（由 HLSDownloader 调用）
+
+    /// 分片进度：已下好的分片按字节汇总，再按「已完成时长 / 总时长」折算总量，
+    /// 网页侧算出来的百分比就是「已完成的分片 / 总片数」，长剧集不会提前跳到 100%。
+    static func hlsProgress(id: String, received: Int64, total: Int64) {
+        guard let current = record(id), current.status == "running", !Self.isDeleted(current) else { return }
+        update(id, force: false) { item in
+            item.received = received
+            item.total = total
+        }
+        let now = Date().timeIntervalSince1970
+        guard now - (lastProgressEventAt[id] ?? 0) >= 0.25 else { return }
+        lastProgressEventAt[id] = now
+        guard let latest = record(id) else { return }
+        var event: [String: Any] = [
+            "event": "progress", "id": id, "showId": latest.showId ?? "",
+            "epKey": latest.epKey ?? "", "epLabel": latest.ep, "title": latest.title,
+            "received": latest.received, "total": latest.total,
+        ]
+        event["cover"] = latest.meta["cover"] ?? ""
+        event["showTotal"] = latest.meta["total"] ?? ""
+        eventSink?([event])
+    }
+
+    /// HLS 合成完成：和整文件下载走同一条完成路径（记录、通知、网页事件完全一致）。
+    static func hlsComplete(id: String, path: String, size: Int64, name: String) {
+        complete(id: id, payload: ["path": path, "size": size, "name": name])
+    }
+
+    static func hlsFail(id: String, reason: String) {
+        fail(id: id, failure: .network(reason))
     }
 
     private static func fail(id: String, failure: Failure) {

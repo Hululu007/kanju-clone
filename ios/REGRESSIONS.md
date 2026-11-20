@@ -961,3 +961,39 @@ testToolbarDownloadButtonReplacesTheDanmakuSlot → missing-button
 - **测试名**（Node）：tapping one cell in the episode grid queues exactly that episode、the tapped episode appears immediately while its source is still being resolved、a downloaded row can be deleted on its own, and only that file is asked to be removed、old snapshots, late done events and app restarts never resurrect a deleted episode、a deleted row is only reported gone after the native confirms the file is removed、a failed native delete puts the row back and clears the web tombstone、native records are the single source and deleted rows never come back、deleting an episode really removes the file and never pretends success、the tombstone store keeps blocking after the task records are trimmed
 - **修复版本**：0.1.19（build 24，待出包）
 - **验证边界**：本地 Node 89/89 通过（含上述两条删除路径与两条 Swift 源码守卫）；真机待 Ken 安装 build24 后验收。Windows 无 Xcode，Swift 未本地编译。
+
+## REG-027 站上真实线路是 HLS，点下载却整条被拒（build 25）
+
+- **现象**：详情页点某一集下载，下载页/我的下载里这一集直接失败或者根本没有进度，永远下不完。
+- **根因（源码可证）**：
+  - 网页侧 `resolveEpisodeUrl` 对 `data.kind === 'hls'` 直接返回「HLS 分片线路，不能整集下载」，
+    地址以 `.m3u8` 结尾的再拒一次；
+  - 原生侧 `MediaDownloader.rejection(of:)` 对 `.m3u8/.m3u` 同样直接拒绝，只收 https 的 MP4/M4V/MOV/MKV/TS 直链；
+  - 之前所有的「下载通过」验证用的都是 DEBUG 受控源（127.0.0.1 回环 MP4），跟站上真实线路不是一回事。
+- **修复（build 25）**：
+  - 网页：`kind=hls` 或以 `.m3u8` 结尾的线路照常入队，并带上 `kind: 'hls'` 与页面 `referer`；MP4 直链仍走整文件下载。
+  - 原生：`rejection` 放行 HLS 清单；`MediaDownloader.launch` 识别到 HLS 记录就交给 `HLSDownloader`。
+  - `HLSManifest.swift`（新增，纯解析）：主清单按带宽（相同再看分辨率）挑最高一路；媒体清单解析 `#EXTINF`、
+    `#EXT-X-MEDIA-SEQUENCE`、`#EXT-X-KEY`（AES-128 / IV）、`#EXT-X-MAP`（fMP4 初始化段排最前）、
+    `#EXT-X-BYTERANGE`、`#EXT-X-ENDLIST`；相对 URI 按清单地址解析，分片没带 query 时继承清单的 query。
+  - `HLSDownloader.swift`（新增）：分片走单独一条后台会话（`org.dpdns.zhuiju.ios.hls`），并发 ≤ 4、
+    每片失败最多重试 3 次；请求带 Referer / User-Agent / Range；AES-128 用 CommonCrypto 解码（PKCS7）；
+    fMP4 合成 `.mp4`、纯 TS 合成 `.ts`，写进 `Documents/Downloads` 后走原来的「完成」路径。
+  - 进度：已下好的分片按字节汇总，再按「已完成时长 / 总时长」折算总量，网页百分比就是「已完成的分片 / 总片数」。
+  - 中断恢复：任务状态、分片清单、已下分片（缓存目录）都持久化；暂停只停任务、删除才清缓存；
+    重启后接着下，不从 0 重来；用户暂停/删除造成的取消不算分片失败，也不消耗重试次数。
+  - DRM：SAMPLE-AES 等非 AES-128 线路明确失败并给出原因。
+- **测试名**（Node）：HLS 主清单：按带宽挑最高的一路，带宽相同看分辨率、HLS 相对地址和查询串：分片不带 query 时继承清单自己的 query、
+  HLS 加密与初始化段：只认 AES-128，IV 缺省按媒体序号补、HLS 下载器：分片走后台会话，并发 4、每片重试 3 次、
+  HLS 分片进度：按已完成的分片折算，长剧集不会提前跳到 100%、HLS 合成：解密用 CommonCrypto，按分片顺序写进下载目录、
+  HLS 边界：DRM 线路明确拒绝，暂停/删除/重启都不从头再下、整文件下载不再拒绝 HLS，并且接到分片下载器、
+  网页侧把 HLS 线路交给原生，并带上 Referer、AppDelegate 接住 HLS 那条后台会话、
+  夹具清单结构自检：主清单三类码率、AES-128、EXT-X-MAP、纯 TS、
+  download sends HLS playlists to native as hls and still refuses blob streams
+- **修复版本**：0.1.19（build 25）
+- **验证边界**：**真实线路未验证**。站点 `/` 与 `/api/play` 需要访问口令，手上没有凭据，
+  「两部不同来源的剧各下一集 + ffprobe 核对」这一条没有做，也不拿回环源冒充。Windows 本机没有 Xcode，
+  新增的 Swift 文件没有本地编译；Node 用例只钉源码守卫与夹具结构。**真机**待办：真实 HLS 的清单解析、AES 解密、
+  fMP4/TS 合成、切后台续下、完成后播放。
+  **已知限制**：纯 TS 合成出来的 `.ts` 系统播放器打不开（AVFoundation 不支持 MPEG-TS），App 内会提示改用「用其他播放器打开」；
+  fMP4 合成的 `.mp4` 可以 App 内直接播。

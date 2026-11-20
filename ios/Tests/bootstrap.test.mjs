@@ -1160,15 +1160,20 @@ test('download refuses a resolved player page url instead of saving the page', a
   assert.match(state.toastText(), /没有解析到真实视频地址/);
 });
 
-test('download refuses HLS playlists and encrypted streams', async () => {
+test('download sends HLS playlists to native as hls and still refuses blob streams', async () => {
   const hls = fixture({ signedIn: true, episodes: [0], newDownloadUI: true }); hls.ready();
   hls.video.currentSrc = 'https://media.example/19.m3u8';
   hls.replies.push(json({ ...valid, idx: 0, kind: 'hls', url: hls.video.currentSrc }));
   hls.click(hls.siteDownload);
   hls.click(hls.document.getElementById('iosDlCell6-0'));
   await settle();
-  assert.equal(hls.messages.length, 0);
-  assert.match(hls.toastText(), /HLS/);
+  const batch = hls.messages.at(-1);
+  assert.equal(batch.action, 'downloadBatch', 'HLS 线路要交给原生逐片下载，不能再整条拒掉');
+  assert.equal(batch.items.length, 1);
+  assert.equal(batch.items[0].kind, 'hls', '要告诉原生这是 HLS 清单');
+  assert.equal(batch.items[0].url, 'https://media.example/19.m3u8');
+  assert.ok(batch.items[0].name.endsWith('.mp4'), '先按 mp4 命名，合成时原生按真实容器改扩展名');
+  assert.equal(batch.items[0].referer, hls.window.location.origin, '要带 Referer，CDN 防盗链靠它');
 
   const blob = fixture({ signedIn: true, episodes: [0], newDownloadUI: true }); blob.ready();
   blob.video.currentSrc = 'blob:https://zhuiju.dpdns.org/9f1c';

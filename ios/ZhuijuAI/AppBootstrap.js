@@ -1484,13 +1484,13 @@
       if (String(data.showId) !== String(showIdValue) || Number(data.idx) !== Number(key) || data.verified !== true) {
         return { reason: '第' + key + '集片源与选集不匹配，已跳过' };
       }
-      if (data.kind === 'hls') return { reason: '第' + key + '集是 HLS 分片线路，不能整集下载' };
-      if (data.kind !== 'mp4') return { reason: '第' + key + '集线路类型不支持下载' };
+      if (data.kind !== 'mp4' && data.kind !== 'hls') return { reason: '第' + key + '集线路类型不支持下载' };
       var media;
       try { media = new URL(data.url); } catch (error) { return { reason: '第' + key + '集地址无效' }; }
       if (!allowedMediaOrigin(media) || isPageUrl(media.href)) return { reason: '第' + key + '集没有解析到真实视频地址' };
-      if (/\.m3u8(?:[?#]|$)/i.test(media.href)) return { reason: '第' + key + '集是 HLS 分片线路，不能整集下载' };
-      return { url: media.href, reason: '' };
+      /* HLS 清单（kind=hls 或以 .m3u8 结尾）交给原生逐片下载；MP4 直链走原来的整文件下载。 */
+      var isHls = data.kind === 'hls' || /\.m3u8(?:[?#]|$)/i.test(media.href);
+      return { url: media.href, kind: isHls ? 'hls' : 'mp4', reason: '' };
     }).catch(function () { return { reason: '第' + key + '集解析失败' }; }).then(function (result) {
       batchResolving = Math.max(0, batchResolving - 1);
       return result;
@@ -1548,7 +1548,7 @@
         if (isDeletedEpisode(id, key)) clearDeletedEpisode(id, key);
         jobs.push(resolveEpisodeUrl(id, key, line).then(function (result) {
           if (!result.url) return { reason: result.reason, key: key };
-          return { url: result.url, key: key, label: epLabelOf(node) || ('第' + key + '集') };
+          return { url: result.url, kind: result.kind || 'mp4', key: key, label: epLabelOf(node) || ('第' + key + '集') };
         }));
       }(nodes[i]));
     }
@@ -1566,7 +1566,9 @@
           epLabel: label,
           title: meta.title || '',
           url: results[r].url,
-          name: safeName(String(meta.title || '未命名') + ' ' + label) + extensionOf(results[r].url)
+          kind: results[r].kind,
+          referer: window.location.origin,
+          name: safeName(String(meta.title || '未命名') + ' ' + label) + (results[r].kind === 'hls' ? '.mp4' : extensionOf(results[r].url))
         });
       }
       if (!items.length) { announce(skipped[0] || '这些集都没有可下载的片源'); return 0; }
