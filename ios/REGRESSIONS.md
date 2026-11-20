@@ -1026,3 +1026,51 @@ testToolbarDownloadButtonReplacesTheDanmakuSlot → missing-button
 - **测试名**：无（Ken 2026-11-19 的 HARK-SMALL-UI-EXEMPT：只改显示名的文案类改动不新增/不跑测试，编译通过即可出包）。
 - **修复版本**：0.1.19（build 26）
 - **验证边界**：Windows 本机没有 Xcode，`xcodebuild` 只在云端打包时跑；真机桌面名与「设置」里的 App 名需 Ken 装新包后核对。
+
+## REG-029 部分影视下载直接失败 / 取消过一集后队列永远排队（build 27）
+
+- **现象**（Ken 真机反馈）：
+  1. 站上能正常播放的剧，点下载立刻失败（提示片源服务器返回 403 / 网络中断），换几部都下不了；
+  2. 「一键全集」里排队的集一直停在「排队中」，一集都不往下走；取消或删过一集之后更容易复现，杀 App 重开也不动。
+- **根因（代码 + 实测证据，不照抄“绝对路径”那套假说）**：
+  1. **整文件（MP4 直链）下载发的是裸请求**：`MediaDownloader.launch` 用 `session.downloadTask(with: url)`，
+     后台会话默认 UA 是 `App名/版本 CFNetwork/...`；**HLS 的 UA 也只有 `ZhuijuAI/<版本> iOS`**
+     （`record.meta["userAgent"] ?? WebViewController.userAgent`），整文件连 Referer 都没带。
+     网页播放器用的是真 Safari UA + 站点 Referer，片源 CDN 按 UA/防盗链放行，播放能过、下载不能过。
+     实测（`ios/scripts/probe_matrix.py`，同一批 DB 里判定 `ok` 的真实线路，只记状态码不记签名）：
+     | 线路（脱敏域名） | 无 UA | App 令牌 UA | Safari UA + Referer |
+     | --- | --- | --- | --- |
+     | svip.xgplay12.com（xigua） | 403 | 200 | 200 |
+     | cdn5.ryplay5.com（ruyi） | 连接被拒 | 200 | 200 |
+     | ukzy.ukubf3.com（uku） | 000/403 | 403 | 403 |
+     | sign.site.zshtys888.com（official-r，DB 判 ok） | 402 | 402 | 402 |
+     结论：**UA 是最直接的差异**；`sign.site…` 这类“当时 ok、现在 402”的是令牌过期，重试必须重新解析。
+  2. **取消/删除后记录会被启动对账“复活”**：`MediaDownloader.reconcile` 对上系统里还在的任务时
+     无条件 `records[index].status = "running"`，不看记录是否已 cancelled / 已删除 / failed。
+     `URLSessionTask.cancel()` 是异步的，取消后的下一次对账（页面加载、回到前台、切页各一次）
+     会把它写回 running，而那条任务再也不会发终态回调 —— 于是两个并发名额被僵尸永久占住，
+     后面的集全部停在「排队中」。孤儿后台任务（记录已删）以前也从不 `cancel()`。
+  3. **没有集号的入队请求被静默丢掉**：`enqueue` 里 `if epKey.isEmpty { continue }`，
+     网页已经先画了一行「排队中」（乐观行），原生既没有记录也没有失败事件 → 永远排队、实际没下。
+  4. **取消用的是 `HLSDownloader.pause`**：分片任务和分片缓存都留着，重启后与本地队列对不上，成为僵尸。
+- **修复（build 27，只动下载底层，不碰改名/播放/界面）**：
+  - `MediaDownloader`：新增 `mediaUserAgent`（浏览器 UA + `ZhuijuAI/<版本> iOS` 令牌）与
+    `mediaRequestHeaders(from:)`；整文件下载改成 `URLRequest`，带 `Referer` / `User-Agent` / `Accept`。
+    网页加载完由 `WebViewController.captureMediaUserAgent` 把真实 `navigator.userAgent` 交给原生（兜底才是常量 UA）。
+  - `HLSDownloader`：清单/分片/密钥统一用同一份浏览器 UA（只在网页给的是真浏览器 UA 时照用），
+    同一个 id 换了清单地址时先丢旧分片缓存；重启对账时把“记录还在下、但没拿到后台回调”的 job 重新 `pump`。
+  - `reconcile`：加防重入；**只接管 queued/running 且未删除的记录**，终态记录对应的任务与孤儿任务一律 `cancel()`；
+    同时清掉旧版本遗留的 HLS 僵尸 job（`HLSDownloader.discardZombies`）。
+  - `enqueue`：缺集号的请求落一条 `failed` 记录（原因：这一集缺少集号，没法下载），不再静默丢。
+  - 取消/失败 → `HLSDownloader.discard`（连分片缓存一起清），暂停才 `pause`（保留已下分片继续续传）。
+  - 网页：失败的那一格写「失败 · 点一下重试」，点格子会重新解析 `/api/play`（拿新地址）再入队。
+- **测试名**（Node，`ios/Tests/downloadFailure.test.mjs`，8 条源码守卫）：整文件下载带上页面 Referer 和浏览器 UA，
+  不再发裸请求、媒体请求头：有浏览器 UA 就用网页的，只有 App 令牌就退回兜底 UA、HLS 分片不用裸 App 令牌当 UA、
+  启动对账：只接管队列里的任务，孤儿和终态任务一律 cancel、HLS 重启后：没拿到后台回调的 job 也要接着下，
+  不能停成僵尸、取消/失败丢分片缓存，暂停保留、没有集号的入队请求要落一条失败记录，不能静默丢掉、
+  失败的那一格写清「点一下重试」，点格子会重新解析片源再入队。
+- **修复版本**：0.1.19（build 27）
+- **验证边界**：Windows 上既没有 Swift 编译器也跑不了 iOS 模拟器；Swift 这三处只有源码守卫 + 审核目视，
+  **编译门禁是 packaging-only 的 xcodebuild**，真正行为要等新包安装后**真机**验证（UA/Referer 是否过 CDN、
+  取消后队列是否继续、重启后是否续下、失败格是否可重试）。3 部真实样本（谷雨 / 倾世锦鳞谷雨来 / 古玉劫后香）
+  是数据库 + 源站探测证据，**不是**真机下载成功证据。

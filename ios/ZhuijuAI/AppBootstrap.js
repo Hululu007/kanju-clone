@@ -1789,7 +1789,7 @@
     }
     if (status === 'queued') return '排队中';
     if (status === 'paused') return '已暂停';
-    if (status === 'failed') return '失败';
+    if (status === 'failed') return '失败 · 点一下重试';
     if (status === 'cancelled') return '已取消';
     if (dlDownloaded(showId, key)) return '已下载';
     if (status === 'done') return '已下载';

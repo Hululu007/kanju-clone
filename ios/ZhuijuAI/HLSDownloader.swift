@@ -95,6 +95,21 @@ final class HLSDownloader: NSObject {
         return jobs[id] != nil
     }
 
+    /// 对账用：丢掉「记录已经是终态」的遗留任务（旧版本取消时只 pause 不 discard）。
+    /// 只清不需要的任务：还在队列里的（queued/running）一律不动。
+    static func discardZombies(isLive: (String) -> Bool) {
+        ensureLoaded()
+        let dead = jobs.keys.filter { !isLive($0) }
+        guard !dead.isEmpty else { return }
+        for id in dead {
+            paused.remove(id)
+            cancelTasks(id: id)
+            jobs.removeValue(forKey: id)
+            try? FileManager.default.removeItem(at: segmentDirectory(id: id))
+        }
+        persist()
+    }
+
     /// 暂停：停掉正在传的分片，状态和已下好的分片都留着，继续时接着下。
     static func pause(id: String) {
         paused.insert(id)
@@ -156,6 +171,14 @@ final class HLSDownloader: NSObject {
                 if let split = splitKey(key) { ids.insert(split.id) }
             }
             for id in ids where jobs[id]?.phase == "segments" {
+                pump(id: id)
+            }
+            /* 系统没把后台任务交回来的（进程被回收、任务已死）：只要记录还在下，就接着下。
+               以前只 pump 拿到回调的那几条，剩下的 job 永远停在 segments、记录永远是 running，
+               于是那两个并发名额被俩僵尸占着，后面全部卡在「排队中」。 */
+            for (id, job) in jobs where job.phase == "segments" {
+                guard !paused.contains(id), MediaDownloader.isRunning(id: id) else { continue }
+                if taskKeys.values.contains(where: { $0.hasPrefix(id + "#") }) { continue }
                 pump(id: id)
             }
             if systemTasks.isEmpty, let pending = backgroundCompletion {
@@ -220,14 +243,27 @@ final class HLSDownloader: NSObject {
         ensureLoaded()
         paused.remove(record.id)
         let referer = record.meta["referer"] ?? ""
-        let userAgent = record.meta["userAgent"] ?? WebViewController.userAgent
+        /* 旧实现只把 App 令牌（`ZhuijuAI/0.1.19 iOS`）当 UA 发给片源 CDN：
+           UA 写死的 CDN 会直接 403/断连，网页（真浏览器 UA）却能播。
+           网页交上来的是真浏览器 UA 就照用，否则用带 App 令牌的浏览器 UA。 */
+        let supplied = (record.meta["userAgent"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let userAgent = supplied.contains("Mozilla/") ? supplied : MediaDownloader.mediaUserAgent
         if var existing = jobs[record.id], existing.manifestURL == record.url {
             /* 暂停过或被系统回收过：保留已下好的分片，接着来。 */
             existing.name = record.name
+            existing.referer = referer
+            existing.userAgent = userAgent
             jobs[record.id] = existing
             persist()
             resume(id: record.id)
             return
+        }
+        /* 同一个 id 换了清单地址（重试/换线）：旧的清单和分片缓存全部作废，
+           不能拿上一份清单的分片下标去拼新视频。 */
+        if jobs[record.id] != nil {
+            cancelTasks(id: record.id)
+            jobs.removeValue(forKey: record.id)
+            try? FileManager.default.removeItem(at: segmentDirectory(id: record.id))
         }
         let job = Job(
             id: record.id,

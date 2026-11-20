@@ -102,6 +102,30 @@ final class MediaDownloader: NSObject {
     /// 后台会话的标识：App 被重新拉起时系统就是用它把回调交回来的，不能改。
     static let backgroundIdentifier = "org.dpdns.zhuiju.ios.downloads"
     static let tasksKey = "kj-ios-download-tasks"
+
+    /// 片源请求头的兜底 UA：后台会话默认的 `App名/版本 CFNetwork/...` 会被一部分片源 CDN 直接拒绝，
+    /// 网页播放器能播、App 下载却 403，就是这条请求头差异造成的。
+    /// 真机上网页加载完会把真实的 `navigator.userAgent` 交上来（见 WebViewController），这里只是兜底。
+    static let browserUserAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
+        + "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
+    /// 站点用 `ZhuijuAI/<版本>` 这个前缀认 App，补在浏览器 UA 后面，两边都不丢。
+    static var appUserAgentToken: String {
+        let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.0.0"
+        return "ZhuijuAI/\(version) iOS"
+    }
+    /// 所有媒体请求（整文件 / HLS 分片 / 清单 / 密钥）统一用这一份 UA。
+    static var mediaUserAgent: String = browserUserAgent + " " + appUserAgentToken
+
+    /// 媒体请求要带的头：Referer 必须和网页播放时一致，UA 必须是浏览器 UA。
+    /// 网页明确交上来一个浏览器 UA 就照用；只给了 App 令牌（老版本）就用兜底 UA，绝不发裸令牌。
+    static func mediaRequestHeaders(from meta: [String: String]) -> [String: String] {
+        var headers = ["Accept": "*/*", "Accept-Language": "zh-CN,zh;q=0.9"]
+        let supplied = (meta["userAgent"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        headers["User-Agent"] = supplied.contains("Mozilla/") ? supplied : mediaUserAgent
+        let referer = (meta["referer"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        if !referer.isEmpty { headers["Referer"] = referer }
+        return headers
+    }
     static let notifyAskedKey = "kj-ios-notify-asked"
     /// 进程里唯一的那份下载器：后台回调可能早于界面创建，必须共用同一套状态。
     static let shared = MediaDownloader()
@@ -456,7 +480,20 @@ final class MediaDownloader: NSObject {
             }
             let showId = request.showId
             let epKey = request.epKey
+            /* 没有集号就没法去重、没法记进片库：如实落一条失败记录。
+               以前这里直接 `continue`，网页的乐观行（点一下就先画成「排队中」）永远等不到快照，
+               看起来就是「一直排队，其实什么都没下」。 */
             if epKey.isEmpty {
+                var record = Record(
+                    id: request.id, url: request.url.absoluteString, name: request.name,
+                    title: request.meta["title"] ?? "", ep: request.meta["epLabel"] ?? "",
+                    meta: request.meta, received: 0, total: 0, status: "failed",
+                    path: "", size: 0, reason: "这一集缺少集号，没法下载（请在选集列表里点具体集数）",
+                    delivered: false, taskIdentifier: 0, updatedAt: Date().timeIntervalSince1970
+                )
+                record.showId = showId
+                record.epKey = ""
+                records.append(record)
                 continue
             }
             let episodeKey = key(showId: showId, epKey: epKey)
@@ -538,9 +575,17 @@ final class MediaDownloader: NSObject {
         let session = sessionInstance()
         let task: URLSessionDownloadTask?
         if let text = record.resumeData, let data = Data(base64Encoded: text) {
+            /* 续传数据里带着第一次请求的 URL 和请求头；这一条只在暂停/继续（同一个任务）时用到。 */
             task = session.downloadTask(withResumeData: data)
         } else if let url = URL(string: record.url) {
-            task = session.downloadTask(with: url)
+            /* 整文件下载也必须带 Referer + 浏览器 UA：部分片源按 UA/防盗链拒绝裸 URLSession 请求，
+               网页播放器能播、App 直接 403 —— 这一段就是那个差异的修复点。 */
+            var request = URLRequest(url: url)
+            for (field, value) in mediaRequestHeaders(from: record.meta) {
+                request.setValue(value, forHTTPHeaderField: field)
+            }
+            request.timeoutInterval = 30
+            task = session.downloadTask(with: request)
         } else {
             task = nil
         }
@@ -642,7 +687,9 @@ final class MediaDownloader: NSObject {
             }
             changed = true
             if let task = tasks.removeValue(forKey: id(of: record)) { task.cancel() }
-            HLSDownloader.pause(id: record.id)
+            /* 取消 = 这一集不下了：分片缓存和分片任务一起丢掉，别留着一份没人接管的僵尸任务
+               继续跑、继续占下载名额。resume() 那一条（用户只是暂停）才保留缓存。 */
+            HLSDownloader.discard(id: record.id)
         }
         if changed { persist(force: true); pump(); emitStateEvents() }
     }
@@ -660,7 +707,7 @@ final class MediaDownloader: NSObject {
                 current.delivered = false
             }
             if let task = tasks.removeValue(forKey: id(of: record)) { task.cancel() }
-            HLSDownloader.pause(id: record.id)
+            HLSDownloader.discard(id: record.id)
         }
         let handlers = finishHandlers
         finishHandlers.removeAll()
@@ -681,9 +728,19 @@ final class MediaDownloader: NSObject {
 
     /// 重新接上后台会话：App 被系统重新拉起时，这里把上一个进程留下的任务找回来。
     ///
-    /// running 但系统里已经没有这条任务 → 如实标「系统中断」；
-    /// queued / paused 的按原状态保留并重新调度（重启后队列不会凭空消失）。
+    /// 四条边界：
+    /// 1. running 但系统里已经没有这条任务 → 如实标「系统中断」；
+    /// 2. queued / paused 的按原状态保留并重新调度（重启后队列不会凭空消失）；
+    /// 3. 系统交回来的任务只接管仍在队列里的（queued / running）；已删、已取消、失败、已完成的一律 cancel；
+    ///    以前无条件把记录改回 running：任务 cancel() 是异步的，取消/删除后的下一次对账会把它复活，
+    ///    而那条任务永远不会再发终态回调 —— 这就是「取消过一集，队列从此永远卡着」。
+    /// 4. 对不上任何记录的系统任务（孤儿）直接 cancel，不让它们白占后台会话和下载名额。
+    private static var reconciling = false
     private static func reconcile(completion: (() -> Void)?) {
+        /* 页面加载、回到前台、切页都会叫一次对账：重入会拿到两份不同时刻的 getAllTasks，
+           相互覆盖状态。只允许一份在跑，后面的直接按上一次结果继续。 */
+        guard !reconciling else { completion?(); return }
+        reconciling = true
         let activeSession = sessionInstance()
         records = loadRecords()
         activeSession.getAllTasks { systemTasks in
@@ -704,16 +761,41 @@ final class MediaDownloader: NSObject {
             }
             for task in systemTasks {
                 guard let id = task.taskDescription,
-                      let index = records.firstIndex(where: { $0.id == id }) else { continue }
+                      let index = records.firstIndex(where: { $0.id == id }) else {
+                    /* 孤儿任务：记录已经不在（删了/被截断），留着只会占名额。 */
+                    task.cancel()
+                    continue
+                }
+                let adoptable = (records[index].status == "queued" || records[index].status == "running")
+                    && !Self.isDeleted(records[index])
+                guard adoptable else {
+                    /* 记录已经是终态（已删除/已取消/失败/完成）：这条任务不能再跑下去，也不能复活记录。 */
+                    task.cancel()
+                    continue
+                }
                 records[index].status = "running"
                 records[index].taskIdentifier = task.taskIdentifier
                 tasks[id] = task as? URLSessionDownloadTask
             }
+            /* 已经删掉/取消/完成的 HLS 遗留任务（旧版本取消时只 pause 不丢弃）：连分片缓存一起清掉。 */
+            HLSDownloader.discardZombies(isLive: { id in
+                records.contains { $0.id == id && ($0.status == "queued" || $0.status == "running") }
+            })
             if changed { persist(force: true) }
+            reconciling = false
             /* 上次没跑完的队列接着跑（并发仍然最多两条） */
             pump()
             completion?()
         }
+    }
+
+    /// HLS 分片任务是否还在（只给对账用，不暴露写入口）。
+    /// 注意：不能在这里 reload 覆盖内存里的 records —— 对账/入队可能还有没落库的改动。
+    static func isRunning(id: String) -> Bool {
+        if let hit = records.first(where: { $0.id == id }) {
+            return hit.status == "running" && !Self.isDeleted(hit)
+        }
+        return loadRecords().contains { $0.id == id && $0.status == "running" && !Self.isDeleted($0) }
     }
 
     /// 交给网页的终态/进度事件：终态只交一次，进度每次都可以重发。
@@ -1036,6 +1118,10 @@ final class MediaDownloader: NSObject {
             record.resumeData = nil
         }
         tasks.removeValue(forKey: id)
+        /* 失败/取消的 HLS 任务不留分片缓存：这一集的记录已经是终态，没人会再接手那些分片，
+           继续留着就是白占磁盘。重试是网页重新解析、重新入队（新记录、从 0 开始）。 */
+        HLSDownloader.discard(id: id)
+        lastProgressEventAt.removeValue(forKey: id)
         let handler = finishHandlers.removeValue(forKey: id)
         progressHandlers.removeValue(forKey: id)
         emitStateEvents()

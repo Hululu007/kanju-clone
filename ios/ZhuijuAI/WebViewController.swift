@@ -376,6 +376,13 @@ final class WebViewController: UIViewController, UIDocumentInteractionController
 
     // MARK: - 下载
 
+    /// 当前页面的 origin（scheme://host[:port]/）：下载请求没有带页面来源时，用它当 Referer。
+    private func pageOrigin() -> String {
+        guard let url = webView.url, let scheme = url.scheme, let host = url.host else { return "" }
+        if let port = url.port { return scheme + "://" + host + ":" + String(port) + "/" }
+        return scheme + "://" + host + "/"
+    }
+
     /// 网站自己的下载按钮只带 url / name：这里既不查登录态，也不因缺 id 丢掉请求。
     fileprivate func beginDownload(_ body: [String: Any]) {
         let fallbackName = body["name"] as? String ?? "video.mp4"
@@ -396,6 +403,11 @@ final class WebViewController: UIViewController, UIDocumentInteractionController
         var meta: [String: Any] = body["meta"] as? [String: Any] ?? [:]
         if !showId.isEmpty { meta["showId"] = showId }
         if !epKey.isEmpty { meta["epKey"] = epKey }
+        /* 整文件下载也要带和网页一致的 UA / Referer：不然防盗链/UA 白名单的线路直接 403。 */
+        if meta["userAgent"] == nil { meta["userAgent"] = MediaDownloader.mediaUserAgent }
+        if meta["referer"] == nil || (meta["referer"] as? String ?? "").isEmpty {
+            meta["referer"] = pageOrigin()
+        }
         if meta["epLabel"] == nil, let label = body["epLabel"] as? String { meta["epLabel"] = label }
         if meta["title"] == nil, let title = (body["show"] as? [String: Any])?["title"] as? String { meta["title"] = title }
         /* HLS 线路要把「这是清单」和页面来源一起带下去：原生据此走分片下载、并带上正确的 Referer。 */
@@ -461,6 +473,11 @@ final class WebViewController: UIViewController, UIDocumentInteractionController
             meta["title"] = (item["title"] as? String) ?? meta["title"] ?? ""
             if let kind = item["kind"] as? String, !kind.isEmpty { meta["kind"] = kind }
             if let referer = item["referer"] as? String, !referer.isEmpty { meta["referer"] = referer }
+            /* UA / Referer 必须和网页播放时一致：片源 CDN 按 UA 拦的线路，下载才能和播放一样过。 */
+            if meta["referer"] == nil || (meta["referer"] ?? "").isEmpty {
+                meta["referer"] = item["referer"] as? String ?? pageOrigin()
+            }
+            meta["userAgent"] = MediaDownloader.mediaUserAgent
             requests.append(MediaDownloader.Request(id: id, url: link, name: name, meta: meta))
         }
         if !requests.isEmpty { downloader.enqueue(requests) }
@@ -879,6 +896,17 @@ extension WebViewController: WKNavigationDelegate {
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         errorContainer.isHidden = true
         progressView.isHidden = true
+        captureMediaUserAgent(from: webView)
+    }
+
+    /// 把网页真实的 `navigator.userAgent` 交给原生下载器。
+    /// 片源 CDN 经常按 UA 放行/拒绝：网页能播、下载却 403，根因就是下载请求发的不是浏览器 UA。
+    /// 这里取网页自己的 UA（系统 Safari UA + 我们追加的 App 令牌），下载和播放才是同一种客户端。
+    private func captureMediaUserAgent(from webView: WKWebView) {
+        webView.evaluateJavaScript("navigator.userAgent") { value, _ in
+            guard let ua = value as? String, ua.contains("Mozilla/") else { return }
+            MediaDownloader.mediaUserAgent = ua
+        }
     }
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
