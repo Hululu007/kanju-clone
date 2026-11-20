@@ -689,8 +689,63 @@ testToolbarDownloadButtonReplacesTheDanmakuSlot → missing-button
 - **现象**：下载入口曾分散在播放器工具栏、选集内嵌区域与设置下载库，用户无法确认点一次究竟下载什么；设置里的账号入口也没有未开放状态。
 - **复现步骤**：打开播放页，点剧名旁「下载」，点一集并打开「查看下载列表」；另从设置面板检查个人资料与账号安全行。
 - **根因**：旧版同时保留批量下载交互和多处下载入口；新版账号资料接口尚未开放。
-- **对应测试名**：`EpisodeDownloadSheetUITests.testTitleDownloadOpensTheStandaloneEpisodeGrid`、`EpisodeDownloadSheetUITests.testTappingAnEpisodeDownloadsOnlyThatEpisode`、`BatchDownloadSmokeUITests.testTheEpisodePageOffersSingleDownloadAndShowsItsLibraryEntry`、`InjectedUITests.testSettingsSheetShowsTheRunningDownload`。
+- **对应测试名**：`EpisodeDownloadSheetUITests.testSiteDownloadEntryOpensTheStandaloneEpisodeGrid`、`EpisodeDownloadSheetUITests.testTappingAnEpisodeDownloadsOnlyThatEpisode`、`BatchDownloadSmokeUITests.testTheEpisodePageOffersSingleDownloadAndShowsItsLibraryEntry`、`InjectedUITests.testSettingsSheetShowsTheRunningDownload`。
 - **修复版本**：0.1.18（build 19）；账号两行暂显示「即将上线」。
 
 0.1.1~0.1.9 的问题与修复过程记录在 `IOS_FIXES_0.1.2.md` ~ `IOS_FIXES_0.1.6.md`、`IOS_REVIEW_0.1.1.md`；
 本表从 0.1.10 起作为新增回归的正式清单。
+
+## REG-020 点下载没反应、进度不进格子、两套播放器叠在一起（0.1.19）
+
+- **现象**：真机上点网站的下载按钮，什么都不发生；下载页/我的下载一条队列都看不到。
+  播放页同时出现网站自己的控制栏和 App 注入的那套控件；进全屏后标题栏收起异常，转屏方向也跟系统对不上。
+- **复现步骤**：
+  1. 打开任意剧集播放页，点网站上的下载入口。
+  2. 观察：没有任何提示，下载页的集数格子没有状态，我的下载为空。
+  3. 播放任意一集，点网站控制栏的全屏，再转屏。
+  4. 观察：画面上同时有一套站点控件和一套注入控件，退出全屏后标题/工具条/方向都可能回不来。
+- **根因**：
+  1. `WebViewController.beginDownload` 要求 `signedIn == true` 且必须有 `id`，网站发来的消息两者都没有，被静默丢弃。
+  2. 注入层 `startBatch` 读 `localStorage['kj-auth-token']` 做登录门控，新站没有这个 key，即使请求走到注入层也被挡回。
+  3. 下载页刷新调用已被删除的 `syncDownloadRow()` / `syncTencentUI()`，运行期抛错，格子状态不再更新；
+     当集完成时也没有重渲染「我的下载」。
+  4. 注入层仿了站点 `#ppCtrl` 一套控件，还用 `#playTools,.pp-toolbar,#btnFull,…{display:none!important}` 藏掉站点自己的工具条；
+     全屏由注入层发 `fullscreen/inline` 让原生锁竖屏、改约束，与站点自己的 `requestFullscreen` / `data-ios-immersive` 互相打架。
+- **修复**：
+  - 删除注入层整套原生叠加控件与沉浸态 CSS，不再隐藏站点任何按钮；全屏和画面尺寸交回站点播放器。
+  - `orientationMask(isFullscreen:)` 恒为 `.allButUpsideDown`，删掉 `requestRotation`、全屏约束与状态栏覆盖。
+  - 下载不再要 App 登录态；`beginDownload` 缺 `id` 时补 `dl-<uuid>`；`beginBatchDownload` 接受不带 `signedIn` 的消息。
+  - 下载入口统一认 `[data-pw-act="dl"]` 和站点「下载本集」`#ppDownload`。
+  - 进度/完成/回到前台三条路径都走 `syncDownloadPage()` + `renderMinePageIfOpen()`。
+  - 新增 `playLocal`：离线播放用原生播放器播本地文件。
+- **测试名**（Node 夹具）：
+  - `the site own download menu row opens the native download page`
+  - `download page opens without an app login and queues the tapped episode`
+  - `a single-episode download queues without any login state`
+  - `download progress appears in the download page and a completed episode joins my downloads`
+  - `each finished episode lands in my downloads, and replay stays idempotent`
+  - `no native player overlay is injected any more`
+  - `layout fallback keeps the light tabbar, category cards and hidden site right-side tools`
+  - `tapping one cell in the episode grid queues exactly that episode`
+- **随功能退役的用例**（对应功能已按 0.1.19 的决定删除，不是为过测试而删）：
+  `landscape playback becomes immersive without forcing rotation`、`portrait playback stays inline until the fullscreen button is used`、
+  `explicit exit wins over automatic landscape immersion`、`landscape playback goes immersive again after a fullscreen round trip`、
+  `rotating back to landscape during playback restores immersive mode`、`the standard fullscreen api hides the title and keeps immersion in sync`、
+  `fullscreen hides every floating control and restores them on exit`、`entering fullscreen closes the top toolbar panels`、
+  `fullscreen fit dropdown selects and remembers the requested mode`、`portrait playback keeps video sizing untouched and immersive fit geometry is restored`、
+  `fullscreen sits at the right end of the control bar and drives native rotation`、`native fullscreen requests are rerouted to the in-page bar`、
+  `rate menu offers 2.5x and 3x and applies the chosen one`、`a clamped playback rate is reported instead of pretending 3x works`、
+  `control bar follows playback position and seeking`、`external playback hands the direct url to the native share sheet`、
+  `external playback refuses blob streams and says why`、`external playback without the app bridge falls back to the system share sheet`、
+  `cast menu lists playback actions without download or local-player entries`、`the cast button hands the episode to a third-party player in one tap by default`、
+  `a long press on the cast button still opens the full menu`、`the cast menu keeps playback actions and excludes downloads`、
+  `HLS lines can still be played by an external player even though they cannot be downloaded`、`copy link puts the direct url on the clipboard`、
+  `a played episode keeps its direct url after the player element is rebuilt`、`an unresolved episode is not mistaken for a media url`、
+  `the player page url is refused even when it fills the source tag`（页面地址这条改成 `download refuses a resolved player page url instead of saving the page`）、
+  `immersive hides the site page header that carries the film title`。
+  模拟器侧同时退役：`InjectedUITests` 的六条（横屏沉浸、标准全屏规则、投屏一键外放、外放菜单、外放开关、全屏铺满）。
+  因此 **REG-001 / REG-005 / REG-011 / REG-015 / REG-017 里的描述从 0.1.19 起不再适用**（沉浸态与画面档位已删除）；
+  REG-003 / REG-014 的「外放菜单」「投屏让位」也不再适用（站点的投屏入口不再被隐藏）。
+- **修复版本**：0.1.19（build 21）
+- **验证边界**：Node 夹具能证明逻辑与消息；Swift 未在本机编译（Windows 无 Xcode），
+  真站选择器、WKWebView 里的网站全屏、原生下载进度与离线播放都必须真机复核。

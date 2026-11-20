@@ -91,17 +91,15 @@ final class EpisodeDownloadSheetUITests: XCTestCase {
             .tap()
     }
 
-    func testTitleDownloadOpensTheStandaloneEpisodeGrid() throws {
+    func testSiteDownloadEntryOpensTheStandaloneEpisodeGrid() throws {
         let app = launchApp()
         let web = web(app)
 
-        // 站点的投屏入口必须已经不可见（不是删掉节点，是让位）。
-        // 注意别把自己的控制栏算进去：那一格「外放」的无障碍名里也有「投屏」两个字，
-        // 它是 App 内既有的第三方播放器入口，和站点那个投屏按钮是两回事。
+        // 0.1.19 起注入层不再隐藏站点的任何按钮：站点自己的「投屏」入口必须还在。
         let siteCast = web.descendants(matching: .any)
             .matching(NSPredicate(format: "label == %@ OR label == %@", "投屏到电视", "投屏"))
             .firstMatch
-        XCTAssertFalse(siteCast.exists, "选集旁仍然能看到站点那个「投屏」入口，它应该让位给下载按钮")
+        XCTAssertTrue(siteCast.exists, "站点自己的投屏入口不应该再被注入层藏起来")
 
         guard let entry = downloadEntry(web) else {
             _ = fail(app, "download-entry", "剧名旁没有下载入口")

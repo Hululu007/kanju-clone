@@ -66,7 +66,22 @@ function node(tag = 'div') {
       return child;
     },
     hasAttribute(name) { return name === 'hidden' ? !!element.hidden : name in element; },
-    closest(selector) { return selector === '#' + element.id ? element : null; },
+    closest(selector) {
+      const matches = (candidate, part) => {
+        if (part[0] === '#') return candidate.id === part.slice(1);
+        if (part[0] === '.') return String(candidate.className || '').split(/\s+/).includes(part.slice(1));
+        const attribute = /^\[([\w-]+)(?:="([^"]*)")?\]$/.exec(part);
+        if (!attribute) return candidate.tagName === part.toUpperCase();
+        const value = candidate.getAttribute(attribute[1]);
+        return value !== undefined && value !== null && (attribute[2] === undefined || value === attribute[2]);
+      };
+      let candidate = element;
+      while (candidate) {
+        if (String(selector).split(',').some((part) => matches(candidate, part.trim()))) return candidate;
+        candidate = candidate.parentNode;
+      }
+      return null;
+    },
     querySelector(selector) {
       const selectorMatch = /^(?:([\w-]+))?((?:\.[\w-]+)?)(?:\[([\w-]+)(?:="([^"]*)")?\])?$/.exec(selector);
       const walk = (current) => {
@@ -259,6 +274,12 @@ function fixture({ origin = 'https://zhuiju.dpdns.org', storageThrows = false, l
   });
   tabRow.querySelectorAll = (selector) => (selector === '.pp-tab' ? tabButtons : []);
   const body = node('body');
+  /* 站点播放页自己的「下载」按钮：注入层不再挂原生下载按钮。 */
+  const siteDownload = node('button');
+  siteDownload.setAttribute('data-pw-act', 'dl');
+  siteDownload.setAttribute('aria-label', '下载');
+  siteDownload.textContent = '下载';
+  body.appendChild(siteDownload);
   /* 选集区要真的在页面上：0.1.14 的批量下载条插在 #epGrid 前面（没有父节点就挂不上） */
   /* 顶栏设置入口：首页用它打开设置面板（站点自己只会弹「即将上线」） */
   const settingsTrigger = node('button');
@@ -272,9 +293,18 @@ function fixture({ origin = 'https://zhuiju.dpdns.org', storageThrows = false, l
   };
   /* 选集区和它的批量下载条要真的在页面上 */
   body.appendChild(epGrid);
+  const episodeHead = node('div');
+  episodeHead.className = 'ep-head';
+  const episodeCast = node('button');
+  episodeCast.dataset = { action: 'cast' };
+  episodeCast.textContent = '投屏';
+  episodeHead.appendChild(episodeCast);
+  body.appendChild(episodeHead);
   const document = { readyState: 'loading', visibilityState: 'visible', head, body,
     title: '测试剧 - 看剧AI',
-    addEventListener(name, listener) { (listeners[name] ||= []).push(listener); },
+    addEventListener(name, listener, capture) {
+      (listeners[name] ||= []).push(name === 'click' ? { listener, capture: capture === true } : listener);
+    },
     removeEventListener(name, listener) {
       const list = listeners[name] || [];
       const index = list.indexOf(listener);
@@ -313,6 +343,8 @@ function fixture({ origin = 'https://zhuiju.dpdns.org', storageThrows = false, l
     querySelector(selector) {
       const attribute = /^\[([\w-]+)(?:="([^"]*)")?\]$/.exec(selector);
       if (selector === '[data-action="login"]') return loginTrigger;
+      if (selector === '[data-pw-act="dl"]') return siteDownload;
+      if (selector === '.ep-head [data-action="cast"]') return episodeCast;
       if (attribute) return document.querySelectorAll(selector)[0] || null;
       if (selector === '.ep.on') return noSelectedEpisode ? null : selected;
       if (selector === '.detail-info h1') return homePage ? null : detailTitle;
@@ -327,6 +359,8 @@ function fixture({ origin = 'https://zhuiju.dpdns.org', storageThrows = false, l
         const descendants = (parent) => (parent.children || []).flatMap((child) => [child, ...descendants(child)]);
         return page ? descendants(page).filter((element) => String(element.className || '').split(/\s+/).includes('ip-eptitle')) : [];
       }
+      if (selector === '.ep-head [data-action="cast"]') return [episodeCast];
+      if (selector === '[data-pw-act="dl"]') return [siteDownload];
       if (selector === '#epGrid .ep') return epButtons;
       if (selector === '.detail-tags span,.detail-info .tag') return [];
       const attribute = /^\[([\w-]+)(?:="([^"]*)")?\]$/.exec(selector);
@@ -409,7 +443,7 @@ function fixture({ origin = 'https://zhuiju.dpdns.org', storageThrows = false, l
   return { window, document, replies, calls, redirects, selected, video, messages, attributes, head, toolbar, searchInput, shared, player,
     hint, epButtons, epGrid, epMore, mediaProto, days, dayButtons, observers, loginTrigger, storage,
     settingsPanel, lineBar, tabRow, tabButtons, clicked, sbName, sbSub, acctName, tabbar, settingsTrigger,
-    pageHead, dmButton, phTitle,
+    pageHead, dmButton, phTitle, siteDownload,
     /* 下载进度控件由注入层自己建（0.1.9 之后不再依赖站点预设的节点），
        所以按 id 现取，不让夹具自己造一份同名节点。 */
     get downloadLabel() { return document.getElementById('iosDownloadLabel'); },
@@ -436,8 +470,13 @@ function fixture({ origin = 'https://zhuiju.dpdns.org', storageThrows = false, l
     },
     ready() { for (const listener of listeners['DOMContentLoaded'] || []) listener({}); },
     click(target) {
-      const event = { target, preventDefault() {}, stopImmediatePropagation() {} };
-      for (const listener of listeners['click'] || []) listener(event);
+      let stopped = false;
+      const event = { target, preventDefault() {}, stopImmediatePropagation() { stopped = true; } };
+      const clickListeners = listeners['click'] || [];
+      for (const entry of [...clickListeners].sort((left, right) => Number(right.capture) - Number(left.capture))) {
+        (typeof entry === 'function' ? entry : entry.listener)(event);
+        if (stopped) break;
+      }
     },
     emit(name, event) { for (const listener of listeners[name] || []) listener(event); } };
 }
@@ -445,7 +484,7 @@ function fixture({ origin = 'https://zhuiju.dpdns.org', storageThrows = false, l
 const json = (data, status = 200) => new Response(JSON.stringify(data), { status, headers: { 'content-type': 'application/json' } });
 
 function batchReply(showId, idx) {
-  return json({ showId, idx, episodeNumber: idx + 1, verified: true, kind: 'mp4', url: `https://media.example/${idx}.mp4` });
+  return json({ showId, idx, episodeNumber: idx + 1, verified: true, kind: 'mp4', url: `https://media.example/${idx + 1}.mp4` });
 }
 
 const settle = () => new Promise((resolve) => setTimeout(resolve, 60));
@@ -462,7 +501,7 @@ test('tapping one cell in the episode grid queues exactly that episode', async (
   state.ready();
   assert.equal(state.document.getElementById('iosBatchBar'), null,
     '批量条（选择/一键全集/从本集往后/下载已选）必须已经删掉');
-  state.click(state.document.getElementById('iosTitleDownload'));
+  state.click(state.siteDownload);
   state.replies.push(batchReply('fixture', 1));
 
   const cell = state.document.getElementById('iosDlCell6-1');
@@ -475,14 +514,14 @@ test('tapping one cell in the episode grid queues exactly that episode', async (
   assert.equal(message.action, 'downloadBatch');
   assert.equal(message.items.length, 1, '点一格只下这一集');
   assert.equal(message.items[0].epKey, '1');
-  assert.equal(message.items[0].url, 'https://media.example/1.mp4', '要用站点解析出来的真实片源');
+  assert.equal(message.items[0].url, 'https://media.example/2.mp4', '要用站点解析出来的真实片源');
   assert.match(state.toastText(), /已加入下载/, '点完要给一句轻提示');
 });
 
 test('the grid shows each episode state and never offers a batch action', async () => {
   const state = fixture({ signedIn: true, episodes: [0, 1, 2] });
   state.ready();
-  state.click(state.document.getElementById('iosTitleDownload'));
+  state.click(state.siteDownload);
   state.window.__zhuijuDownloads('snapshot', [
     { id: 'b', showId: 'fixture', epKey: '1', epLabel: '第2集', title: '测试剧', status: 'running', received: 40, total: 100, path: '', size: 0, name: 'b.mp4' }
   ]);
@@ -544,7 +583,7 @@ test('a failed episode never lets the show look complete and an unknown length h
 test('each finished episode lands in my downloads, and replay stays idempotent', async () => {
   const state = fixture({ signedIn: true, episodes: [0, 1, 2] });
   state.ready();
-  state.click(state.document.getElementById('iosTitleDownload'));
+  state.click(state.siteDownload);
   const items = [];
   for (const key of [0, 1, 2]) {
     state.replies.push(batchReply('fixture', key));

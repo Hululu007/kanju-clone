@@ -62,7 +62,7 @@ final class DisplaySmokeUITests: XCTestCase {
 
     /// 网页里的按钮：只按 **button role** 找（`.any` 会把文本节点/隐藏面板里的节点也算上，
     /// 44292507284 的批量那一步就是这么点错的）。exact 用 aria-label 精确匹配，
-    /// dynamic 用 CONTAINS 匹配运行态文案（画面比例：适应/裁剪/拉伸）。
+    /// dynamic 用 CONTAINS 匹配运行态文案（画面模式：默认/拉伸/平铺）。
     private func webButton(_ app: XCUIApplication, labels: [String], exact: Bool = false,
                            timeout: TimeInterval = 15) -> XCUIElement? {
         let buttons = app.buttons
@@ -117,51 +117,22 @@ final class DisplaySmokeUITests: XCTestCase {
     /// 仅在真的找不到控制栏时才点一次画面（产品手势：点一下叫出/再点收起）。
     /// 点完立刻验证，若第一次正好把它收起就再点一次；两次都失败就留诊断并判红。
     private func ensureControlsVisible(_ app: XCUIApplication, timeout: TimeInterval = 12) -> Bool {
-        if webButton(app, labels: ["画面比例"], timeout: 2) != nil { return true }
+        if webButton(app, labels: ["画面模式"], timeout: 2) != nil { return true }
         for attempt in 1...2 {
             app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.42)).tap()
-            if webButton(app, labels: ["画面比例"], timeout: timeout / 2) != nil { return true }
+            if webButton(app, labels: ["画面模式"], timeout: timeout / 2) != nil { return true }
             _ = attempt
         }
-        fail("点了画面两次仍看不到控制栏（画面比例/退出全屏）", "missing-controls", app)
+        fail("点了画面两次仍看不到控制栏（画面模式/退出全屏）", "missing-controls", app)
         return false
     }
 
-    /// 档位是持久化的（localStorage kj-ios-fit），同一台模拟器上前一条用例可能把它留在
-    /// 拉伸；不能假设「点一下就是裁剪」。最多循环三档到目标，再返回那个真按钮。
-    private func cycleToFit(_ app: XCUIApplication, _ target: String) -> XCUIElement? {
-        var current = webButton(app, labels: ["画面比例"], timeout: 15)
-        for _ in 0..<4 {
-            guard let fit = current else { return nil }
-            let text = [fit.label, fit.value as? String ?? "", fit.identifier].joined(separator: " ")
-            if text.contains(target) { return fit }
-            fit.tap()
-            // 等档位文案真的翻转（不是拿到一个还没刷新的旧元素）
-            let deadline = Date().addingTimeInterval(8)
-            var next: XCUIElement?
-            while Date() < deadline {
-                if let candidate = webButton(app, labels: ["画面比例"], timeout: 1) {
-                    let candidateText = [candidate.label, candidate.value as? String ?? "", candidate.identifier]
-                        .joined(separator: " ")
-                    if candidateText != text { next = candidate; break }
-                }
-                RunLoop.current.run(until: Date().addingTimeInterval(0.2))
-            }
-            current = next
-        }
-        return nil
-    }
-
-    private func waitForFit(_ app: XCUIApplication, _ label: String, timeout: TimeInterval = 10) -> XCUIElement? {
-        let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
-            if let fit = webButton(app, labels: ["画面比例"], timeout: 1),
-               [fit.label, fit.value as? String ?? "", fit.identifier].joined(separator: " ").contains(label) {
-                return fit
-            }
-            RunLoop.current.run(until: Date().addingTimeInterval(0.25))
-        }
-        return nil
+    private func selectFit(_ app: XCUIApplication, mode: String) -> XCUIElement? {
+        guard let fit = webButton(app, labels: ["画面模式"], timeout: 10) else { return nil }
+        fit.tap()
+        let option = webButton(app, labels: ["画面" + mode], exact: true, timeout: 10)
+        option?.tap()
+        return option
     }
 
     // MARK: - 主链路：播放 → 下载本集 → 全屏三档 → 设置里的下载列表
@@ -213,7 +184,7 @@ final class DisplaySmokeUITests: XCTestCase {
         guard let downloadBack = requireButton(app, labels: ["返回"], exact: true, what: "download-page-back") else { return }
         downloadBack.tap()
 
-        // 03 全屏（适应档）：按真的「全屏播放」按钮，轮询真的「退出全屏」出现；
+        // 03 全屏（默认档）：按真的「全屏播放」按钮，轮询真的「退出全屏」出现；
         // 不能用归一化坐标盲点，也不能直接调 requestFullscreen 绕过产品手势。
         let full = requireButton(app, labels: ["全屏播放", "全屏"], exact: true, what: "toolbar-fullscreen")
         guard full != nil else { return }
@@ -227,31 +198,20 @@ final class DisplaySmokeUITests: XCTestCase {
         // 断言已经成功，这张才是最终的 03。
         attachScreenshot("03-fullscreen-adapt")
 
-        // 04 裁剪：档位按钮是「画面比例：X，点击切换」这一格。
-        // 档位跨用例持久化，先真点循环到适应（最多 3 档），不假设默认值。
-        let fit = cycleToFit(app, "适应")
+        // 04 裁剪：按新版「画面模式」下拉选择裁剪档。
+        let fit = selectFit(app, mode: "裁剪")
         if fit == nil {
-            fail("进全屏后循环不到「适应」档", "fit-not-contain", app)
+            fail("画面模式菜单没有裁剪档", "fit-not-cover", app)
             return
         }
-        // 计算样式 object-fit=contain 由 FitModeTests 真 WKWebView 断言；这里点真按钮看显示结果。
-        fit!.tap()
-        let coverFit = waitForFit(app, "裁剪")
-        guard let cover = coverFit else {
-            fail("点画面比例后没有切到「裁剪」", "fit-not-cover", app)
-            return
-        }
-        _ = cover
         attachScreenshot("04-fullscreen-cover")
 
         // 05 拉伸
-        cover.tap()
-        let fillFit = waitForFit(app, "拉伸")
-        guard let fill = fillFit else {
-            fail("第二次点画面比例后没有切到「拉伸」", "fit-not-fill", app)
+        let fill = selectFit(app, mode: "拉伸")
+        guard fill != nil else {
+            fail("画面模式菜单没有拉伸档", "fit-not-fill", app)
             return
         }
-        _ = fill
         attachScreenshot("05-fullscreen-fill")
 
         // 退出全屏，回到竖屏
@@ -299,8 +259,8 @@ final class DisplaySmokeUITests: XCTestCase {
             return
         }
         guard ensureControlsVisible(app) else { return }
-        // 上一条用例会把档位留在拉伸；循环到裁剪再拍，避免跨用例状态污染。
-        let coverFit = cycleToFit(app, "裁剪")
+        // 下拉选择裁剪档，确认持久化前的真实操作。
+        let coverFit = selectFit(app, mode: "裁剪")
         guard let coverLabel = coverFit else {
             fail("切到裁剪失败", "relaunch-cover", app)
             return
@@ -314,10 +274,13 @@ final class DisplaySmokeUITests: XCTestCase {
             fail("重进之后页面没加载", "relaunch-page", app)
             return
         }
-        let remembered = requireButton(app, labels: ["画面比例"], what: "fit-button-after-relaunch", timeout: 60)
-        guard let rememberedFit = remembered else { return }
-        let label = [rememberedFit.label, rememberedFit.value as? String ?? "", rememberedFit.identifier]
-            .joined(separator: " ")
+        let fullscreen = requireButton(app, labels: ["全屏播放", "全屏"], exact: true, what: "fullscreen-after-relaunch", timeout: 60)
+        guard fullscreen != nil else { return }
+        fullscreen!.tap()
+        guard ensureControlsVisible(app) else { return }
+        let rememberedFit = requireButton(app, labels: ["画面模式"], what: "fit-button-after-relaunch", timeout: 15)
+        guard let fitButton = rememberedFit else { return }
+        let label = [fitButton.label, fitButton.value as? String ?? "", fitButton.identifier].joined(separator: " ")
         if !label.contains("裁剪") {
             fail("重进 App 之后忘了上次选的画面档位：\(label)", "relaunch-not-remembered", app)
             return

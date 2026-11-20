@@ -138,78 +138,12 @@ final class InjectedUITests: XCTestCase, WKNavigationDelegate {
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { loaded?.fulfill() }
 
-    // MARK: - REG-001 横屏全屏的片名标题
-
-    func testLandscapePlaybackHidesTheTitleAndSurvivesAFullscreenRoundTrip() async throws {
-        let raw = try await javaScript("""
-        (function () {
-          var video = document.getElementById('video');
-          var full = document.getElementById('ppFull');
-          var label = document.getElementById('playerLabel');
-          var tools = document.getElementById('playTools');
-          if (!full || !label) return 'missing:' + [!!full, !!label].join(',');
-          var head = document.querySelector('.page-head');
-          var shot = function (tag) {
-            return tag + '=' + document.documentElement.hasAttribute('data-ios-immersive')
-              + '/' + getComputedStyle(label).display
-              + '/' + getComputedStyle(tools).display
-              + '/' + (head ? getComputedStyle(head).display : 'no-head');
-          };
-          var log = ['landscape=' + window.matchMedia('(orientation: landscape)').matches];
-          video.dispatchEvent(new Event('play', { bubbles: true }));
-          log.push(shot('playing'));
-          full.click();
-          log.push(shot('fullscreen'));
-          full.click();
-          log.push(shot('exited'));
-          video.dispatchEvent(new Event('play', { bubbles: true }));
-          log.push(shot('replayed'));
-          return log.join(' ');
-        })();
-        """)
-        let log = try XCTUnwrap(raw as? String)
-        XCTAssertTrue(log.contains("landscape=true"), "夹具不是横屏，这条用例就失去意义：\(log)")
-        XCTAssertTrue(log.contains("playing=true/none/none/none"), "横屏播放时片名小签、上方工具条、以及顶上的站点头栏都必须收起：\(log)")
-        XCTAssertTrue(log.contains("fullscreen=true/none/none/none"), "进全屏后标题必须收起：\(log)")
-        XCTAssertTrue(log.contains("exited=false/inline/block/block"), "退出全屏应回到页内布局：\(log)")
-        XCTAssertTrue(log.contains("replayed=true/none/none/none"),
-                      "退出全屏后再播（换集/重播）必须重新沉浸，标题和头栏都不能留在画面上（0.1.9 / 0.1.10 的 bug）：\(log)")
-    }
-
-    /// 站点的全屏按钮走标准全屏 API，那条路只靠 `:fullscreen` 规则和 fullscreenchange。
-    /// iPhone 模拟器没有元素全屏 API，所以这里验规则真的进了样式表（写错一个字符会被整条丢掉）。
-    func testStandardFullscreenRulesHideTheTitle() async throws {
-        let raw = try await javaScript("""
-        (function () {
-          var found = { label: 0, toolbar: 0, tabbar: 0 };
-          var sheets = document.styleSheets;
-          for (var s = 0; s < sheets.length; s++) {
-            var rules;
-            try { rules = sheets[s].cssRules; } catch (error) { continue; }
-            for (var r = 0; r < rules.length; r++) {
-              var selector = String(rules[r].selectorText || '');
-              if (selector.indexOf(':fullscreen') < 0 && selector.indexOf(':-webkit-full-screen') < 0) continue;
-              if (selector.indexOf('.p-label') >= 0) found.label++;
-              if (selector.indexOf('.pp-toolbar') >= 0) found.toolbar++;
-              if (selector.indexOf('.tabbar') >= 0) found.tabbar++;
-            }
-          }
-          return JSON.stringify(found);
-        })();
-        """)
-        let text = try XCTUnwrap(raw as? String)
-        let found = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Int])
-        XCTAssertGreaterThan(found["label"] ?? 0, 0, "标准全屏里没有隐藏片名的规则，标题会压在视频上：\(text)")
-        XCTAssertGreaterThan(found["toolbar"] ?? 0, 0, "标准全屏里工具条也要收起：\(text)")
-        XCTAssertGreaterThan(found["tabbar"] ?? 0, 0, "标准全屏里底部导航也要收起：\(text)")
-    }
-
     // MARK: - REG-002 单集下载页
 
     func testSingleEpisodeDownloadUsesTheDownloadPage() async throws {
         let raw = try await javaScript("""
         (function () {
-          var button = document.getElementById('iosTitleDownload');
+          var button = document.querySelector('[data-pw-act=dl]');
           if (!button) return 'missing-button';
           button.click();
           var cell = document.getElementById('iosDlCell6-18');
@@ -290,215 +224,7 @@ final class InjectedUITests: XCTestCase, WKNavigationDelegate {
 
     // MARK: - 播放设置与第三方播放器
 
-    func testCastButtonHandsTheLinkToTheSystemPlayerInOneTap() async throws {
-        let raw = try await javaScript("""
-        (function () {
-          var video = document.getElementById('video');
-          window.__pauseCalls = 0;
-          window.__paused = false;
-          video.pause = function () { window.__pauseCalls++; window.__paused = true; };
-          Object.defineProperty(video, 'paused', { configurable: true, get: function () { return window.__paused; } });
-          video.src = 'https://media.example/19.mp4';
-          var cast = document.getElementById('ppCast');
-          if (!cast) return 'missing-cast';
-          cast.click();
-          var menu = document.getElementById('ppCastMenu');
-          return JSON.stringify({
-            pauseCalls: window.__pauseCalls,
-            paused: window.__paused,
-            menuOpen: String(menu.className).indexOf('pc-cast-menu on') >= 0,
-            preference: localStorage.getItem('kj-ios-ext-player')
-          });
-        })();
-        """)
-        let text = try XCTUnwrap(raw as? String)
-        let result = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any])
-        XCTAssertEqual(result["menuOpen"] as? Bool, false, "默认应该直接交接，不该先弹菜单：\(text)")
-        XCTAssertEqual(result["pauseCalls"] as? Int, 1, "交接前必须暂停 App 内播放：\(text)")
-        XCTAssertEqual(result["paused"] as? Bool, true)
-        XCTAssertEqual(result["preference"] as? String, "1", "用过一次要记住这个默认：\(text)")
-
-        let message = try await awaitPlayerMessage()
-        XCTAssertEqual(message["action"] as? String, "share", "一次点击就要把这一集交给系统播放器列表：\(message)")
-        XCTAssertEqual(message["url"] as? String, "https://media.example/19.mp4")
-    }
-
-    func testCastMenuLeadsWithTheExternalPlayerRow() async throws {
-        let raw = try await javaScript("""
-        (function () {
-          /* 长按只看 event.target，普通 Event 就够了（TouchEvent 构造器在 Safari 上要求真 Touch 对象）。 */
-          document.getElementById('video').src = 'https://media.example/19.mp4';
-          var cast = document.getElementById('ppCast');
-          cast.dispatchEvent(new Event('touchstart', { bubbles: true }));
-          return 'armed';
-        })();
-        """)
-        XCTAssertEqual(raw as? String, "armed")
-        /* 长按要开菜单：等计时器（650ms）到点 */
-        try await Task.sleep(nanoseconds: 900_000_000)
-        let menu = try await javaScript("""
-        (function () {
-          var menu = document.getElementById('ppCastMenu');
-          if (!menu) return 'missing-menu';
-          var rows = [];
-          for (var i = 0; i < menu.children.length; i++) rows.push(menu.children[i].id);
-          return JSON.stringify({ open: String(menu.className).indexOf('pc-cast-menu on') >= 0, rows: rows });
-        })();
-        """)
-        let text = try XCTUnwrap(menu as? String)
-        let result = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any])
-        XCTAssertEqual(result["open"] as? Bool, true, "长按「外放」要打开完整菜单：\(text)")
-        let rows = try XCTUnwrap(result["rows"] as? [String])
-        XCTAssertEqual(rows.first, "ppPlayExternal", "第三方播放器要排在菜单第一行：\(text)")
-    }
-
-    func testSettingsSheetCanTurnTheOneTapHandoffOff() async throws {
-        let raw = try await javaScript("""
-        (function () {
-          var speed = document.getElementById('iosSettingSpeed');
-          var skipIntro = document.querySelector('[data-setting-toggle="kj-skip-intro"]');
-          if (!speed || !skipIntro) return 'missing-setting';
-          speed.value = '1.5';
-          speed.dispatchEvent(new Event('change', { bubbles: true }));
-          var video = document.getElementById('video');
-          var player = document.createElement('button');
-          player.id = 'kjSettingSpeed';
-          player.value = '1.5';
-          document.body.appendChild(player);
-          var before = skipIntro.getAttribute('aria-pressed');
-          skipIntro.click();
-          var after = skipIntro.getAttribute('aria-pressed');
-          var preference = localStorage.getItem('kj-skip-intro');
-          var cast = document.getElementById('ppCast');
-          var menu = document.getElementById('ppCastMenu');
-          menu.className = 'pc-cast-menu';
-          cast.click();
-          return JSON.stringify({
-            before: before, after: after, preference: preference, savedSpeed: localStorage.getItem('kj-speed'),
-            playerSpeed: video.playbackRate,
-            menuOpenAfterOptOut: String(menu.className).indexOf('pc-cast-menu on') >= 0
-          });
-        })();
-        """)
-        if raw as? String == "missing-setting" { XCTFail("新版设置里的共用播放项不存在"); return }
-        let text = try XCTUnwrap(raw as? String)
-        let result = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any])
-        XCTAssertEqual(result["before"] as? String, "true")
-        XCTAssertEqual(result["after"] as? String, "false")
-        XCTAssertEqual(result["preference"] as? String, "0", "设置页与播放器必须写同一个值")
-        XCTAssertEqual(result["savedSpeed"] as? String, "1.5", "设置页倍速必须同步到播放器的 kj-speed")
-        XCTAssertEqual(result["playerSpeed"] as? Double, 1.5)
-        XCTAssertEqual(result["menuOpenAfterOptOut"] as? Bool, true, "外放菜单保持可用：\(text)")
-    }
-
     // MARK: - REG-005 全屏只剩画面
-
-    /// 横屏全屏时画面上方那条 60px 深灰带（真机截图里完全挡住画面）。
-    /// 站点把滚动容器写成 `.main{margin-top:60px;height:calc(100vh - 60px)}`，
-    /// 注入层只把 `#player` 设成 fixed 时，WebKit 会拿这个滚动容器当参照，
-    /// 于是播放器少了顶部 60px，漏出页面背景。这里量的是真实几何值。
-    func testFullscreenCoversTheWholeScreenAndHidesItsControls() async throws {
-        let mounted = try await awaitValue("!!document.getElementById('ppFull') && !!document.getElementById('ppCtrl')")
-        XCTAssertTrue(mounted, "注入层没挂上控制栏，这条用例就失去了意义")
-        let raw = try await javaScript("""
-        (function () {
-          var video = document.getElementById('video');
-          var player = document.getElementById('player');
-          var main = document.querySelector('.main');
-          var full = document.getElementById('ppFull');
-          if (!full || !main) return 'missing:' + [!!full, !!main].join(',');
-          /* 全屏里“正在播放”是收起控制栏的前提，这里把暂停态钉住 */
-          window.__paused = false;
-          Object.defineProperty(video, 'paused', { configurable: true, get: function () { return window.__paused; } });
-          video.dispatchEvent(new Event('play', { bubbles: true }));
-          full.click();
-          var shot = function (tag) {
-            var p = player.getBoundingClientRect();
-            var m = main.getBoundingClientRect();
-            var top = document.elementFromPoint(window.innerWidth / 2, 8);
-            var bottom = document.elementFromPoint(window.innerWidth / 2, window.innerHeight - 8);
-            var bar = document.getElementById('ppCtrl');
-            var style = getComputedStyle(bar);
-            return {
-              tag: tag,
-              immersive: document.documentElement.hasAttribute('data-ios-immersive'),
-              player: [Math.round(p.left), Math.round(p.top), Math.round(p.width), Math.round(p.height)],
-              main: [Math.round(m.left), Math.round(m.top), Math.round(m.width), Math.round(m.height)],
-              topInPlayer: !!(top && (top === player || player.contains(top))),
-              topTag: top ? (top.id || top.tagName) : 'none',
-              bottomInPlayer: !!(bottom && (bottom === player || player.contains(bottom))),
-              barHidden: style.visibility === 'hidden' || Number(style.opacity) === 0
-            };
-          };
-          var log = [shot('fullscreen')];
-          video.click();
-          log.push(shot('tapped'));
-          video.click();
-          log.push(shot('tappedTwice'));
-          return JSON.stringify(log);
-        })();
-        """)
-        let text = try XCTUnwrap(raw as? String)
-        let shots = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(text.utf8)) as? [[String: Any]])
-        XCTAssertEqual(shots.count, 3, "三次测量的返回不对：\(text)")
-
-        let fullscreen = shots[0]
-        XCTAssertEqual(fullscreen["immersive"] as? Bool, true, "点全屏要进沉浸态：\(text)")
-        XCTAssertEqual(rect(fullscreen["player"]), [0, 0, 844, 390], "全屏时播放器必须铺满整块屏幕，顶部不能少 60px：\(text)")
-        XCTAssertEqual(rect(fullscreen["main"]), [0, 0, 844, 390], "注入层必须把站点那个从 60px 开始的滚动容器也铺满（它就是顶部深灰带的来源）：\(text)")
-        XCTAssertEqual(fullscreen["topInPlayer"] as? Bool, true, "屏幕最上面一行必须已经是视频，不能是页面背景/顶栏：\(text) top=\(fullscreen["topTag"] ?? "")")
-        XCTAssertEqual(fullscreen["barHidden"] as? Bool, true, "刚进全屏、正在播放时控制栏就该收起，不留遮罩：\(text)")
-
-        let tapped = shots[1]
-        XCTAssertEqual(tapped["barHidden"] as? Bool, false, "点一下屏幕要把控制栏叫出来：\(text)")
-        XCTAssertEqual(tapped["topInPlayer"] as? Bool, true, "叫出控制栏后画面顶部依然不能被遮住：\(text)")
-
-        let tappedTwice = shots[2]
-        XCTAssertEqual(tappedTwice["barHidden"] as? Bool, true, "再点一下要收起，不等计时器：\(text)")
-        XCTAssertEqual(tappedTwice["bottomInPlayer"] as? Bool, true, "收起后底下也不能留一条底栏或渐变：\(text)")
-
-        /* 点开控制栏后不再动手，几秒后它要自己消失 */
-        _ = try await javaScript("document.getElementById('video').click(); 'tapped'")
-        try await Task.sleep(nanoseconds: 3_600_000_000)
-        let auto = try await javaScript("""
-        (function () {
-          var bar = document.getElementById('ppCtrl');
-          var style = getComputedStyle(bar);
-          var bottom = document.elementFromPoint(window.innerWidth / 2, window.innerHeight - 8);
-          var player = document.getElementById('player');
-          return JSON.stringify({
-            hidden: style.visibility === 'hidden' || Number(style.opacity) === 0,
-            bottomInPlayer: !!(bottom && (bottom === player || player.contains(bottom)))
-          });
-        })();
-        """)
-        let autoText = try XCTUnwrap(auto as? String)
-        let autoResult = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(autoText.utf8)) as? [String: Any])
-        XCTAssertEqual(autoResult["hidden"] as? Bool, true, "播放中几秒不动，控制栏必须自己收起：\(autoText)")
-        XCTAssertEqual(autoResult["bottomInPlayer"] as? Bool, true, "自动收起后画面上不能留任何遮罩：\(autoText)")
-
-        /* 退出全屏回到页内：控制栏要回来，否则连退出/换集都点不到。
-           真机退出全屏会锁回竖屏（横屏+播放中会自动进沉浸，这是 0.1.9 起的设计），
-           模拟器里把网页帧转回竖屏来复现这一步；控制栏还有 0.18s 淡入，等它走完再读。 */
-        _ = try await javaScript("document.getElementById('ppFull').click(); 'exited'")
-        window.frame = CGRect(x: 0, y: 0, width: 390, height: 844)
-        webView.frame = CGRect(x: 0, y: 0, width: 390, height: 844)
-        window.rootViewController?.view.layoutIfNeeded()
-        try await Task.sleep(nanoseconds: 800_000_000)
-        let exited = try await javaScript("""
-        (function () {
-          var style = getComputedStyle(document.getElementById('ppCtrl'));
-          return JSON.stringify({
-            immersive: document.documentElement.hasAttribute('data-ios-immersive'),
-            visible: !(style.visibility === 'hidden' || Number(style.opacity) === 0)
-          });
-        })();
-        """)
-        let exitText = try XCTUnwrap(exited as? String)
-        let exitResult = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(exitText.utf8)) as? [String: Any])
-        XCTAssertEqual(exitResult["immersive"] as? Bool, false, "退出后要回到页内布局：\(exitText)")
-        XCTAssertEqual(exitResult["visible"] as? Bool, true, "页内布局里控制栏必须在：\(exitText)")
-    }
 
     // MARK: - REG-006 我的下载逐集列表
 
@@ -521,7 +247,7 @@ final class InjectedUITests: XCTestCase, WKNavigationDelegate {
           var running = document.getElementById('iosMineRunning');
           if (library || document.getElementById('iosDlRunning')) return 'legacy-library';
           document.getElementById('iosSettingsClose').click();
-          document.getElementById('iosTitleDownload').click();
+          document.querySelector('[data-pw-act=dl]').click();
           document.getElementById('iosDlListBtn').click();
           library = document.getElementById('iosMinePage');
           running = document.getElementById('iosMineRunning');
@@ -567,10 +293,10 @@ final class InjectedUITests: XCTestCase, WKNavigationDelegate {
 
     /// 真机上文件、下载列表、通知里都是「追剧AI 第19集」，看不出是哪部剧。
     func testDownloadedFileAndNowPlayingUseTheShowTitle() async throws {
-        _ = try await awaitValue("!!document.getElementById('iosTitleDownload')")
+        _ = try await awaitValue("!!document.querySelector('[data-pw-act=dl]')")
         let raw = try await javaScript("""
         (function () {
-          document.getElementById('iosTitleDownload').click();
+          document.querySelector('[data-pw-act=dl]').click();
           document.getElementById('iosDlCell6-18').click();
           var session = navigator.mediaSession || null;
           return JSON.stringify({
@@ -596,16 +322,16 @@ final class InjectedUITests: XCTestCase, WKNavigationDelegate {
 
     /// 下载状态变化后仍通过标题按钮进入下载页，不复活工具条旧入口。
     func testTitleDownloadEntryStaysSeparateAfterAFinishedDownload() async throws {
-        let mounted = try await awaitValue("!!document.getElementById('iosTitleDownload')")
+        let mounted = try await awaitValue("!!document.querySelector('[data-pw-act=dl]')")
         XCTAssertTrue(mounted, "标题旁没有下载入口")
         let raw = try await javaScript("""
         (function () {
-          document.getElementById('iosTitleDownload').click();
+          document.querySelector('[data-pw-act=dl]').click();
           var cell = document.getElementById('iosDlCell6-18');
           cell.click();
           if (!cell) return 'missing-cell';
           return JSON.stringify({
-            titleEntry: !!document.getElementById('iosTitleDownload'),
+            titleEntry: !!document.querySelector('[data-pw-act=dl]'),
             toolbarEntry: !!document.getElementById('ppToolDownload'),
             pageOpen: document.getElementById('iosDlPage').hidden === false,
             cellState: cell.getAttribute('aria-label')

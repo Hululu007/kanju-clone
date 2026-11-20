@@ -73,6 +73,7 @@ final class DownloadQueueUITests: XCTestCase, WKNavigationDelegate {
         <button class="pp-tool" id="settingsBtn" type="button">显示设置</button>
         <button class="pp-tool on" id="dmBtn" type="button">弹幕 开</button>
         <button class="pp-tool" id="pipBtn" type="button">画中画</button>
+        <button class="pp-tool" id="ppDownload" type="button" data-pw-act="dl">下载</button>
       </div>
       <div class="pp-settings" id="settingsPanel" hidden></div>
       <div class="ep-grid" id="epGrid">
@@ -131,8 +132,9 @@ final class DownloadQueueUITests: XCTestCase, WKNavigationDelegate {
               var parts = pair.split('=');
               if (parts[0]) params[decodeURIComponent(parts[0])] = decodeURIComponent(parts[1] || '');
             });
-            var idx = Number(params.ep);
-            var body = { showId: 'fixture', idx: idx, episodeNumber: idx + 1, verified: true,
+            var episodeNumber = Number(params.ep);
+            var idx = episodeNumber - 1;
+            var body = { showId: 'fixture', idx: idx, episodeNumber: episodeNumber, verified: true,
               kind: 'mp4', url: 'https://media.example/' + idx + '.mp4' };
             return Promise.resolve(new Response(JSON.stringify(body), {
               status: 200, headers: { 'content-type': 'application/json' }
@@ -169,12 +171,12 @@ final class DownloadQueueUITests: XCTestCase, WKNavigationDelegate {
 
     /// 新版由标题旁的下载按钮打开独立下载页；点一集立即解析并入队。
     func testEpisodePageDownloadsOneEpisodeFromTheNewDownloadPage() async throws {
-        _ = try await awaitValue("!!document.getElementById('iosTitleDownload')")
+        _ = try await awaitValue("!!document.querySelector('[data-pw-act=dl]')")
         let raw = try await javaScript("""
         (function () {
           return JSON.stringify({
             legacyBatch: !!document.getElementById('iosBatchBar'),
-            titleDownload: !!document.getElementById('iosTitleDownload'),
+            titleDownload: !!document.querySelector('[data-pw-act=dl]'),
             toolbarDownload: !!document.getElementById('ppToolDownload')
           });
         })();
@@ -187,7 +189,7 @@ final class DownloadQueueUITests: XCTestCase, WKNavigationDelegate {
 
         _ = try await javaScript("""
         (function () {
-          document.getElementById('iosTitleDownload').click();
+          document.querySelector('[data-pw-act=dl]').click();
           var cell = document.getElementById('iosDlCell6-0');
           if (!cell) return 'missing-cell';
           cell.click();
@@ -251,7 +253,7 @@ final class DownloadQueueUITests: XCTestCase, WKNavigationDelegate {
 
         let rendered = try await javaScript("""
         (function () {
-          document.getElementById('iosTitleDownload').click();
+          document.querySelector('[data-pw-act=dl]').click();
           document.getElementById('iosDlListBtn').click();
           var item = document.getElementById('iosMineRunning');
           if (!item) return 'missing-show';

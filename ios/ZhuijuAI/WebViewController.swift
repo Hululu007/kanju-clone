@@ -1,3 +1,4 @@
+import AVKit
 import LinkPresentation
 import UIKit
 import WebKit
@@ -24,13 +25,12 @@ final class WebViewController: UIViewController {
         static var hostName: String { testHome?.host ?? host }
     }
 
-    /// 播放器全屏状态由网页内的「全屏」按钮通过 WKScriptMessageHandler 通知。
+    /// 网页通过 WKScriptMessageHandler 发来的动作。0.1.19 起播放器和全屏都归网站自己的播放器，
+    /// 这里只剩下载、分享和本地文件这几件事。
     private enum PlayerAction: String {
-        case fullscreen
-        case inline
         /// 网页请求把可播放地址交给系统分享面板（外部播放器 / AirPlay 的入口）。
         case share
-        /// 下载一集到沙盒（网页已做过登录门控，这里再核一次）。
+        /// 下载一集到沙盒（0.1.19 起不再看 App 登录态，只看地址能不能下载）。
         case download
         /// 批量入队（选集页「一键全集」「从本集往后」「下载已选」都走这条）。
         case downloadBatch
@@ -43,6 +43,8 @@ final class WebViewController: UIViewController {
         case downloadSync
         /// 下载完成后用系统应用列表打开本地文件。
         case openLocal
+        /// 已下载列表点一集：用系统播放器离线播放本地文件。
+        case playLocal
         /// 已下载列表左滑删除：删掉这一集在本地的那个文件（只删这一个）。
         case deleteLocal
     }
@@ -102,10 +104,10 @@ final class WebViewController: UIViewController {
                 target?.cancelDownload()
             case PlayerAction.openLocal.rawValue:
                 target?.presentLocalFile(path: body["path"] as? String, name: body["name"] as? String)
+            case PlayerAction.playLocal.rawValue:
+                target?.presentLocalPlayback(path: body["path"] as? String)
             case PlayerAction.deleteLocal.rawValue:
                 target?.deleteLocalFile(path: body["path"] as? String)
-            default:
-                target?.apply(playerAction: action)
             }
         }
     }
@@ -118,8 +120,6 @@ final class WebViewController: UIViewController {
     private let downloader = MediaDownloader.shared
     private var lastFailedURL: URL?
     private var safeAreaConstraints: [NSLayoutConstraint] = []
-    private var fullscreenConstraints: [NSLayoutConstraint] = []
-    private var isPlayerFullscreen = false
 
     /// 站点用它区分「App 内」和浏览器。版本号从包信息里取，别再手写 ——
     /// 0.1.2 到 0.1.5 每版都靠改这一行字符串，一忘就会和包版本对不上。
@@ -225,21 +225,14 @@ final class WebViewController: UIViewController {
         .lightContent
     }
 
-    override var prefersStatusBarHidden: Bool {
-        isPlayerFullscreen
-    }
-
-    override var prefersHomeIndicatorAutoHidden: Bool {
-        isPlayerFullscreen
-    }
-
-    /// 全屏时锁横屏，其余时候保留系统自动旋转。
+    /// 播放和全屏都交给 WKWebView 里的网页播放器，App 不再锁方向。
     override var supportedInterfaceOrientations: UIInterfaceOrientationMask {
-        Self.orientationMask(isFullscreen: isPlayerFullscreen)
+        Self.orientationMask(isFullscreen: false)
     }
 
     static func orientationMask(isFullscreen: Bool) -> UIInterfaceOrientationMask {
-        isFullscreen ? .landscape : .portrait
+        _ = isFullscreen
+        return .allButUpsideDown
     }
 
     override var shouldAutorotate: Bool {
@@ -259,13 +252,6 @@ final class WebViewController: UIViewController {
             webView.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor),
             webView.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
             webView.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor),
-        ]
-        // 全屏播放时铺满整块屏幕，横屏不因刘海安全区留下黑边
-        fullscreenConstraints = [
-            webView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            webView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            webView.topAnchor.constraint(equalTo: view.topAnchor),
-            webView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
         ]
         NSLayoutConstraint.activate(safeAreaConstraints + [
             progressView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
@@ -323,10 +309,10 @@ final class WebViewController: UIViewController {
 
     // MARK: - 下载
 
-    /// 网页侧已经做过登录门控；这里再核一次 `signedIn`，不接匿名下载请求。
+    /// 网站自己的下载按钮只带 url / name；缺 id 时补一个，不能静默丢掉。
     fileprivate func beginDownload(_ body: [String: Any]) {
-        guard body["signedIn"] as? Bool == true,
-              let id = body["id"] as? String, !id.isEmpty else { return }
+        guard body["signedIn"] as? Bool != false else { return }
+        let id = (body["id"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? "dl-(UUID().uuidString)"
         guard let link = Self.shareableURL(body["url"] as? String) else {
             sendDownloadEvent(["event": "failed", "id": id, "reason": "这条线路的地址不能下载"])
             return
@@ -345,8 +331,8 @@ final class WebViewController: UIViewController {
 
     /// 批量入队：一条消息带整批选集，原生层负责去重、并发上限和持久化。
     fileprivate func beginBatchDownload(_ body: [String: Any]) {
-        guard body["signedIn"] as? Bool == true else {
-            sendDownloadEvent(["event": "failed", "id": "batch", "reason": "登录后才能批量下载"])
+        guard body["signedIn"] as? Bool != false else {
+            sendDownloadEvent(["event": "failed", "id": "batch", "reason": "下载被拒绝"])
             return
         }
         guard let items = body["items"] as? [[String: Any]], !items.isEmpty else { return }
@@ -440,6 +426,21 @@ final class WebViewController: UIViewController {
         }
     }
 
+    fileprivate func presentLocalPlayback(path: String?) {
+        guard let path = path, !path.isEmpty else { return }
+        let fileURL = URL(fileURLWithPath: path)
+        guard FileManager.default.fileExists(atPath: fileURL.path) else {
+            NSLog("playLocal missing: %@", path)
+            return
+        }
+        let player = AVPlayer(url: fileURL)
+        let controller = AVPlayerViewController()
+        controller.player = player
+        controller.modalPresentationStyle = .fullScreen
+        let presenter = presentedViewController ?? self
+        presenter.present(controller, animated: true) { player.play() }
+    }
+
     fileprivate func presentLocalFile(path: String?, name: String?) {
         guard let path = path, !path.isEmpty else { return }
         let fileURL = URL(fileURLWithPath: path)
@@ -461,48 +462,6 @@ final class WebViewController: UIViewController {
         let script = "window.__zhuijuDownload && window.__zhuijuDownload(\(text));"
         DispatchQueue.main.async { [weak self] in
             self?.webView.evaluateJavaScript(script, completionHandler: nil)
-        }
-    }
-
-    fileprivate func apply(playerAction: String) {
-        guard let action = PlayerAction(rawValue: playerAction) else { return }
-        setPlayerFullscreen(action == .fullscreen)
-    }
-
-    private func setPlayerFullscreen(_ on: Bool) {
-        guard isPlayerFullscreen != on else {
-            if !on { requestRotation(landscape: false) }
-            return
-        }
-        isPlayerFullscreen = on
-        NSLayoutConstraint.deactivate(on ? safeAreaConstraints : fullscreenConstraints)
-        NSLayoutConstraint.activate(on ? fullscreenConstraints : safeAreaConstraints)
-        setNeedsStatusBarAppearanceUpdate()
-        setNeedsUpdateOfHomeIndicatorAutoHidden()
-        if #available(iOS 16.0, *) {
-            setNeedsUpdateOfSupportedInterfaceOrientations()
-        }
-        requestRotation(landscape: on)
-    }
-
-    private func requestRotation(landscape: Bool) {
-        if #available(iOS 16.0, *) {
-            let mask: UIInterfaceOrientationMask = landscape ? .landscape : .portrait
-            let update = { [weak self] in
-                guard let self = self, let scene = self.view.window?.windowScene else { return }
-                scene.requestGeometryUpdate(.iOS(interfaceOrientations: mask)) { _ in
-                    // 控制器 orientation mask 已同步更新，系统之后可继续尝试旋转。
-                }
-            }
-            update()
-            // 某些 iOS 版本在视频 surface 切换期间会忽略第一次 geometry 请求。
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: update)
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8, execute: update)
-        } else {
-            // iOS 15 没有公开的强制旋转接口，用 KVC 触发同一套系统旋转流程
-            let target: UIInterfaceOrientation = landscape ? .landscapeRight : .portrait
-            UIDevice.current.setValue(target.rawValue, forKey: "orientation")
-            UIViewController.attemptRotationToDeviceOrientation()
         }
     }
 

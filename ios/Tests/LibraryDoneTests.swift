@@ -40,7 +40,8 @@ final class LibraryDoneTests: XCTestCase, WKNavigationDelegate {
       <div class="detail-info"><h1>测试剧</h1></div>
       <section id="player"><video id="video" playsinline preload="metadata"></video></section>
       <div id="playTools"><button id="settingsBtn" type="button">显示设置</button>
-      <button id="dmBtn" type="button">弹幕</button></div>
+      <button id="dmBtn" type="button">弹幕</button>
+      <button id="ppDownload" type="button" data-pw-act="dl">下载</button></div>
       <div id="settingsPanel" hidden></div>
       <div id="epGrid">
         <button class="ep on" type="button" data-ep="0">第1集</button>
@@ -120,7 +121,7 @@ final class LibraryDoneTests: XCTestCase, WKNavigationDelegate {
     func webView(_ w: WKWebView, didFinish navigation: WKNavigation!) { loaded?.fulfill() }
 
     func testFinishedSingleEpisodesAppearInMyDownloads() async throws {
-        _ = try await javaScript("document.getElementById('iosTitleDownload').click(); true;")
+        _ = try await javaScript("document.querySelector('[data-pw-act=dl]').click(); true;")
         var items: [[String: Any]] = []
         for index in 0..<5 {
             _ = try await javaScript("document.getElementById('iosDlCell6-\(index)').click(); true;")
