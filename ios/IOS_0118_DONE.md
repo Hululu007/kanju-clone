@@ -2,6 +2,17 @@
 
 分支：`fix/ios-0.1.19-player-download`　版本：0.1.19（build 21）
 
+## 交付信息（2026-11-20）
+
+- 已合入并推送到 `main`，出包提交：`0b58660dfccbacc5c67e9783d0a6ce703c188cd4`
+  （`Bump the packaging guard to 0.1.19 / build 21`；父提交 `e03afd7` 是恢复 `default: break` 的编译修复，再往前是审核通过的 `2b06e46`）
+- 工作流：`.github/workflows/ios-ipa-only.yml`（只打包，不跑任何测试 job），run id **44669412854**，结论 success
+- 安装包：`C:\Users\kenzh\Desktop\ZhuijuAI-0.1.18-build21-unsigned.ipa`（4398810 字节；文件名按 Ken 指定，**包内实际版本 0.1.19 / build 21**）
+- 包内核对：`CFBundleIdentifier=org.dpdns.zhuiju.ios`、`CFBundleShortVersionString=0.1.19`、`CFBundleVersion=21`、`MinimumOSVersion=15.0`
+- SHA256：`9fa2fa751754738cb98717ee510e5689c26970d5d8be7d6ceab7868f615bdd35`（与工作流产出的 `.sha256` 一致）
+- 校验日志：`C:\Users\kenzh\AppData\Local\Temp\ios-0.1.19-ipa-verify.log`；出包日志：`...\ios-0.1.19-package.log`、`...\ios-0.1.19-watch.log`
+- **真机未测**：这一包只证明能编译、能打包、能校验，还没有在手机上装过、点过。
+
 这份是给 Ken 看的大白话说明：上次真机为什么看不到下载、这次改了什么、真机上还要确认哪几件事。
 
 ## 一、上次真机为什么「点下载没反应」
@@ -54,5 +65,5 @@ node --test ios/Tests/bootstrap.test.mjs ios/Tests/downloadQueue.test.mjs
 
 ## 五、还没做的事
 
-- 没有合 `main`，没有推 GitHub，没有跑云端测试，也没有打包发版（按这次的要求）。
-- 真机测完再决定要不要出包。
+- 已合 `main` 并出包（见上面的交付信息）；**没有跑任何云端测试 job**，也没有发版。
+- **真机一条都还没测**：上面第四节那些项目需要在手机上逐条走一遍，才算这版真的可用。
