@@ -58,8 +58,8 @@ jobs:
           test -d "$APP"
           VERSION=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Info.plist")
           BUILD=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP/Info.plist")
-          test "$VERSION" = "0.1.18"
-          test "$BUILD" = "20"
+          test "$VERSION" = "0.1.19"
+          test "$BUILD" = "21"
           NAME="ZhuijuAI-${VERSION}-build${BUILD}-unsigned"
           mkdir Payload
           cp -R "$APP" Payload/
