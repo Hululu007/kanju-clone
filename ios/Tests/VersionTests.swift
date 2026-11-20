@@ -5,13 +5,17 @@ import XCTest
 /// 版本号写在 UA 里。0.1.2 到 0.1.5 每发一版都要手改那一行字符串，
 /// 忘一次就会和包版本对不上，所以这里直接把两者钉在一起。
 final class VersionTests: XCTestCase {
-    /// 全屏交给网页播放器，App 在任何模式下都不锁方向：横竖屏都必须能转。
-    func testRotationStaysFreeInEveryDirection() {
-        XCTAssertEqual(WebViewController.allowedOrientations, .allButUpsideDown)
-        XCTAssertTrue(WebViewController.allowedOrientations.contains(.portrait))
-        XCTAssertTrue(WebViewController.allowedOrientations.contains(.landscapeLeft))
-        XCTAssertTrue(WebViewController.allowedOrientations.contains(.landscapeRight))
-        XCTAssertFalse(WebViewController.allowedOrientations.contains(.portraitUpsideDown))
+    /// 全屏只有两态：窗口模式竖屏（视频留在详情页原位），站点播放器全屏时横屏铺满。
+    /// 退出全屏必须回到竖屏原位继续播放，不能停在竖屏全屏或其它中间状态。
+    func testFullscreenSwitchesBetweenPortraitAndLandscape() {
+        XCTAssertEqual(WebViewController.interfaceOrientations(forFullscreen: false), .portrait,
+                       "默认窗口模式只允许竖屏")
+        let fullscreen = WebViewController.interfaceOrientations(forFullscreen: true)
+        XCTAssertTrue(fullscreen.contains(.landscapeLeft), "全屏要能横屏")
+        XCTAssertTrue(fullscreen.contains(.landscapeRight), "左右横屏都行，跟着手握方向转")
+        XCTAssertFalse(fullscreen.contains(.portrait), "全屏不许停在竖屏，也不许有竖屏全屏")
+        XCTAssertEqual(WebViewController.interfaceOrientations(forFullscreen: false), .portrait,
+                       "退出全屏必须回竖屏")
     }
 
     /// 网站只带 url / name：缺 id 时按「剧号 + 集号」补一个稳定 id，同一集重复点不会变成两条记录。

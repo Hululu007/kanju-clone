@@ -569,7 +569,7 @@ test('a failed episode never lets the show look complete and an unknown length h
     { id: 'b', showId: 'fixture', epKey: '1', epLabel: '第2集', title: '测试剧', status: 'failed', received: 0, total: 0, path: '', size: 0, name: 'b.mp4' },
     { id: 'c', showId: 'fixture', epKey: '2', epLabel: '第3集', title: '测试剧', status: 'paused', received: 1048576, total: 0, path: '', size: 0, name: 'c.mp4' }
   ]);
-  const queueNode = state.document.getElementById('iosMineRunning');
+  const queueNode = state.document.getElementById('iosMineQueue');
   const text = state.document.getElementById('iosMineBody').textContent;
   assert.equal(queueNode, null, '失败或暂停任务不伪装成正在下载');
   assert.match(text, /还没有下载完成的剧集/, text);
@@ -645,7 +645,9 @@ test('a show already in the library by title keeps its queue progress when the r
   const list = state.document.getElementById('iosMineBody');
   const show = list.querySelector('.ip-show');
   assert.equal(list.querySelectorAll('.ip-show').length, 1, '同一部剧只能有一条');
-  assert.ok(list.querySelector('#iosMineRunning'), '运行队列在我的下载里单独显示');
+  assert.ok(state.document.getElementById('iosMineQueue'), '运行队列在我的下载里单独显示');
+  assert.equal(state.document.getElementById('iosMineQueue').querySelectorAll('.ios-dl-task').length, 3,
+    '两集在跑、一集排队，各自一行，按剧名 + 集号显示');
   assert.equal(show.querySelector('.ips-meta').textContent, '已下载 1 集 · 0.0 MB',
     '已有的第19集不能被队列合并弄丢');
   assert.deepEqual(show.parentNode.querySelectorAll('.ip-eptitle').map((episode) => episode.textContent), ['第19集']);

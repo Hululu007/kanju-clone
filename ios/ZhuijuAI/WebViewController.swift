@@ -47,6 +47,8 @@ final class WebViewController: UIViewController {
         case playLocal
         /// 已下载列表左滑删除：删掉这一集在本地的那个文件（只删这一个）。
         case deleteLocal
+        /// 站点播放器进入 / 退出全屏：只切屏幕方向（全屏横屏、退出竖屏），不碰页面几何。
+        case playerFullscreen
     }
 
     /// 系统分享面板里的链接项：声明成标准 URL（`public.url`）并带上链接元数据，
@@ -108,6 +110,8 @@ final class WebViewController: UIViewController {
                 target?.presentLocalPlayback(path: body["path"] as? String)
             case PlayerAction.deleteLocal.rawValue:
                 target?.deleteLocalFile(path: body["path"] as? String)
+            case PlayerAction.playerFullscreen.rawValue:
+                target?.setPlayerFullscreen(body["on"] as? Bool ?? false)
             default:
                 /* 网页可能先上新动作、App 还没跟上：不认识的 action 直接忽略，不能因此崩或卡住。 */
                 break
@@ -136,6 +140,11 @@ final class WebViewController: UIViewController {
         configuration.websiteDataStore = .default()
         configuration.allowsInlineMediaPlayback = true
         configuration.mediaTypesRequiringUserActionForPlayback = []
+        if #available(iOS 15.4, *) {
+            /* iPhone 的 WKWebView 默认关掉「元素全屏」：站点播放器调 requestFullscreen() 会被拒绝，
+               真机上点全屏就像没反应。打开后站点自己的全屏 API 才真正生效，铺满交给 WebKit。 */
+            configuration.preferences.isElementFullscreenEnabled = true
+        }
         configuration.preferences.javaScriptCanOpenWindowsAutomatically = false
         configuration.defaultWebpagePreferences.preferredContentMode = .mobile
         configuration.applicationNameForUserAgent = WebViewController.userAgent
@@ -228,15 +237,56 @@ final class WebViewController: UIViewController {
         .lightContent
     }
 
-    /// 横竖屏都由系统决定：全屏是网页播放器自己的事，App 不在任何模式下锁方向。
-    static let allowedOrientations: UIInterfaceOrientationMask = .allButUpsideDown
+    /// 全屏只有两种状态，没有中间态：
+    /// 1. 窗口模式（默认）：竖屏，视频留在详情页原来的位置，下面的剧集和简介照常滚动；
+    /// 2. 全屏模式：点站点播放器自己的全屏按钮后横屏铺满整块屏幕。
+    /// 退出全屏（站点退出按钮或返回）必须回到详情页原位继续播放，所以这里只改屏幕方向，
+    /// 不重建页面、不动播放进度，也不碰网页的尺寸和样式。
+    private static var playerFullscreenActive = false
+
+    /// 两种状态各自允许的方向：平时只竖屏，全屏只横屏（左右都行，跟着手握方向转）。
+    static func interfaceOrientations(forFullscreen fullscreen: Bool) -> UIInterfaceOrientationMask {
+        fullscreen ? .landscape : .portrait
+    }
+
+    /// 界面和 AppDelegate 共用同一份判断：网页全屏是 WebKit 自己弹的控制器，
+    /// 它不看我们 VC 的 supportedInterfaceOrientations，只认 AppDelegate 返回的全局掩码。
+    static var supportedOrientations: UIInterfaceOrientationMask {
+        interfaceOrientations(forFullscreen: playerFullscreenActive)
+    }
 
     override var supportedInterfaceOrientations: UIInterfaceOrientationMask {
-        Self.allowedOrientations
+        Self.supportedOrientations
     }
 
     override var shouldAutorotate: Bool {
         true
+    }
+
+    /// 网页播放器报告全屏状态：进入 → 锁横屏铺满；退出 → 回竖屏，页面与进度保持原样。
+    fileprivate func setPlayerFullscreen(_ active: Bool) {
+        guard Self.playerFullscreenActive != active else { return }
+        Self.playerFullscreenActive = active
+        applyOrientation(Self.supportedOrientations)
+        /* WebKit 的网页全屏控制器带弹出 / 收起动画，动画期间的方向请求可能被系统拒绝；
+           动画结束后再要一次，避免真机上「第一次进全屏还是竖屏」。 */
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+            guard let self = self, Self.playerFullscreenActive == active else { return }
+            self.applyOrientation(Self.supportedOrientations)
+        }
+    }
+
+    /// iOS 16 起可以主动请求旋转；更老的系统只能让系统重新评估一次支持方向。
+    private func applyOrientation(_ mask: UIInterfaceOrientationMask) {
+        if #available(iOS 16.0, *) {
+            setNeedsUpdateOfSupportedInterfaceOrientations()
+        } else {
+            /* iOS 15 没有主动改方向的公开 API：换完掩码后让系统重新问一次。 */
+            UIViewController.attemptRotationToDeviceOrientation()
+            return
+        }
+        guard let scene = view.window?.windowScene else { return }
+        scene.requestGeometryUpdate(.iOS(interfaceOrientations: mask)) { _ in }
     }
 
     private func configureLayout() {

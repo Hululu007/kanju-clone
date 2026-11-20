@@ -310,10 +310,15 @@
       '.ios-page .ip-cell.busy .ip-cell-state,.ios-page .ip-cell.done .ip-cell-state{color:#16e09d}',
       '.ios-page #iosDlListBtn{flex:1 1 auto;appearance:none;border:0;border-radius:10px;background:#16e09d;color:#04241a;font-size:14px;font-weight:800;padding:12px;min-height:46px}',
       '.ios-page .ip-sub{font-size:12px;color:rgba(232,241,245,.62);margin:2px 0 10px}',
-      '.ios-page #iosMineRunning{display:flex;gap:10px;align-items:center;padding:10px;border-radius:10px;background:rgba(22,224,157,.12);margin-bottom:12px}',
-      '.ios-page #iosMineRunning .imr-main{flex:1 1 auto;min-width:0}',
-      '.ios-page #iosMineRunning .imr-title{font-size:13px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
-      '.ios-page #iosMineRunning .imr-meta{font-size:11px;color:rgba(232,241,245,.66)}',
+      '.ios-page #iosMineQueue{display:flex;flex-direction:column;gap:8px;margin-bottom:12px}',
+      '.ios-page .ios-dl-task{padding:10px 12px;border-radius:10px;background:rgba(22,224,157,.12)}',
+      '.ios-page .ios-dl-task-head{display:flex;align-items:center;gap:8px;font-size:13px;font-weight:700}',
+      '.ios-page .ios-dl-task-title{flex:1 1 auto;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
+      '.ios-page .ios-dl-task-state{flex:none;font-size:12px;font-weight:700;color:#16e09d}',
+      '.ios-page .ios-dl-task progress{display:block;width:100%;height:6px;margin-top:8px;accent-color:#16e09d}',
+      '.ios-page .ios-dl-task progress[hidden]{display:none!important}',
+      '.ios-page .ios-dl-task-meta{margin-top:6px;font-size:11px;color:rgba(232,241,245,.66)}',
+      "html[data-theme='light'] .ios-page .ios-dl-task{background:rgba(18,153,111,.12)}",
       '.ios-page .ip-show{display:flex;gap:10px;align-items:center;padding:12px 0;border-bottom:1px solid rgba(255,255,255,.06)}',
       '.ios-page .ip-show img{width:44px;height:62px;border-radius:6px;object-fit:cover;background:#182028;flex:none}',
       '.ios-page .ip-show .ips-main{flex:1 1 auto;min-width:0}',
@@ -344,9 +349,8 @@
       '.ios-set-row i{position:relative;flex:none;width:40px;height:24px;border-radius:16px;background:#66736c}.ios-set-row i::after{content:"";position:absolute;top:3px;left:3px;width:18px;height:18px;border-radius:50%;background:#fff}.ios-set-row.on i{background:#168344}.ios-set-row.on i::after{left:19px}',
       '.ios-set-seg{display:flex;padding:2px;border-radius:8px;background:var(--settings-line)}.ios-set-seg button,.ios-set-card select{border:0;border-radius:6px;background:var(--settings-card);color:inherit;padding:7px 10px;font:inherit}.ios-set-seg button.on{background:#168344;color:#fff}',
       '#iosDanmakuSettings:not([hidden]){display:grid;gap:12px;padding:8px 0 14px}#iosDanmakuSettings label{display:flex;align-items:center;justify-content:space-between;gap:12px}#iosDanmakuSettings input{width:55%;accent-color:#168344}',
-      '.ios-page #iosMineRunningProgress{display:block;width:100%;height:6px;margin-top:8px;accent-color:#16e09d}',
-      '.ios-page #iosMineRunningProgress[hidden]{display:none}',
-      '.ios-page #iosMineRunningPath{display:block;margin-top:6px;color:rgba(232,241,245,.58);font:11px/1.4 -apple-system,BlinkMacSystemFont,sans-serif;overflow-wrap:anywhere}',
+      '.ios-page .ios-dl-queue-note{font-size:11px;color:rgba(232,241,245,.58);margin:2px 0 10px}',
+      "html[data-theme='light'] .ios-page .ios-dl-queue-note{color:rgba(15,20,24,.55)}",
       '#iosOpenDownloaded{margin-top:10px;padding:8px 12px;border-radius:8px;background:#16e09d;color:#04241a;font-weight:700}',
       '#iosOpenDownloaded[hidden]{display:none!important}',
       /* 设置里的下载：按剧列出封面/片名/下了哪几集，再跟正在下载的进度 */
@@ -374,6 +378,8 @@
          长列表明显掉帧。换成等效的半透明底色（观感基本不变）。 */
       '.topbar,.page-head{-webkit-backdrop-filter:none!important;backdrop-filter:none!important;background:linear-gradient(180deg,rgba(10,20,28,.97),rgba(10,20,28,.9))!important}',
       'html[data-theme=\'light\'] .topbar,html[data-theme=\'light\'] .page-head{background:linear-gradient(180deg,rgba(255,255,255,.97),rgba(255,255,255,.92))!important}',
+      /* 首页顶栏保持 0.1.17 的样子：App 不往顶栏塞设置齿轮，设置只从「我的」菜单进。 */
+      '.topbar [data-action="settings"]{display:none!important}',
       '.tabbar{-webkit-backdrop-filter:none!important;backdrop-filter:none!important}',
       /* 首页一屏有大量海报角标；逐卡 backdrop-filter 会让 WebKit 在惯性滚动中反复重算模糊。 */
       '.p-badge,.p-heat{-webkit-backdrop-filter:none!important;backdrop-filter:none!important}',
@@ -455,8 +461,42 @@
       if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.iosPlayer) {
         window.webkit.messageHandlers.iosPlayer.postMessage(payload);
       }
-    } catch (error) { /* 原生通道不可用时退化为页面内全屏 */ }
+    } catch (error) { /* 原生通道不可用时静默忽略：全屏仍由站点播放器自己处理 */ }
   }
+
+  /* 全屏只汇报「进 / 出」，不改页面几何、不藏站点控件、不自己画全屏层：
+     原生收到后把屏幕锁到横屏（进）或回竖屏（出），播放器仍是站点自己的那一个。
+     退出后页面没有被重建，所以详情页位置和播放进度都保持原样。 */
+  var playerFullscreenOn = null;
+
+  function reportPlayerFullscreen(active) {
+    var on = !!active;
+    if (playerFullscreenOn === on) return;
+    playerFullscreenOn = on;
+    postNative({ action: 'playerFullscreen', on: on });
+  }
+
+  function currentFullscreenElement() {
+    if (document.fullscreenElement) return document.fullscreenElement;
+    if (document.webkitFullscreenElement) return document.webkitFullscreenElement;
+    return null;
+  }
+
+  /* 站点播放器走标准 Fullscreen API：进 / 出都会派发 fullscreenchange。 */
+  document.addEventListener('fullscreenchange', function () {
+    reportPlayerFullscreen(!!currentFullscreenElement());
+  }, true);
+  document.addEventListener('webkitfullscreenchange', function () {
+    reportPlayerFullscreen(!!currentFullscreenElement());
+  }, true);
+
+  /* <video> 直接调 webkitEnterFullscreen 时只派发这两个事件，而且不冒泡，只能在 document 上捕获。 */
+  document.addEventListener('webkitbeginfullscreen', function () {
+    reportPlayerFullscreen(true);
+  }, true);
+  document.addEventListener('webkitendfullscreen', function () {
+    reportPlayerFullscreen(false);
+  }, true);
 
   var settingsSheet = null;
 
@@ -1008,20 +1048,131 @@
     renderMinePageIfOpen();
   }
 
-  function updateMineProgress(total, received) {
-    var page = document.getElementById('iosMinePage');
-    if (!page || page.hidden) return;
-    var meta = document.getElementById('iosMineRunningMeta');
-    if (meta) {
+  /* 下载中的一集：剧名 + 第几集 + 进度条 + 百分比。 */
+  var QUEUE_RANK = { running: 0, queued: 1, paused: 2 };
+  var QUEUE_TEXT = { running: '下载中', queued: '排队中', paused: '已暂停' };
+
+  function batchShowOf(showId) {
+    var list = readBatchShows();
+    for (var i = 0; i < list.length; i++) {
+      if (String(list[i] && list[i].id) === String(showId)) return list[i];
+    }
+    return null;
+  }
+
+  /* 剧名优先级：原生事件带的 > 「一键全集」记住的 > 片库里的 > 当前页面。 */
+  function taskShowTitle(task) {
+    var title = String((task && task.title) || '').trim();
+    if (title) return title;
+    if (task && downloadState.id && String(task.id) === String(downloadState.id) && downloadState.show) {
+      return String(downloadState.show);
+    }
+    var batch = batchShowOf(task && task.showId);
+    if (batch && batch.title) return String(batch.title);
+    var shows = readLibrary().shows;
+    for (var i = 0; i < shows.length; i++) {
+      if (String(shows[i].id) === String(task && task.showId)) return String(shows[i].title);
+    }
+    var meta = showMeta();
+    return String(meta.title || '');
+  }
+
+  function taskEpisodeLabel(task) {
+    var label = String((task && (task.epLabel || task.ep)) || '').trim();
+    if (label) return label;
+    if (task && downloadState.id && String(task.id) === String(downloadState.id) && downloadState.ep) {
+      return String(downloadState.ep);
+    }
+    if (task && task.epKey !== undefined && task.epKey !== null && String(task.epKey) !== '') {
+      return '第' + task.epKey + '集';
+    }
+    return '';
+  }
+
+  function queueTaskRows() {
+    var rows = [];
+    var seen = {};
+    for (var i = 0; i < queueTasks.length; i++) {
+      var task = queueTasks[i];
+      if (!task || !task.id) continue;
+      var status = String(task.status || '');
+      if (status !== 'running' && status !== 'queued') continue;
+      seen[String(task.id)] = true;
+      rows.push(task);
+    }
+    /* 单集下载还没进快照时，用网页手里的当前状态补一行，进度不会断档。 */
+    if (downloadState.busy && downloadState.id && !seen[String(downloadState.id)]) {
+      rows.unshift({
+        id: downloadState.id,
+        status: 'running',
+        title: downloadState.show,
+        epLabel: downloadState.ep,
+        received: downloadState.received,
+        total: downloadState.total
+      });
+    }
+    rows.sort(function (left, right) {
+      var a = QUEUE_RANK[String(left.status)];
+      var b = QUEUE_RANK[String(right.status)];
+      return (a === undefined ? 9 : a) - (b === undefined ? 9 : b);
+    });
+    return rows;
+  }
+
+  /* 正在下载区：一集一行，实时刷新进度条和百分比；排队中的集也列出来。 */
+  function renderQueueRows(body) {
+    var rows = queueTaskRows();
+    if (!rows.length) return 0;
+    var box = document.createElement('div');
+    box.id = 'iosMineQueue';
+    for (var i = 0; i < rows.length; i++) {
+      var task = rows[i];
+      var status = String(task.status || 'running');
+      var total = Number(task.total) || 0;
+      var received = Number(task.received) || 0;
       var percent = total > 0 ? Math.min(100, Math.round(received / total * 100)) : 0;
-      meta.textContent = '接收中 · ' + (total > 0 ? percent + '% · ' : '') + megabyte(received);
-    }
-    var progress = document.getElementById('iosMineRunningProgress');
-    if (progress) {
+      var row = document.createElement('div');
+      row.className = 'ios-dl-task';
+      /* 剧名可能带中文：把非法字符编成唯一后缀，避免不同剧的同一集撞成同一个 DOM id。 */
+      var safeId = String(task.id).replace(/[^A-Za-z0-9_-]/g, function (ch) { return '_' + ch.charCodeAt(0).toString(16); });
+      row.id = 'iosMineTask-' + (safeId || ('row' + i));
+      row.setAttribute('data-dl-task', String(task.id));
+      var head = document.createElement('div');
+      head.className = 'ios-dl-task-head';
+      var title = document.createElement('span');
+      title.className = 'ios-dl-task-title';
+      title.textContent = (taskShowTitle(task) + ' ' + taskEpisodeLabel(task)).replace(/\s+/g, ' ').trim() || '这一集';
+      var state = document.createElement('span');
+      state.className = 'ios-dl-task-state';
+      state.textContent = status === 'running' && total > 0 ? percent + '%' : (QUEUE_TEXT[status] || '下载中');
+      head.appendChild(title);
+      head.appendChild(state);
+      row.appendChild(head);
+      var progress = document.createElement('progress');
+      progress.className = 'ios-dl-task-progress';
       progress.max = total || 1;
-      progress.value = total > 0 ? Math.min(received, total) : 0;
-      progress.hidden = total <= 0;
+      if (status === 'running' && total > 0) progress.value = Math.min(received, total);
+      else progress.removeAttribute('value');
+      progress.hidden = status !== 'running';
+      progress.setAttribute('aria-label', title.textContent + ' ' + state.textContent);
+      row.appendChild(progress);
+      var meta = document.createElement('div');
+      meta.className = 'ios-dl-task-meta';
+      if (status === 'running') {
+        meta.textContent = (total > 0 ? percent + '% · ' : '') + megabyte(received)
+          + (total > 0 ? ' / ' + megabyte(total) : '');
+      } else {
+        meta.textContent = QUEUE_TEXT[status] || '';
+      }
+      row.appendChild(meta);
+      box.appendChild(row);
     }
+    body.appendChild(box);
+    var note = document.createElement('div');
+    note.className = 'ios-dl-queue-note';
+    note.textContent = '同时最多下载 2 集 · 共 ' + rows.length + ' 集在队列里';
+    body.appendChild(note);
+    return rows.length;
   }
 
   function removeQueueTask(id) {
@@ -1218,7 +1369,6 @@
       }
       if (event === 'progress') {
         updateQueueProgress(payload);
-        updateMineProgress(Number(payload.total) || 0, Number(payload.received) || 0);
         var downloadPage = document.getElementById('iosDlPage');
         if (downloadPage && !downloadPage.hidden) syncDownloadPage();
         renderMinePageIfOpen();
@@ -1237,7 +1387,6 @@
       downloadState.received = received;
       downloadState.path = payload.path || downloadState.path || '';
       saveDownload(false);
-      updateMineProgress(total, received);
       var downloadPage = document.getElementById('iosDlPage');
       if (downloadPage && !downloadPage.hidden) syncDownloadPage();
       renderMinePageIfOpen();
@@ -1536,56 +1685,11 @@
     var body = document.getElementById('iosMineBody');
     if (!body) return;
     body.innerHTML = '';
-    var showId = dlShowId();
-    /* 正在下载：队列里 running / queued 的集 */
-    var running = [];
-    for (var q = 0; q < queueTasks.length; q++) {
-      var task = queueTasks[q];
-      var status = String(task && task.status || '');
-      if (status === 'running' || status === 'queued') running.push(task);
-    }
-    if (running.length || downloadState.busy) {
-      var row = document.createElement('div');
-      row.id = 'iosMineRunning';
-      var currentTask = running.length ? running[0] : downloadState;
-      var activeDownload = running.length ? currentTask : {
-        total: downloadState.total,
-        received: downloadState.received
-      };
-      var total = Number(activeDownload.total) || 0;
-      var received = Number(activeDownload.received) || 0;
-      var percent = total > 0 ? Math.min(100, Math.round(received / total * 100)) : 0;
-      row.innerHTML = ''
-        + '<div class="imr-main">'
-        + '  <div class="imr-title" id="iosMineRunningTitle"></div>'
-        + '  <div class="imr-meta" id="iosMineRunningMeta"></div>'
-        + '  <progress class="imr-progress" id="iosMineRunningProgress" max="1"></progress>'
-        + '  <code class="imr-path" id="iosMineRunningPath"></code>'
-        + '</div>';
-      var badge = document.createElement('span');
-      badge.textContent = '正在下载 ' + Math.max(running.length, 1) + ' 集';
-      row.appendChild(badge);
-      body.appendChild(row);
-      var t = document.getElementById('iosMineRunningTitle');
-      if (t) t.textContent = (currentTask.title || currentTask.show || showMeta().title || '') + ' ' + (currentTask.epLabel || currentTask.ep || '');
-      var m = document.getElementById('iosMineRunningMeta');
-      if (m) {
-        m.textContent = (currentTask.status === 'queued' ? '排队中 · ' : '接收中 · ') + (total > 0 ? percent + '% · ' : '')
-          + megabyte(received) + (running.length > 1 ? ' · 其余 ' + (running.length - 1) + ' 集排队' : '');
-      }
-      var progress = document.getElementById('iosMineRunningProgress');
-      if (progress) {
-        progress.max = total || 1;
-        if (total > 0) progress.value = Math.min(received, total);
-        else progress.removeAttribute('value');
-        progress.hidden = currentTask.status === 'queued';
-      }
-      var path = document.getElementById('iosMineRunningPath');
-      if (path) path.textContent = '保存位置：追剧AI App「我的」-「我的下载」';
-    }
+    /* 正在下载：一集一行，剧名 + 集号 + 进度条 + 百分比（实时刷新） */
+    var downloading = renderQueueRows(body);
     /* 已下载：按剧分组，每部下面一行一集，左滑删除 */
     var shows = readLibrary().shows;
-    if (!shows.length) {
+    if (!shows.length && !downloading) {
       var empty = document.createElement('div');
       empty.className = 'ip-sub';
       empty.textContent = '还没有下载完成的剧集';

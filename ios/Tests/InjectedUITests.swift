@@ -244,13 +244,13 @@ final class InjectedUITests: XCTestCase, WKNavigationDelegate {
             title: '测试剧', epLabel: '第19集', received: 42, total: 100 });
           document.querySelector('[data-action="settings"]').click();
           var library = document.getElementById('iosMinePage');
-          var running = document.getElementById('iosMineRunning');
+          var running = document.getElementById('iosMineQueue');
           if (library || document.getElementById('iosDlRunning')) return 'legacy-library';
           document.getElementById('iosSettingsClose').click();
           document.querySelector('[data-pw-act=dl]').click();
           document.getElementById('iosDlListBtn').click();
           library = document.getElementById('iosMinePage');
-          running = document.getElementById('iosMineRunning');
+          running = document.getElementById('iosMineQueue');
           var items = library.querySelectorAll('.ip-show');
           var first = items[0];
           var second = items[1];

@@ -712,9 +712,9 @@ testToolbarDownloadButtonReplacesTheDanmakuSlot → missing-button
   4. 注入层仿了站点 `#ppCtrl` 一套控件，还用 `#playTools,.pp-toolbar,#btnFull,…{display:none!important}` 藏掉站点自己的工具条；
      全屏由注入层发 `fullscreen/inline` 让原生锁竖屏、改约束，与站点自己的 `requestFullscreen` / `data-ios-immersive` 互相打架。
 - **修复**：
-  - **全屏 / 方向交回网站**：删除注入层的 `PlayerAction.fullscreen/inline`、`setPlayerFullscreen`、`requestRotation`、
-    全屏约束与状态栏覆盖；`WebViewController.allowedOrientations` 恒为 `.allButUpsideDown`，`shouldAutorotate` 为真。
-    全屏由 WKWebView 里的网站播放器自己走 Fullscreen API，横竖屏跟着系统转。
+  - **播放器控件全删，全屏方向改由原生配合**：删除注入层自建的控件、全屏浮层、`PlayerAction.fullscreen/inline`、
+    `requestRotation`、页面几何与状态栏覆盖。build 21 先试过「App 完全不锁方向」，真机点全屏仍停在竖屏；
+    build 22 起改成两态策略（平时竖屏、站点全屏时横屏铺满、退出回原位），细节见 REG-021。
   - **不再画第二套播放器**：删掉注入层自建的顶部条、全屏浮层、画面档位下拉、倍速 / 外放 / 投屏菜单、复制链接按钮，
     以及全部 `data-ios-immersive` 全屏样式与几何计算。站点自己的工具条、顶栏右侧按钮、选集投屏入口一律不再隐藏。
   - **下载不再被登录态或 id 拦掉**：`beginDownload` / `beginBatchDownload` 不再要求 `signedIn`，也不因缺 id 静默返回；
@@ -735,7 +735,8 @@ testToolbarDownloadButtonReplacesTheDanmakuSlot → missing-button
   - `no native player overlay is injected any more`
   - `layout fallback keeps the light tabbar and category cards without touching site tools`
     （站点顶栏右侧按钮、选集投屏入口都不再被隐藏）
-  - `the injected layer leaves the site fullscreen api alone`（全屏事件不写属性、不通知原生、不写全屏样式）
+  - `the injected layer reports site fullscreen state without touching the page`（全屏只发一条方向消息、不写属性、不写全屏样式）
+  - `a native video fullscreen also reports enter and exit exactly once`（video 原生全屏这条路也只发方向消息）
   - `tapping the same episode twice reuses the same download id`（同一集重复点下载 id 稳定）
   - `tapping one cell in the episode grid queues exactly that episode`
 - **测试名**（Swift 单元，`ios/Tests/VersionTests.swift`；本机无 Xcode，未能在 Windows 上编译）：
@@ -779,31 +780,80 @@ testToolbarDownloadButtonReplacesTheDanmakuSlot → missing-button
   - **仍然适用的站点全屏 / 头栏回归**：REG-001、REG-005、REG-011、REG-015、REG-017 讲的是用户看得见的要求
     （全屏时头栏与工具条不能压在画面上、画面比例不能被裁、退出全屏要能回上一页）。这些要求**不退役**，
     只是实现从「注入层隐藏 + 像素几何」换成「站点播放器自己的 Fullscreen API + 系统方向」：
-    真实全屏只渲染播放器元素，站点头栏本来就不在画面里。具体按真机复核，并由新增的 REG-021 钉住
-    「App 不锁方向、注入层不接管全屏」这条策略。
+    真实全屏只渲染播放器元素，站点头栏本来就不在画面里。具体按真机复核，并由 REG-021 钉住
+    「平时竖屏、站点全屏时横屏铺满、退出回原位；注入层只报方向、不接管全屏」这条策略。
   - REG-003 / REG-014 里「注入层的外放菜单 / 投屏让位」随注入控件删除而退役；站点自己的投屏入口不再被隐藏，
     投屏回到站点原生行为（属于站点功能，不在 App 回归清单里）。
-- **修复版本**：0.1.19（build 21）
-- **验证边界**：Node 夹具能证明逻辑与消息（本机 64 条全过）；Swift 未在本机编译（Windows 无 Xcode），
+- **修复版本**：0.1.19（build 21 起步；方向策略在 build 22 按 REG-021 修正）
+- **验证边界**：Node 夹具能证明逻辑与消息（build 22 本机 67 条全过）；Swift 未在本机编译（Windows 无 Xcode），
   真站选择器、WKWebView 里的网站全屏与旋转、原生下载进度、离线播放都必须真机复核。
 
-## REG-021 网页播放器全屏与横竖屏旋转（0.1.19 起）
+## REG-021 网页播放器全屏与横竖屏（build 22 定稿为两态）
 
-- **要求（不是新 bug，是必须守住的策略）**：全屏、画面尺寸和方向全部交给 WKWebView 里的网站播放器；
-  App 不锁方向，注入层不监听 `fullscreenchange`、不写 `data-ios-immersive`、不改页面几何、不给原生发全屏消息。
+- **要求（Ken 2026-11-20 真机实测后确认）**：全屏只有两种状态，没有中间态：
+  1. **窗口模式（默认）**：竖屏，视频在详情页原来的位置小窗播放，下面的选集、简介照常显示和滚动；
+  2. **全屏模式**：点站点播放器自己的全屏按钮 → 横屏铺满整个屏幕。
+  点站点退出按钮或返回退出后，必须回到详情页视频原来的位置继续播放，详情页内容和播放进度都不变；
+  不允许「竖屏全屏」或半屏之类的中间状态。播放器只保留站点自己那一套，App 不再往里加控件。
 - **复现 / 复核步骤**：
-  1. 播放任意一集，点**网站**播放器自己的全屏。
-  2. 横过来、再竖回去，确认画面跟着转、工具条与头栏按站点自己的规则收起 / 恢复。
-  3. 退出全屏，确认能继续播放、能返回上一页。
-  4. 单集 / 批量各点一次下载，确认下载页格子出现进度、「我的下载」出现进度条和百分比。
-- **根因（0.1.19 前）**：注入层自己仿了一套全屏控件，进全屏时发 `fullscreen/inline` 让原生锁竖屏、改约束，
-  同时改页面几何、隐藏站点头栏；站点的 `requestFullscreen` 和这套假的沉浸态互相打架，方向也就跟着乱。
-- **本次保证**：`WebViewController.allowedOrientations == .allButUpsideDown`、`shouldAutorotate == true`；
-  注入层没有 `fullscreenchange` 监听、没有 `:fullscreen` 规则、没有 `data-ios-immersive`。
+  1. 进详情页，确认视频在原来的位置小窗播放，下面选集 / 简介都在（竖屏）。
+  2. 点站点播放器全屏 → 屏幕转成横屏、画面铺满，站点自己的控制栏还在。
+  3. 点退出全屏 / 返回 → 回到详情页原位，进度没跳、选集没丢，可以继续播。
+  4. 再点一次全屏，重复第 2、3 步仍然正常（不能只第一次生效）。
+- **根因（build 21 真机现象）**：
+  1. iPhone 的 `WKWebView` 默认关闭「元素全屏」（`WKPreferences.isElementFullscreenEnabled` 默认 false），
+     站点播放器调 `element.requestFullscreen()` 会被直接拒绝，点全屏看起来就像没反应；
+  2. build 21 把注入层的全屏接管全删了，`WebViewController` 又对所有方向一律放行，
+     没有任何东西把界面切到横屏；手机竖着拿时系统自然不会转，于是停在竖屏；
+  3. WebKit 自己弹出的网页全屏控制器是系统控制器，不看我们 VC 的 `supportedInterfaceOrientations`，
+     只认 `AppDelegate.application(_:supportedInterfaceOrientationsFor:)` 返回的全局掩码。
+- **本次保证**：
+  - `WebViewController` 打开 `isElementFullscreenEnabled`（iOS 15.4+），并实现两态方向：
+    `interfaceOrientations(forFullscreen: false) == .portrait`、`true == .landscape`；
+    网页报告进入全屏 → `requestGeometryUpdate(.iOS(interfaceOrientations: .landscape))`（iOS 16+），
+    退出 → 回 `.portrait`；iOS 15 用 `attemptRotationToDeviceOrientation()` 让系统重新评估。
+  - `AppDelegate` 实现 `supportedInterfaceOrientationsFor`，和 VC 共用同一份掩码，系统全屏控制器也吃这条。
+  - 注入层只在 `fullscreenchange` / `webkitfullscreenchange` / `webkitbeginfullscreen` / `webkitendfullscreen`
+    时发一条 `{action:'playerFullscreen', on:true|false}`；**不写 `data-ios-immersive`、不改页面几何、
+    不加 `:fullscreen` 样式、不藏站点控件、不重建页面**。退出后页面没被重建，详情页位置和进度自然保持原样。
 - **测试名**：
-  - Node：`the injected layer leaves the site fullscreen api alone`、`no native player overlay is injected any more`、
+  - Node：`the injected layer reports site fullscreen state without touching the page`、
+    `a native video fullscreen also reports enter and exit exactly once`、
+    `no native player overlay is injected any more`、
     `layout fallback keeps the light tabbar and category cards without touching site tools`
-  - Swift：`VersionTests.testRotationStaysFreeInEveryDirection`
-- **修复版本**：0.1.19（build 21）
-- **验证边界**：**真机**（模拟器测不准 WKWebView 里网站全屏的真行为）：全屏元素的面板位置、旋转时序、
-  刘海安全区、退出全屏后的返回栈。
+  - Swift：`VersionTests.testFullscreenSwitchesBetweenPortraitAndLandscape`
+- **修复版本**：0.1.19（build 22）
+- **验证边界**：**真机**（模拟器测不准 WKWebView 里网站全屏的真行为）：旋转时序、刘海安全区、
+  退出全屏后能否回到详情页原位继续播放、iOS 15 上的退路。
+
+## REG-022 下载列表要按「剧名 + 集数」逐条显示进度（build 22）
+
+- **现象（Ken 真机 build 21）**：下载列表只看到一条笼统的「正在下载 N 集」，看不出是哪部剧的哪一集，
+  也没有逐集进度条；多集一起下时分不清谁在跑、谁在排队。
+- **复现步骤**：详情页点某集下载 → 点「查看下载列表」→「我的下载」；再批量下 3 集重复看。
+- **根因**：
+  1. `renderMinePage()` 只渲染 `running[0]` 这一条大行，其余集只写一句「其余 N 集排队」，没有逐集的行和进度条；
+  2. 进度只更新那一行的文字；批量任务的剧名 / 集号只在快照里，首包进度到达时行上常常没有剧名；
+  3. 下载页和「我的下载」没有按任务逐行重建，完成一集后看起来像卡住。
+- **修复**：
+  - 「我的下载」的下载区改成**一集一行**：`剧名 + 第N集` + 进度条 + 百分比 + 已下载 / 总大小；
+    排队中的集也列出来并写「排队中」；行 id 用任务 id，进度事件按 id 只更新自己那一行。
+  - 剧名 / 集号三级兜底：原生事件带的 → 「一键全集」记住的 → 片库 / 当前页；
+    进度事件每 0.25 秒到达一次，每次都会重渲染这一区（实时刷新）。
+  - 完成事件带 `path` 才写入片库；点已下载的一集走 `playLocal` 用原生播放器播本地文件。
+- **测试名**（Node）：`download progress appears in the download page and a completed episode joins my downloads`、
+  `every downloading episode shows its show, episode and live percent in my downloads`、
+  `a running download restores its state and appears in my downloads`、
+  `the running download shows its show, episode and percent in the library`、
+  `each finished episode lands in my downloads, and replay stays idempotent`
+- **修复版本**：0.1.19（build 22）
+- **验证边界**：**真机**：真实的 URLSession 进度、后台切回、多集并发、离线播放。
+
+## REG-023 首页顶栏不要 App 的设置齿轮（build 22）
+
+- **要求**：首页顶栏保持 0.1.17 的样子，不放 App 自己加的设置按钮；设置入口只从站点「我的」菜单进。
+- **根因**：0.1.18 的注入层往首页顶栏塞过自己的控件，用户看到两个入口、样式也和站点不一致。
+- **本次保证**：注入层不再创建任何顶栏按钮（`#iosTopBar` 不复活），并隐藏站点顶栏自带的
+  `[data-action="settings"]` 齿轮；站点菜单里的设置入口仍然能打开 App 的设置面板。
+- **测试名**：`the home top bar carries no app settings gear and settings stay in the menu`
+- **修复版本**：0.1.19（build 22）

@@ -578,22 +578,51 @@ test('layout fallback keeps the light tabbar and category cards without touching
   assert.notEqual(cast.getAttribute('aria-hidden'), 'true', '也不能被标成 aria-hidden');
 });
 
-test('the injected layer leaves the site fullscreen api alone', () => {
+test('the injected layer reports site fullscreen state without touching the page', () => {
   const state = fixture({ episodes: [0] }); state.ready();
-  const messagesBefore = state.messages.length;
   const attributesBefore = Object.keys(state.attributes).length;
   state.document.fullscreenElement = state.player;
   state.emit('fullscreenchange', { target: state.document });
-  state.emit('webkitfullscreenchange', { target: state.document });
+  const enter = state.messages.filter((message) => message.action === 'playerFullscreen');
+  assert.equal(enter.length, 1, '进入全屏只通知原生一次');
+  assert.equal(enter[0].on, true, '进入全屏要让原生切横屏');
   assert.equal(Object.keys(state.attributes).length, attributesBefore,
     '注入层不能在全屏时写 data-ios-immersive 之类的属性');
   assert.equal(state.document.documentElement.hasAttribute('data-ios-immersive'), false);
-  assert.equal(state.messages.length, messagesBefore, '全屏变化不再通知原生锁方向 / 改约束');
+  /* WebKit 进全屏时 fullscreenchange / webkitfullscreenchange 会各来一次，不能重复通知 */
+  state.emit('webkitfullscreenchange', { target: state.document });
+  assert.equal(state.messages.filter((message) => message.action === 'playerFullscreen').length, 1);
   state.document.fullscreenElement = null;
   state.emit('fullscreenchange', { target: state.document });
-  assert.equal(Object.keys(state.attributes).length, attributesBefore, '退出全屏也不该写属性');
+  const events = state.messages.filter((message) => message.action === 'playerFullscreen');
+  assert.equal(events.length, 2);
+  assert.equal(events[1].on, false, '退出全屏要让原生回竖屏原位');
   const style = state.head.children.find((child) => child.id === 'iosShellStyle');
-  assert.doesNotMatch(style.textContent, /:fullscreen/, '注入层不再写任何全屏样式');
+  assert.doesNotMatch(style.textContent, /:fullscreen/, '注入层不写任何全屏样式');
+  assert.doesNotMatch(style.textContent, /data-ios-immersive/, '也不写沉浸态几何样式');
+});
+
+test('a native video fullscreen also reports enter and exit exactly once', () => {
+  const state = fixture({ episodes: [0] }); state.ready();
+  state.emit('webkitbeginfullscreen', { target: state.video });
+  state.emit('webkitendfullscreen', { target: state.video });
+  const events = state.messages.filter((message) => message.action === 'playerFullscreen');
+  assert.deepEqual(events.map((message) => message.on), [true, false],
+    'video.webkitEnterFullscreen 这条路也要让原生横屏后再回竖屏');
+});
+
+test('the home top bar carries no app settings gear and settings stay in the menu', () => {
+  const state = fixture({ homePage: true }); state.ready();
+  const style = state.head.children.find((child) => child.id === 'iosShellStyle');
+  assert.match(style.textContent, /\.topbar \[data-action="settings"\]\{display:none!important\}/,
+    '站点顶栏自带的齿轮在 App 里要隐藏，恢复 0.1.17 的干净顶栏');
+  assert.equal(state.document.getElementById('iosTopBar'), null, '注入层不能再往顶栏塞自己的条');
+  assert.equal(state.document.querySelectorAll('[data-ios-act="settings"]').length, 0,
+    '注入层不许自己造一个设置齿轮');
+  state.click(state.settingsTrigger);
+  const sheet = state.sheet();
+  assert.ok(sheet, '站点菜单里的设置入口仍然要能打开设置面板');
+  assert.equal(sheet.hidden, false);
 });
 
 test('tapping the same episode twice reuses the same download id', async () => {
@@ -901,10 +930,13 @@ test('download progress appears in the download page and a completed episode joi
   assert.equal(state.document.getElementById('iosDlCell6-0').__iosProgress.value, 60);
   assert.equal(state.document.getElementById('iosDlCell6-0').__iosState.textContent, '下载中 60%');
   state.click(state.document.getElementById('iosDlListBtn'));
-  assert.equal(state.document.getElementById('iosMineRunningProgress').value, 60);
-  assert.match(state.document.getElementById('iosMineRunningMeta').textContent, /60%/);
   assert.equal(state.document.getElementById('iosMinePage').hidden, false);
-  assert.match(state.document.getElementById('iosMineRunning').textContent, /测试剧/);
+  const runningRow = state.document.getElementById('iosMineTask-task-a');
+  assert.ok(runningRow, '下载中的一集必须有自己的那一行');
+  assert.match(runningRow.textContent, /测试剧/);
+  assert.match(runningRow.textContent, /第1集/);
+  assert.match(runningRow.textContent, /60%/);
+  assert.equal(runningRow.querySelectorAll('.ios-dl-task-progress')[0].value, 60);
   state.window.__zhuijuDownload({ id: 'task-a', event: 'done', showId: 'fixture', epKey: '0', ep: '第1集', epLabel: '第1集', title: '测试剧', path: '/tmp/追剧AI_第1集.mp4', name: '测试剧 第1集.mp4', size: 104857600 });
   assert.match(state.document.getElementById('iosMineBody').textContent, /已下载 1 集/);
   const deleteButton = state.document.getElementById('iosMineBody').querySelector('.ip-epdel');
@@ -913,6 +945,32 @@ test('download progress appears in the download page and a completed episode joi
   deleteButton.setAttribute('data-dl-key', '0');
   state.click(deleteButton);
   assert.equal(state.messages.at(-1).action, 'deleteLocal', '列表删除只删除该集文件');
+});
+
+/* 多集一起下：每集一行，写清剧名 + 集号 + 百分比；进度事件按 id 只更新自己那一行。 */
+test('every downloading episode shows its show, episode and live percent in my downloads', () => {
+  const state = fixture({ episodes: [0, 1], newDownloadUI: true }); state.ready();
+  state.click(state.siteDownload);
+  state.window.__zhuijuDownloads('snapshot', [
+    { id: 'dl-fixture-0', showId: 'fixture', epKey: '0', epLabel: '第1集', title: '测试剧', status: 'running', received: 45, total: 100 },
+    { id: 'dl-fixture-1', showId: 'fixture', epKey: '1', epLabel: '第2集', title: '测试剧', status: 'queued', received: 0, total: 0 },
+  ]);
+  state.click(state.document.getElementById('iosDlListBtn'));
+  const running = state.document.getElementById('iosMineTask-dl-fixture-0');
+  const queued = state.document.getElementById('iosMineTask-dl-fixture-1');
+  assert.ok(running && queued, '两集各占一行，不能只显示一条笼统的总进度');
+  assert.match(running.textContent, /测试剧/);
+  assert.match(running.textContent, /第1集/);
+  assert.match(running.textContent, /45%/);
+  assert.equal(running.querySelectorAll('.ios-dl-task-progress')[0].value, 45);
+  assert.match(queued.textContent, /测试剧/);
+  assert.match(queued.textContent, /第2集/);
+  assert.match(queued.textContent, /排队中/);
+  state.window.__zhuijuDownload({ id: 'dl-fixture-0', event: 'progress', showId: 'fixture', epKey: '0', epLabel: '第1集', title: '测试剧', received: 80, total: 100 });
+  const moved = state.document.getElementById('iosMineTask-dl-fixture-0');
+  assert.match(moved.textContent, /80%/, '进度要实时进到这一集自己的行');
+  assert.equal(moved.querySelectorAll('.ios-dl-task-progress')[0].value, 80);
+  assert.ok(state.document.getElementById('iosMineTask-dl-fixture-1'), '别的集进度更新不能把排队那一行弄丢');
 });
 
 test('a failed single-episode queue task reports its failure state', async () => {
@@ -1014,7 +1072,7 @@ test('a running download restores its state and appears in my downloads', () => 
   });
   state.ready();
   state.click(state.document.getElementById('iosDlListBtn'));
-  assert.match(state.document.getElementById('iosMineBody').textContent, /正在下载/);
+  assert.match(state.document.getElementById('iosMineBody').textContent, /下载中/);
 
   state.window.__zhuijuDownloads('snapshot', [
     { id: 'dl9', showId: 'fixture', epKey: '2', epLabel: '第3集', title: '测试剧', status: 'running', received: 60, total: 100 },
@@ -1024,7 +1082,11 @@ test('a running download restores its state and appears in my downloads', () => 
   state.window.__zhuijuDownloads('snapshot', [
     { id: 'dl9', showId: 'fixture', epKey: '2', epLabel: '第3集', title: '测试剧', status: 'running', received: 60, total: 100 },
   ]);
-  assert.match(state.document.getElementById('iosMineRunningMeta').textContent, /接收中 · 60%/);
+  const restored = state.document.getElementById('iosMineTask-dl9');
+  assert.ok(restored, '刷新后的那一集还要有自己的进度行');
+  assert.match(restored.textContent, /测试剧/);
+  assert.match(restored.textContent, /第3集/);
+  assert.match(restored.textContent, /60%/);
   state.window.__zhuijuDownloads('snapshot', [
     { id: 'dl9', showId: 'fixture', epKey: '2', epLabel: '第3集', title: '测试剧', status: 'done', received: 100, total: 100, path: '/tmp/追剧AI_第3集.mp4', size: 104857600 },
   ]);
@@ -1211,16 +1273,18 @@ test('the running download shows its show, episode and percent in the library', 
   });
   state.ready();
   state.click(state.document.getElementById('iosDlListBtn'));
-  const running = state.document.getElementById('iosMineRunning');
+  const running = state.document.getElementById('iosMineTask-dl9');
   assert.ok(running, '正在下载的那一集要有一行');
   assert.equal(state.document.getElementById('iosMinePage').hidden, false);
-  assert.match(running.textContent, /正在下载/);
   assert.match(running.textContent, /百日谎言/, '要说是哪部剧');
   assert.match(running.textContent, /第21集/, '还要说是哪一集');
-  assert.match(running.textContent, /接收中/, '总长度未知时只显示接收状态');
+  assert.match(running.textContent, /下载中/, '总长度未知时只显示接收状态');
 
   state.window.__zhuijuDownload({ id: 'dl9', event: 'progress', received: 60, total: 100 });
-  assert.match(state.document.getElementById('iosMineRunning').textContent, /接收中/);
+  const moved = state.document.getElementById('iosMineTask-dl9');
+  assert.match(moved.textContent, /60%/, '进度要实时进到这一集自己的行');
+  assert.match(moved.textContent, /百日谎言/, '进度事件不丢剧名');
+  assert.match(moved.textContent, /第21集/, '进度事件不丢集号');
   state.window.__zhuijuDownloads('snapshot', [
     { id: 'dl9', showId: 'show-a', epKey: '20', epLabel: '第21集', title: '百日谎言', status: 'running', received: 60, total: 100 },
   ]);

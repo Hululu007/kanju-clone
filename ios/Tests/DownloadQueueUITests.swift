@@ -255,22 +255,27 @@ final class DownloadQueueUITests: XCTestCase, WKNavigationDelegate {
         (function () {
           document.querySelector('[data-pw-act=dl]').click();
           document.getElementById('iosDlListBtn').click();
-          var item = document.getElementById('iosMineRunning');
+          var item = document.getElementById('iosMineQueue');
           if (!item) return 'missing-show';
+          var rows = item.querySelectorAll('.ios-dl-task');
+          if (!rows.length) return 'missing-rows';
+          var first = rows[0];
           return JSON.stringify({
-            title: document.getElementById('iosMineRunningTitle').textContent,
-            meta: document.getElementById('iosMineRunningMeta').textContent,
-            badge: item.children[item.children.length - 1].textContent,
+            title: first.querySelector('.ios-dl-task-title').textContent,
+            meta: first.querySelector('.ios-dl-task-meta').textContent,
+            rows: rows.length,
             settingsLibrary: !!document.getElementById('iosDownloadLibrary')
           });
         })();
         """)
         let renderedText = try XCTUnwrap(rendered as? String)
         XCTAssertNotEqual(renderedText, "missing-show", "真实队列没有出现在我的下载页")
+        XCTAssertNotEqual(renderedText, "missing-rows", "真实队列没有按集列出")
         let ui = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(renderedText.utf8)) as? [String: Any])
         XCTAssertTrue((ui["title"] as? String ?? "").contains("测试剧"), "我的下载显示剧名：\(renderedText)")
-        XCTAssertTrue((ui["meta"] as? String ?? "").contains("接收中"), "显示下载字节状态：\(renderedText)")
-        XCTAssertEqual(ui["badge"] as? String, "正在下载 3 集")
+        XCTAssertTrue((ui["meta"] as? String ?? "").contains("%") || (ui["meta"] as? String ?? "").contains("MB"),
+                      "每一集下面要有进度条百分比和已下载大小：\(renderedText)")
+        XCTAssertEqual(ui["rows"] as? Int, 3, "三集各占一行（两集在跑、一集排队）：\(renderedText)")
         XCTAssertEqual(ui["settingsLibrary"] as? Bool, false, "队列状态不能回到旧设置片库：\(renderedText)")
     }
 
