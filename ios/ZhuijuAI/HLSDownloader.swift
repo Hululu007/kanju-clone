@@ -67,13 +67,18 @@ final class HLSDownloader: NSObject {
     private static var foregroundStorage: URLSession?
     private static var tasks: [Int: URLSessionDownloadTask] = [:]
     private static var taskKeys: [Int: String] = [:]
+    /// 每个系统分片任务属于哪一代 job：换清单/删除后，旧任务的晚到回调不能碰新 job 的状态。
+    private static var taskGenerations: [Int: Int] = [:]
     private static var inFlight: Set<String> = []
     /// 失败分片的专属重试票：有票的分片 pump 不许抢跑，票号对不上的旧定时器直接作废。
     private static var retryScheduled: [String: Int] = [:]
     private static var retryTicket = 0
     /// 用户暂停过的任务：重试定时器和 pump 都不能再把分片拉起来。
     private static var paused: Set<String> = []
-    private static var planning: Set<String> = []
+    /// job 的代次：每次开始/丢弃都加一，旧清单、密钥、分片回调凭代次作废。
+    private static var generations: [String: Int] = [:]
+    /// 正在解析的 job 及其代次；旧回调回来时不能把新一次的解析标记清掉。
+    private static var planning: [String: Int] = [:]
     private static var finalizing: Set<String> = []
     private static var backgroundCompletion: (() -> Void)?
 
@@ -96,18 +101,38 @@ final class HLSDownloader: NSObject {
     }
 
     /// 对账用：丢掉「记录已经是终态」的遗留任务（旧版本取消时只 pause 不 discard）。
-    /// 只清不需要的任务：还在队列里的（queued/running）一律不动。
-    static func discardZombies(isLive: (String) -> Bool) {
+    /// 暂停中的 job 不是僵尸：分片缓存要留着续传，只把可能残留的分片任务停掉、保持暂停态。
+    static func discardZombies(isLive: (String) -> Bool, isPaused: (String) -> Bool) {
         ensureLoaded()
         let dead = jobs.keys.filter { !isLive($0) }
-        guard !dead.isEmpty else { return }
         for id in dead {
             paused.remove(id)
             cancelTasks(id: id)
             jobs.removeValue(forKey: id)
+            bumpGeneration(id: id)
             try? FileManager.default.removeItem(at: segmentDirectory(id: id))
         }
-        persist()
+        /* paused 是内存态，进程重启后是空的：从记录同步回来，防止对账把暂停任务重新调度。 */
+        for id in jobs.keys where isPaused(id) {
+            paused.insert(id)
+            cancelTasks(id: id)
+        }
+        if !dead.isEmpty { persist() }
+    }
+
+    private static func generation(for id: String) -> Int { generations[id] ?? 0 }
+
+    /// 换清单、删除、失败或合成完成时调用：旧代次的异步回调此后一律丢弃。
+    @discardableResult
+    private static func bumpGeneration(id: String) -> Int {
+        let next = generation(for: id) + 1
+        generations[id] = next
+        planning.removeValue(forKey: id)
+        return next
+    }
+
+    private static func isCurrent(id: String, gen: Int) -> Bool {
+        jobs[id] != nil && generation(for: id) == gen
     }
 
     /// 暂停：停掉正在传的分片，状态和已下好的分片都留着，继续时接着下。
@@ -119,6 +144,7 @@ final class HLSDownloader: NSObject {
     /// 删除/取消：连缓存里的分片一起清掉。
     static func discard(id: String) {
         ensureLoaded()
+        bumpGeneration(id: id)
         paused.remove(id)
         cancelTasks(id: id)
         jobs.removeValue(forKey: id)
@@ -161,6 +187,7 @@ final class HLSDownloader: NSObject {
                     continue
                 }
                 taskKeys[task.taskIdentifier] = key
+                taskGenerations[task.taskIdentifier] = generation(for: split.id)
                 inFlight.insert(key)
                 if let downloadTask = task as? URLSessionDownloadTask {
                     tasks[task.taskIdentifier] = downloadTask
@@ -241,6 +268,8 @@ final class HLSDownloader: NSObject {
 
     private static func begin(_ record: MediaDownloader.Record) {
         ensureLoaded()
+        /* 每开始一次就换一代：上一次的清单/密钥回调即使晚到，也写不进这一次的 job。 */
+        bumpGeneration(id: record.id)
         paused.remove(record.id)
         let referer = record.meta["referer"] ?? ""
         /* 旧实现只把 App 令牌（`ZhuijuAI/0.1.19 iOS`）当 UA 发给片源 CDN：
@@ -287,19 +316,22 @@ final class HLSDownloader: NSObject {
     private static func plan(id: String) {
         ensureLoaded()
         guard let job = jobs[id], job.phase == "plan" else { return }
-        guard !planning.contains(id) else { return }
+        guard planning[id] == nil else { return }
         guard URL(string: job.manifestURL) != nil else {
             fail(id: id, reason: "这条线路的地址无效")
             return
         }
-        planning.insert(id)
+        let gen = generation(for: id)
+        planning[id] = gen
         loadPlaylist(url: job.manifestURL, referer: job.referer, userAgent: job.userAgent, depth: 0) { result in
-            planning.remove(id)
+            /* 只有本代次的回调能清解析标记；旧回调不能给新清单开第二扇门。 */
+            if planning[id] == gen { planning.removeValue(forKey: id) }
+            guard Self.isCurrent(id: id, gen: gen), jobs[id]?.phase == "plan" else { return }
             switch result {
             case .failure(let failure):
                 fail(id: id, reason: failure.reason)
             case .success(let loaded):
-                apply(id: id, playlist: loaded.playlist, mediaURL: loaded.url)
+                apply(id: id, gen: gen, playlist: loaded.playlist, mediaURL: loaded.url)
             }
         }
     }
@@ -352,9 +384,9 @@ final class HLSDownloader: NSObject {
         }.resume()
     }
 
-    private static func apply(id: String, playlist: HLSPlaylist, mediaURL: String) {
+    private static func apply(id: String, gen: Int, playlist: HLSPlaylist, mediaURL: String) {
         ensureLoaded()
-        guard let job = jobs[id] else { return }
+        guard Self.isCurrent(id: id, gen: gen), let job = jobs[id], job.phase == "plan" else { return }
         var segments: [Segment] = []
         var pendingKeys: [String] = []
         for segment in playlist.segments {
@@ -392,6 +424,8 @@ final class HLSDownloader: NSObject {
         }
         let container = playlist.container
         fetchKeys(pendingKeys, referer: job.referer, userAgent: job.userAgent) { result in
+            /* 密钥请求可能比换清单慢：晚回来的旧密钥/旧分片列表一律不写新 job。 */
+            guard Self.isCurrent(id: id, gen: gen) else { return }
             switch result {
             case .failure(let failure):
                 fail(id: id, reason: failure.reason)
@@ -494,6 +528,7 @@ final class HLSDownloader: NSObject {
         task.taskDescription = key
         tasks[task.taskIdentifier] = task
         taskKeys[task.taskIdentifier] = key
+        taskGenerations[task.taskIdentifier] = generation(for: id)
         inFlight.insert(key)
         /* 这一片真的起来了，之前挂的票（含更早的定时器）全部作废。 */
         retryScheduled.removeValue(forKey: key)
@@ -508,8 +543,10 @@ final class HLSDownloader: NSObject {
     private static func retry(id: String, index: Int, reason: String) {
         ensureLoaded()
         let key = id + "#" + String(index)
+        let gen = generation(for: id)
         inFlight.remove(key)
-        guard let job = jobs[id], index < job.segments.count, !job.segments[index].done else { return }
+        guard Self.isCurrent(id: id, gen: gen),
+              let job = jobs[id], index < job.segments.count, !job.segments[index].done else { return }
         guard !paused.contains(id) else { return }
         let attempts = job.segments[index].attempts
         guard attempts <= maxSegmentRetries else {
@@ -523,7 +560,7 @@ final class HLSDownloader: NSObject {
             ensureLoaded()
             guard retryScheduled[key] == ticket else { return }
             retryScheduled.removeValue(forKey: key)
-            guard !paused.contains(id),
+            guard Self.isCurrent(id: id, gen: gen), !paused.contains(id),
                   let current = jobs[id],
                   current.phase == "segments",
                   index < current.segments.count,
@@ -534,13 +571,19 @@ final class HLSDownloader: NSObject {
 
     private static func finish(key: String, taskIdentifier: Int, location: URL?, response: URLResponse?, error: Error?) {
         ensureLoaded()
-        inFlight.remove(key)
-        retryScheduled.removeValue(forKey: key)
+        /* 先按系统任务号取出这次回调的代次：旧任务晚到时连 inFlight 都不能碰，
+           否则会把同一 id 新任务的状态删掉。 */
+        let callbackGeneration = taskGenerations.removeValue(forKey: taskIdentifier)
         tasks.removeValue(forKey: taskIdentifier)
-        taskKeys.removeValue(forKey: taskIdentifier)
+        guard let liveKey = taskKeys.removeValue(forKey: taskIdentifier), liveKey == key else { return }
         guard let split = splitKey(key) else { return }
         let id = split.id
         let index = split.index
+        if let callbackGeneration = callbackGeneration {
+            guard isCurrent(id: id, gen: callbackGeneration) else { return }
+        }
+        inFlight.remove(key)
+        retryScheduled.removeValue(forKey: key)
         guard let job = jobs[id], index < job.segments.count else { return }
         /* 删掉的任务、暂停的任务、已经下完的片：晚到的回调直接丢弃，
            不能复活任务，也不能再写缓存/进度。 */
@@ -617,7 +660,8 @@ final class HLSDownloader: NSObject {
 
     private static func finalize(id: String) {
         ensureLoaded()
-        guard var job = jobs[id], job.phase == "segments" else { return }
+        let gen = generation(for: id)
+        guard isCurrent(id: id, gen: gen), var job = jobs[id], job.phase == "segments" else { return }
         guard !finalizing.contains(id) else { return }
         finalizing.insert(id)
         job.phase = "finalize"
@@ -685,8 +729,15 @@ final class HLSDownloader: NSObject {
            let number = attributes[.size] as? NSNumber {
             size = number.int64Value
         }
+        /* 合成期间用户删了这一集：文件已经写出来了也不能通完成事件把记录复活。 */
+        guard isCurrent(id: id, gen: gen) else {
+            try? FileManager.default.removeItem(at: target)
+            finalizing.remove(id)
+            return
+        }
         try? FileManager.default.removeItem(at: directoryOfSegments)
         jobs.removeValue(forKey: id)
+        bumpGeneration(id: id)
         persist()
         finalizing.remove(id)
         MediaDownloader.hlsComplete(id: id, path: target.path, size: size, name: job.name)
@@ -727,6 +778,7 @@ final class HLSDownloader: NSObject {
         ensureLoaded()
         cancelTasks(id: id)
         jobs.removeValue(forKey: id)
+        bumpGeneration(id: id)
         persist()
         try? FileManager.default.removeItem(at: segmentDirectory(id: id))
         MediaDownloader.hlsFail(id: id, reason: reason)
@@ -738,6 +790,7 @@ final class HLSDownloader: NSObject {
             tasks[identifier]?.cancel()
             tasks.removeValue(forKey: identifier)
             taskKeys.removeValue(forKey: identifier)
+            taskGenerations.removeValue(forKey: identifier)
             inFlight.remove(key)
         }
         /* 暂停/删除时把还没到点的重试票一并作废，旧定时器醒来会发现票号对不上。 */

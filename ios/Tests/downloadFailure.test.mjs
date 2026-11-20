@@ -73,7 +73,7 @@ test('HLS 重启后：没拿到后台回调的 job 也要接着下，不能停�
   const adopt = section(hls, 'static func adoptBackgroundEvents(', '// MARK: - 会话');
   assert.match(adopt, /MediaDownloader\.isRunning\(id: id\)/);
   assert.match(adopt, /pump\(id: id\)/);
-  assert.match(hls, /static func discardZombies\(isLive: \(String\) -> Bool\)/);
+  assert.match(hls, /static func discardZombies\(isLive: \(String\) -> Bool, isPaused: \(String\) -> Bool\)/);
 });
 
 test('取消/失败丢分片缓存，暂停保留（不假装释放空间，也不留孤儿任务）', () => {
@@ -94,6 +94,40 @@ test('没有集号的入队请求要落一条失败记录，不能静默丢掉',
   assert.match(guardBlock, /records\.append\(record\)/);
   /* 落完记录才跳过这一条：不是直接丢掉 */
   assert.ok(guardBlock.indexOf('records.append(record)') < guardBlock.indexOf('continue'), '先落失败记录再 continue');
+});
+
+test('暂停的一集不会被启动对账当僵尸清掉：缓存留着，调度停掉', () => {
+  const reconcile = section(downloader, 'private static func reconcile(', 'static func isRunning(id:');
+  assert.match(reconcile, /\$0\.status == "paused"/, '暂停态要算活任务，否则会被 discardZombies 清缓存');
+  assert.match(reconcile, /discardZombies\(isLive:[\s\S]*isPaused:/);
+  const zombies = section(hls, 'static func discardZombies(', 'private static func generation(for');
+  assert.match(zombies, /let dead = jobs\.keys\.filter \{ !isLive\(\$0\) \}/);
+  const deadLoop = zombies.slice(zombies.indexOf('for id in dead'), zombies.indexOf('/* paused'));
+  assert.match(deadLoop, /jobs\.removeValue\(forKey: id\)/);
+  assert.match(deadLoop, /removeItem\(at: segmentDirectory/);
+  const pausedLoop = zombies.slice(zombies.indexOf('for id in jobs.keys where isPaused'));
+  assert.match(pausedLoop, /paused\.insert\(id\)/);
+  assert.match(pausedLoop, /cancelTasks\(id: id\)/, '暂停任务要停分片，别再调度');
+  assert.doesNotMatch(pausedLoop, /jobs\.removeValue|removeItem\(at: segmentDirectory/, '暂停任务的分片缓存必须保留');
+});
+
+test('同一 id 换清单：旧清单、密钥、分片回调按代次作废', () => {
+  const begin = section(hls, 'private static func begin(', 'private static func plan(');
+  assert.match(begin, /bumpGeneration\(id: record\.id\)/, '每次开始都要换一代');
+  const plan = section(hls, 'private static func plan(', 'private static func loadPlaylist(');
+  assert.match(plan, /planning\[id\] = gen/);
+  assert.match(plan, /if planning\[id\] == gen \{ planning\.removeValue\(forKey: id\) \}/, '旧回调不能清掉新清单的解析标记');
+  assert.match(plan, /isCurrent\(id: id, gen: gen\)/);
+  const apply = section(hls, 'private static func apply(', 'private static func fetchKeys(');
+  assert.match(apply, /guard Self\.isCurrent\(id: id, gen: gen\)/);
+  assert.match(apply, /guard Self\.isCurrent\(id: id, gen: gen\) else \{ return \}[\s\S]*?job\.segments = segments/, '旧密钥/分片列表不能写进新 job');
+  const segment = section(hls, 'private static func startSegment(', 'private static func retry(');
+  assert.match(segment, /taskGenerations\[task\.taskIdentifier\] = generation\(for: id\)/);
+  const retry = section(hls, 'private static func retry(', 'private static func finish(');
+  assert.match(retry, /isCurrent\(id: id, gen: gen\)/, '旧重试票不能拉起新清单');
+  const finish = section(hls, 'private static func finish(', '/// 进度按');
+  assert.match(finish, /taskGenerations\.removeValue\(forKey: taskIdentifier\)/);
+  assert.match(finish, /isCurrent\(id: id, gen: callbackGeneration\)/, '旧分片的晚到回调不能改新任务');
 });
 
 test('失败的那一格写清「点一下重试」，点格子会重新解析片源再入队', () => {

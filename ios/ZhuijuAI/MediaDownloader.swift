@@ -735,6 +735,8 @@ final class MediaDownloader: NSObject {
     ///    以前无条件把记录改回 running：任务 cancel() 是异步的，取消/删除后的下一次对账会把它复活，
     ///    而那条任务永远不会再发终态回调 —— 这就是「取消过一集，队列从此永远卡着」。
     /// 4. 对不上任何记录的系统任务（孤儿）直接 cancel，不让它们白占后台会话和下载名额。
+    /// 5. paused 不是终态：HLS 的分片缓存必须留着，只停调度；进程重启后把记录里的暂停态同步给 HLS，
+    ///    否则对账会把已暂停的任务重新拉起来，已下好的分片也可能被当僵尸删掉。
     private static var reconciling = false
     private static func reconcile(completion: (() -> Void)?) {
         /* 页面加载、回到前台、切页都会叫一次对账：重入会拿到两份不同时刻的 getAllTasks，
@@ -777,9 +779,13 @@ final class MediaDownloader: NSObject {
                 records[index].taskIdentifier = task.taskIdentifier
                 tasks[id] = task as? URLSessionDownloadTask
             }
-            /* 已经删掉/取消/完成的 HLS 遗留任务（旧版本取消时只 pause 不丢弃）：连分片缓存一起清掉。 */
+            /* 已删/取消/失败的 HLS 遗留任务（旧版本取消时只 pause 不丢弃）：连分片缓存一起清掉。
+               暂停中的记录保留 job 和分片缓存，但要把暂停态同步给 HLS，不能让对账重新调度。 */
             HLSDownloader.discardZombies(isLive: { id in
-                records.contains { $0.id == id && ($0.status == "queued" || $0.status == "running") }
+                records.contains { $0.id == id && !Self.isDeleted($0) &&
+                    ($0.status == "queued" || $0.status == "running" || $0.status == "paused") }
+            }, isPaused: { id in
+                records.contains { $0.id == id && !Self.isDeleted($0) && $0.status == "paused" }
             })
             if changed { persist(force: true) }
             reconciling = false
