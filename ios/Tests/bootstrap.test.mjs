@@ -331,6 +331,13 @@ function fixture({ origin = 'https://zhuiju.dpdns.org', storageThrows = false, l
     },
     /* 站点的标准全屏 API 路径：document.fullscreenElement 为真时页面进入原生全屏 */
     fullscreenElement: null,
+    dispatched: [],
+    dispatchEvent(event) {
+      document.dispatchLog = document.dispatchLog || [];
+      document.dispatchLog.push(event && event.type);
+      for (const listener of listeners[event && event.type] || []) listener(event);
+      return true;
+    },
     createElement(tag) { return node(tag); },
     querySelector(selector) {
       const attribute = /^\[([\w-]+)(?:="([^"]*)")?\]$/.exec(selector);
@@ -411,6 +418,13 @@ function fixture({ origin = 'https://zhuiju.dpdns.org', storageThrows = false, l
       hasAttribute(name) { return !!attributes[name]; },
     } };
   let isLandscape = landscape;
+  /* 站点的全屏按钮走标准 Fullscreen API：给 Element.prototype 一份可观察的原实现，
+     验证注入层把它改道到原生视频全屏，而不是真去进会黑屏的容器全屏。 */
+  let elementFullscreenCalls = 0;
+  const elementProto = {
+    requestFullscreen() { elementFullscreenCalls += 1; return Promise.resolve(); },
+    webkitRequestFullscreen() { elementFullscreenCalls += 1; return Promise.resolve(); },
+  };
   const window = { location: { origin, protocol: 'https:', hostname: new URL(origin).hostname,
     href: origin + '/player/?id=fixture', pathname: '/player/', search, replace(value) { redirects.push(value); } },
     innerWidth: landscape ? 844 : 390,
@@ -421,6 +435,8 @@ function fixture({ origin = 'https://zhuiju.dpdns.org', storageThrows = false, l
     },
     webkit: bridge ? { messageHandlers: { iosPlayer: { postMessage(body) { messages.push(body); } } } } : {},
     HTMLMediaElement: { prototype: mediaProto },
+    Event: class { constructor(type) { this.type = type; } },
+    Element: { prototype: elementProto },
     async fetch(input, options) {
       calls.push({ input, options });
       return await (replies.shift() || new Response('{}', { headers: { 'content-type': 'application/json' } }));
@@ -455,6 +471,7 @@ function fixture({ origin = 'https://zhuiju.dpdns.org', storageThrows = false, l
   vm.runInContext(source, context);
   return { window, document, replies, calls, redirects, selected, video, messages, attributes, head, toolbar, searchInput, shared, player,
     hint, epButtons, epGrid, epMore, mediaProto, days, dayButtons, observers, loginTrigger, storage,
+    elementProto, get elementFullscreenCalls() { return elementFullscreenCalls; },
     settingsPanel, lineBar, tabRow, tabButtons, clicked, sbName, sbSub, acctName, tabbar, settingsTrigger,
     pageHead, dmButton, phTitle, siteDownload,
     /* 下载进度控件由注入层自己建（0.1.9 之后不再依赖站点预设的节点），
@@ -609,6 +626,28 @@ test('a native video fullscreen also reports enter and exit exactly once', () =>
   const events = state.messages.filter((message) => message.action === 'playerFullscreen');
   assert.deepEqual(events.map((message) => message.on), [true, false],
     'video.webkitEnterFullscreen 这条路也要让原生横屏后再回竖屏');
+});
+
+test('a site fullscreen request on the player uses the native video player, not the black element fullscreen', () => {
+  const state = fixture({ episodes: [0] }); state.ready();
+  Object.setPrototypeOf(state.player, state.elementProto);
+  state.player.requestFullscreen();
+  assert.equal(state.video.nativeFullscreen, 1, '容器全屏要改走系统原生视频全屏');
+  assert.equal(state.elementFullscreenCalls, 0, '不能再进入会丢画面、退不出的容器元素全屏');
+
+  Object.setPrototypeOf(state.video, state.elementProto);
+  state.video.requestFullscreen();
+  assert.equal(state.video.nativeFullscreen, 2, 'video 自己的全屏请求也走原生');
+
+  const other = node('div');
+  Object.setPrototypeOf(other, state.elementProto);
+  other.requestFullscreen();
+  assert.equal(state.elementFullscreenCalls, 1, '不包含视频的元素仍走原来的全屏实现');
+  assert.equal(state.video.nativeFullscreen, 2, '无关元素不能误触发视频全屏');
+  state.emit('webkitbeginfullscreen', { target: state.video });
+  state.emit('webkitendfullscreen', { target: state.video });
+  assert.deepEqual(state.document.dispatchLog, ['fullscreenchange', 'webkitfullscreenchange'],
+    '原生全屏退出后要补一次退出事件，站点才能收起沉浸态');
 });
 
 test('the home top bar carries no app settings gear and settings stay in the menu', () => {

@@ -464,9 +464,10 @@
     } catch (error) { /* 原生通道不可用时静默忽略：全屏仍由站点播放器自己处理 */ }
   }
 
-  /* 全屏只汇报「进 / 出」，不改页面几何、不藏站点控件、不自己画全屏层：
-     原生收到后把屏幕锁到横屏（进）或回竖屏（出），播放器仍是站点自己的那一个。
-     退出后页面没有被重建，所以详情页位置和播放进度都保持原样。 */
+  /* 全屏分两步：先把站点的「容器元素全屏」改道到系统原生视频全屏（见下面的
+     routeFullscreenToNativeVideo），再只汇报「进 / 出」让原生锁方向。
+     不改页面几何、不藏站点控件、不自己画全屏层，页面也不重建，
+     所以退出全屏后详情页位置和播放进度都保持原样。 */
   var playerFullscreenOn = null;
 
   function reportPlayerFullscreen(active) {
@@ -490,13 +491,67 @@
     reportPlayerFullscreen(!!currentFullscreenElement());
   }, true);
 
+  /* 原生视频全屏退出后，如果站点是靠 fullscreenchange 收尾的，也让它收到一次退出事件；
+     否则站点可能把沉浸态样式或退出按钮留在页面上。只补事件，不动 DOM、不改样式。 */
+  function notifyNativeFullscreenEnded() {
+    if (typeof document.dispatchEvent !== 'function') return;
+    try {
+      if (typeof window.Event === 'function') {
+        document.dispatchEvent(new window.Event('fullscreenchange'));
+        document.dispatchEvent(new window.Event('webkitfullscreenchange'));
+      }
+    } catch (error) { /* 站点没有事件构造器时忽略：退出本身已经完成 */ }
+  }
+
   /* <video> 直接调 webkitEnterFullscreen 时只派发这两个事件，而且不冒泡，只能在 document 上捕获。 */
   document.addEventListener('webkitbeginfullscreen', function () {
     reportPlayerFullscreen(true);
   }, true);
   document.addEventListener('webkitendfullscreen', function () {
     reportPlayerFullscreen(false);
+    notifyNativeFullscreenEnded();
   }, true);
+
+  /* 站点全屏是「把整个播放器容器 requestFullscreen」。iOS 的 WKWebView 对这种容器元素全屏
+     会丢掉视频图层：画面全黑、只剩声音，站点自己的退出按钮也跟着被盖住，看起来像退不出去。
+     这里只改「用哪套全屏」：容器（或 video 自己）的全屏请求改道到内部 <video>.webkitEnterFullscreen()，
+     由系统原生视频播放器接管 —— 有画面、自带 Done 和下滑退出；页面不重建，退出后回到原位继续播。
+     不搬动视频节点、不写全屏 CSS、不做旋转，非视频元素的请求仍走原来的实现。 */
+  function nativeVideoInside(element) {
+    if (!element) return null;
+    if (element.tagName === 'VIDEO') return element;
+    var inside = element.querySelector ? element.querySelector('video') : null;
+    if (inside) return inside;
+    /* 只在请求的就是包含主视频的根节点时才兜底，避免把无关元素的全屏也换成视频全屏。 */
+    var main = document.getElementById('video');
+    if (!main || typeof element.contains !== 'function') return null;
+    return element.contains(main) ? main : null;
+  }
+
+  function routeFullscreenToNativeVideo() {
+    var proto = window.Element && window.Element.prototype;
+    if (!proto || proto.__zhuijuNativeVideoFullscreen) return;
+    proto.__zhuijuNativeVideoFullscreen = true;
+    var names = ['requestFullscreen', 'webkitRequestFullscreen'];
+    for (var index = 0; index < names.length; index++) {
+      (function (name) {
+        var original = proto[name];
+        if (typeof original !== 'function') return;
+        proto[name] = function () {
+          var video = nativeVideoInside(this);
+          if (video && typeof video.webkitEnterFullscreen === 'function') {
+            try {
+              video.webkitEnterFullscreen();
+              return Promise.resolve();
+            } catch (error) { /* 交给下面的原实现 */ }
+          }
+          return original.apply(this, arguments);
+        };
+      }(names[index]));
+    }
+  }
+
+  routeFullscreenToNativeVideo();
 
   var settingsSheet = null;
 

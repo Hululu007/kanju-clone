@@ -816,6 +816,8 @@ testToolbarDownloadButtonReplacesTheDanmakuSlot → missing-button
   - 注入层只在 `fullscreenchange` / `webkitfullscreenchange` / `webkitbeginfullscreen` / `webkitendfullscreen`
     时发一条 `{action:'playerFullscreen', on:true|false}`；**不写 `data-ios-immersive`、不改页面几何、
     不加 `:fullscreen` 样式、不藏站点控件、不重建页面**。退出后页面没被重建，详情页位置和进度自然保持原样。
+  - build 23 起：站点对「播放器容器」的 requestFullscreen 会改道到系统原生视频全屏
+    （video.webkitEnterFullscreen()），避免容器元素全屏黑屏；细节见 REG-024。
 - **测试名**：
   - Node：`the injected layer reports site fullscreen state without touching the page`、
     `a native video fullscreen also reports enter and exit exactly once`、
@@ -857,3 +859,27 @@ testToolbarDownloadButtonReplacesTheDanmakuSlot → missing-button
   `[data-action="settings"]` 齿轮；站点菜单里的设置入口仍然能打开 App 的设置面板。
 - **测试名**：`the home top bar carries no app settings gear and settings stay in the menu`
 - **修复版本**：0.1.19（build 22）
+
+## REG-024 点全屏黑屏 / 只剩声音 / 退不出去（build 22 真机，build 23 修）
+
+- **现象（Ken 真机 build 22）**：点站点播放器的全屏后画面全黑，声音还在；站点自己的退出按钮也找不到，
+  像卡在全屏里出不来。
+- **复现步骤**：详情页播放任意一集 → 点站点播放器自己的全屏 → 观察画面和退出入口。
+- **根因**：站点播放入口走标准 Fullscreen API，而且是把「播放器容器」整个元素 requestFullscreen()。
+  build 22 打开了 WKWebView 的 isElementFullscreenEnabled，于是 WebKit 用系统「元素全屏」控制器接管；
+  iOS 上这种容器元素全屏会丢掉 video 的视频图层（只剩声音、画面全黑），站点画在容器里的退出按钮
+  也跟着被盖住或失效，所以看起来退不出去。播放内核本身没问题，是「全屏用错了哪套」。
+- **修复（build 23）**：注入层在页面脚本之前把 Element.prototype.requestFullscreen /
+  webkitRequestFullscreen 包一层：请求的元素（或它内部的 video）有视频时，改成调
+  video.webkitEnterFullscreen()，由系统原生视频播放器接管 —— 画面正常、自带 Done 和下滑退出；
+  不搬动视频节点、不写全屏 CSS、不做旋转、不重布局。非视频元素仍走原来的实现。
+  原来「进 / 出全屏 → 原生锁横屏 / 回竖屏」的两态方向处理保持不动；退出后页面没有重建，
+  详情页位置和播放进度都保持原样。
+- **测试名**（Node）：
+  a site fullscreen request on the player uses the native video player, not the black element fullscreen、
+  a native video fullscreen also reports enter and exit exactly once、
+  the injected layer reports site fullscreen state without touching the page
+- **修复版本**：0.1.19（build 23）
+- **验证边界**：**真机**：容器全屏确实走原生视频全屏、横屏铺满、退出回原位续播；
+  iOS 15.0–15.3 没有 isElementFullscreenEnabled，这条改道在这些系统上不生效（站点按钮可能没反应），
+  需要按真机系统版本复核。
