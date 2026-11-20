@@ -644,7 +644,8 @@ final class WebViewController: UIViewController, UIDocumentInteractionController
               let text = String(data: data, encoding: .utf8) else { return }
         /* [message] 序列化成 ["..."]，去掉两端方括号就是给 JS 的字符串字面量。 */
         let quoted = String(text.dropFirst().dropLast())
-        let script = "window.__zhuijuPlayerNotice && window.__zhuijuPlayerNotice((quoted));"
+        /* 这里要用 Swift 插值把转义后的字符串字面量拼进去；不插值直接写字面量的话，网页读到的是未定义变量，提示永远不会显示。 */
+        let script = "window.__zhuijuPlayerNotice && window.__zhuijuPlayerNotice(\(quoted));"
         DispatchQueue.main.async { [weak self] in
             self?.webView.evaluateJavaScript(script, completionHandler: nil)
         }

@@ -497,6 +497,16 @@
     return !!(video && typeof video.webkitDisplayingFullscreen === 'boolean');
   }
 
+  /* 进入成功的唯一出口：begin 事件和 300ms 公开属性核对都走这里，
+     把「当前全屏视频 / 原生方向 / 这次请求的 Promise」一次落地。
+     只兑现 Promise 而不设状态的话：方向还停在竖屏，后面的 end 事件会被当成别的视频丢掉，
+     document.exitFullscreen 也找不到要退的视频。 */
+  function enterNativeVideoFullscreen(video, request) {
+    nativeVideoFullscreen = video;
+    reportPlayerFullscreen(true);
+    if (request) settleFullscreenRequest(request, true);
+  }
+
   function startNativeVideoFullscreen(video) {
     if (nativeVideoFullscreen === video) return Promise.resolve();
     if (pendingFullscreenRequest) return Promise.reject(new TypeError('Fullscreen request already pending'));
@@ -519,7 +529,7 @@
       /* 事件还没来但系统其实已经全屏：给一个很短的宽限核对，成功就不用干等。 */
       setTimeout(function () {
         if (request !== pendingFullscreenRequest) return;
-        if (video.webkitDisplayingFullscreen) finish(true);
+        if (video.webkitDisplayingFullscreen) enterNativeVideoFullscreen(video, request);
       }, 300);
     }
     return promise;
@@ -573,9 +583,7 @@
     var matchesPending = pendingFullscreenRequest && pendingFullscreenRequest.video === video;
     var matchesCurrent = nativeVideoFullscreen === video;
     if (!matchesPending && !matchesCurrent && (pendingFullscreenRequest || nativeVideoFullscreen)) return;
-    if (matchesPending) settleFullscreenRequest(pendingFullscreenRequest, true);
-    nativeVideoFullscreen = video;
-    reportPlayerFullscreen(true);
+    enterNativeVideoFullscreen(video, matchesPending ? pendingFullscreenRequest : null);
   }, true);
   document.addEventListener('webkitendfullscreen', function (event) {
     var video = event && event.target && event.target.tagName === 'VIDEO' ? event.target : null;

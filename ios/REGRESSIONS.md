@@ -892,9 +892,12 @@ testToolbarDownloadButtonReplacesTheDanmakuSlot → missing-button
   - 只注入主 frame（forMainFrameOnly: true）。**播放器到底在不在主 frame，仓库里没有证据**：
     站点播放页要口令，首页拿不到；下载地址来自站点 API，不能反推 <video> 的位置。
     所以这里不猜 iframe、也不加跨 frame 逻辑，列为待真机核实的缺口。
-  - 公开属性 webkitDisplayingFullscreen 可用时做两件事：调用后 300ms 宽限核对一次（事件没来但
-    系统已全屏就算成功），以及页面回到前台（pageshow / visibilitychange）时核对一次（属性说不是
-    全屏就补一次退出）。属性不存在就只认 begin / end 事件，风险如实记在这里。
+  - 公开属性 webkitDisplayingFullscreen 可用时做两件事：调用后 300ms 宽限核对一次，以及页面回到
+    前台（pageshow / visibilitychange）时核对一次（属性说不是全屏就补一次退出）。
+    重点：300ms 核对发现已在全屏时不能再只兑现 Promise，必须和 begin 事件走同一条成功路径
+    （enterNativeVideoFullscreen：记当前视频 + 发一次 playerFullscreen(true) + 兑现这次 token）。
+    否则方向还停在竖屏、后面的 end 事件被当成无关视频丢掉、document.exitFullscreen 也找不到视频。
+    属性不存在就只认 begin / end 事件，风险如实记在这里。
   - 原生兜底：页面开始新导航或网页进程被杀时，把全局方向状态复位回竖屏；它只处理换页/崩溃，
     **不能代替系统播放器 Done / 下滑退出**的事件兜底。
   原来「进 / 出全屏 → 原生锁横屏 / 回竖屏」的两态方向处理保持不动；退出后页面没有重建，
@@ -933,9 +936,12 @@ testToolbarDownloadButtonReplacesTheDanmakuSlot → missing-button
   iPad 用屏幕中间的小矩形做 popover 锚点；控制器由 documentInteraction 强引用，菜单关闭后释放。
 - **反馈**：文件不在 / 文件已删 / 格式不支持 / 没有能接收的 App / 用户取消，都用网页 toast 说一句；
   用户真的选了 App 就直接切走，不再多弹提示。
+- **提示链路**：notifyPlayerNotice 用 Swift 插值把 JSON 转义后的字符串拼进 evaluateJavaScript。
+  复审揪出过一次：写成字面量便成了网页里的未定义变量，上面这些提示一条都发不出去。
 - **测试名**（Node）：
   a finished episode offers the system player hand-off, a running one does not、
   the native open-in result is shown as a toast、
+  the native notice bridge inserts the escaped message instead of a literal variable、
   the open-in hand-off only accepts regular files inside the real download folder、
   the open-in hand-off gives every allowed format a real type or a clear refusal
 - **修复版本**：0.1.19（build 23）

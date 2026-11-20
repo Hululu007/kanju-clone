@@ -648,6 +648,7 @@ test('a site fullscreen request on the player uses the native video player, not 
   other.requestFullscreen();
   assert.equal(state.elementFullscreenCalls, 1, '不包含视频的元素仍走原来的全屏实现');
   assert.equal(state.video.nativeFullscreen, 1, '无关元素不能误触发视频全屏');
+});
 
 test('a second fullscreen request while one is pending is rejected instead of stacking up', async () => {
   const state = fixture({ episodes: [0] }); state.ready();
@@ -679,6 +680,15 @@ test('the public webkitDisplayingFullscreen property can confirm a started fulls
   const entered = state.player.requestFullscreen();
   assert.equal(await entered.then(() => 'resolved', () => 'rejected'), 'resolved',
     '系统已经全屏但事件没来时，按公开属性确认成功');
+  /* 没有 begin 事件也不能只兑现 Promise：当前视频和方向要一起落地 */
+  const events = state.messages.filter((message) => message.action === 'playerFullscreen');
+  assert.deepEqual(events.map((message) => message.on), [true], '属性确认也要让原生切横屏');
+  await state.document.exitFullscreen();
+  assert.equal(state.video.nativeExit, 1, 'document.exitFullscreen 要能找到这段视频');
+  state.video.webkitDisplayingFullscreen = false;
+  state.emit('webkitendfullscreen', { target: state.video });
+  assert.deepEqual(state.messages.filter((message) => message.action === 'playerFullscreen').map((message) => message.on),
+    [true, false], '没有 begin 事件时，end 事件也要能回竖屏');
 });
 
 test('coming back to the page clears a fullscreen the system already ended', () => {
@@ -696,6 +706,9 @@ test('coming back to the page clears a fullscreen the system already ended', () 
   assert.deepEqual(legacy.messages.filter((message) => message.action === 'playerFullscreen').map((message) => message.on),
     [true], '没有公开属性时只认事件，不做方向反推');
 });
+
+test('leaving the native player tells the site to close its fullscreen chrome', () => {
+  const state = fixture({ episodes: [0] }); state.ready();
   state.emit('webkitbeginfullscreen', { target: state.video });
   state.emit('webkitendfullscreen', { target: state.video });
   assert.deepEqual(state.document.dispatchLog, ['fullscreenchange', 'webkitfullscreenchange'],

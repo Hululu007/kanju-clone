@@ -48,3 +48,11 @@ test('the open-in hand-off gives every allowed format a real type or a clear ref
   assert.match(section, /controller\.uti = type\.identifier/);
   assert.match(section, /这个格式不能交给其他播放器/, '不支持的格式要明确提示');
 });
+
+test('the native notice bridge inserts the escaped message instead of a literal variable', () => {
+  const start = source.indexOf('private func notifyPlayerNotice');
+  assert.ok(start > 0, '找不到 notifyPlayerNotice');
+  const section = source.slice(start, source.indexOf('fileprivate func presentLocalFile', start));
+  assert.ok(section.includes('window.__zhuijuPlayerNotice(\\(quoted)'), '要用 Swift 插值把转义后的字面量拼进脚本');
+  assert.ok(!section.includes('window.__zhuijuPlayerNotice((quoted)'), '不能把 ((quoted)) 当字面量写进脚本，否则网页读到未定义变量');
+});
