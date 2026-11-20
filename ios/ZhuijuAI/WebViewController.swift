@@ -280,13 +280,12 @@ final class WebViewController: UIViewController {
     private func applyOrientation(_ mask: UIInterfaceOrientationMask) {
         if #available(iOS 16.0, *) {
             setNeedsUpdateOfSupportedInterfaceOrientations()
+            guard let scene = view.window?.windowScene else { return }
+            scene.requestGeometryUpdate(.iOS(interfaceOrientations: mask)) { _ in }
         } else {
             /* iOS 15 没有主动改方向的公开 API：换完掩码后让系统重新问一次。 */
             UIViewController.attemptRotationToDeviceOrientation()
-            return
         }
-        guard let scene = view.window?.windowScene else { return }
-        scene.requestGeometryUpdate(.iOS(interfaceOrientations: mask)) { _ in }
     }
 
     private func configureLayout() {
