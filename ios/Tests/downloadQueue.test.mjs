@@ -518,6 +518,17 @@ test('tapping one cell in the episode grid queues exactly that episode', async (
   assert.match(state.toastText(), /已加入下载/, '点完要给一句轻提示');
 });
 
+test('the tapped episode appears immediately while its source is still being resolved', async () => {
+  const state = fixture({ signedIn: true, episodes: [0, 1, 2] });
+  state.ready();
+  state.click(state.siteDownload);
+  const cell = state.document.getElementById('iosDlCell6-1');
+  state.click(cell);
+  assert.match(textOf(cell), /排队|下载中/, '点下后不等原生快照也要先显示排队');
+  assert.equal(state.storage['kj-ios-queue'], undefined, '乐观行只放内存，旧队列缓存不能再落盘');
+  await settle();
+});
+
 test('the grid shows each episode state and never offers a batch action', async () => {
   const state = fixture({ signedIn: true, episodes: [0, 1, 2] });
   state.ready();
@@ -556,8 +567,33 @@ test('a downloaded row can be deleted on its own, and only that file is asked to
   button.setAttribute('data-dl-key', '0');
   state.click(button);
   const message = state.messages.at(-1);
-  assert.equal(message.action, 'deleteLocal', '删除要让原生删掉本地文件');
+  assert.equal(message.action, 'deleteDownload', '删除要让原生取消任务、删记录并删文件');
+  assert.equal(typeof message.id, 'string', '把原生任务 id 一起带过去');
+  assert.equal(message.showId, 'fixture');
+  assert.equal(message.epKey, '0');
   assert.equal(message.path, '/tmp/a.mp4', '只删这一行对应的那个文件');
+});
+
+test('old snapshots, late done events and app restarts never resurrect a deleted episode', () => {
+  const state = fixture({ signedIn: true, episodes: [0, 1] });
+  state.ready();
+  state.window.__zhuijuDownload({ id: 'a', event: 'done', showId: 'fixture', epKey: '0', epLabel: '第1集', title: '测试剧', path: '/tmp/a.mp4', size: 10, name: 'a.mp4' });
+  state.click(state.document.getElementById('iosDlListBtn'));
+  const row = state.document.getElementById('iosMineBody').querySelectorAll('.ip-eprow')[0];
+  const button = childWithClass(row, 'ip-epdel');
+  button.setAttribute('data-dl-show', 'fixture');
+  button.setAttribute('data-dl-key', '0');
+  state.click(button);
+  assert.ok(state.storage['kj-ios-deleted-episodes'], '删除要写墓碑，防止旧事实源回灌');
+
+  assert.equal(state.document.getElementById('iosMineBody').querySelectorAll('.ip-eprow').length, 0, '列表马上不再显示这一集');
+  state.window.__zhuijuDownload({ id: 'a', event: 'done', showId: 'fixture', epKey: '0', epLabel: '第1集', title: '测试剧', path: '/tmp/a.mp4', size: 10, name: 'a.mp4' });
+  state.window.__zhuijuDownloads('snapshot', [
+    { id: 'a', showId: 'fixture', epKey: '0', epLabel: '第1集', title: '测试剧', status: 'done', received: 10, total: 10, path: '/tmp/a.mp4', size: 10, name: 'a.mp4' }
+  ]);
+  state.window.__zhuijuDownload({ id: 'a', event: 'done', showId: 'fixture', epKey: '0', epLabel: '第1集', title: '测试剧', path: '/tmp/a.mp4', size: 10, name: 'a.mp4' });
+  assert.equal(state.document.getElementById('iosMineBody').querySelectorAll('.ip-eprow').length, 0, '晚到回调和重启快照都不能让它复活');
+  assert.ok(!state.storage['kj-ios-queue'], '网页不能再把旧队列快照当持久事实源');
 });
 
 test('a failed episode never lets the show look complete and an unknown length has no percent', () => {

@@ -748,6 +748,7 @@
      「剧名 / 封面 / 这一集」记到 localStorage。分组用站点自己的媒体 id
      （播放页地址的 ?id=），拿不到 id 时退回剧名，同一部剧不会碎成两条。 */
   var LIBRARY_STORE = 'kj-ios-downloads';
+  var TOMBSTONE_STORE = 'kj-ios-deleted-episodes';
 
   function readLibrary() {
     var parsed = null;
@@ -794,8 +795,38 @@
     return { shows: clean };
   }
 
+  function deletedEpisodeKey(showId, key) { return String(showId || '') + '|' + String(key || ''); }
+  function readDeletedEpisodes() {
+    var parsed = null;
+    try { parsed = JSON.parse(readStore(TOMBSTONE_STORE) || '[]'); } catch (error) { parsed = null; }
+    if (!parsed || typeof parsed.length !== 'number') return [];
+    return parsed.filter(function (item) { return typeof item === 'string'; });
+  }
+  function isDeletedEpisode(showId, key) {
+    return readDeletedEpisodes().indexOf(deletedEpisodeKey(showId, key)) >= 0;
+  }
+  function markDeletedEpisode(showId, key) {
+    if (!key || !showId) return;
+    var list = readDeletedEpisodes();
+    var marker = deletedEpisodeKey(showId, key);
+    if (list.indexOf(marker) < 0) list.push(marker);
+    writeStore(TOMBSTONE_STORE, JSON.stringify(list.slice(-300)));
+  }
+
   function writeLibrary(library) {
     writeStore(LIBRARY_STORE, JSON.stringify({ shows: library.shows || [] }));
+  }
+
+  /* 删除后允许重新下载：墓碑只挡「旧快照/晚到回调」复活，不应该挡用户主动再点这一集。
+     新请求清掉网页墓碑，原生那边也会用新的 id/任务代次建立新记录。 */
+  function clearDeletedEpisode(showId, key) {
+    if (!key || !showId) return;
+    var marker = deletedEpisodeKey(showId, key);
+    var next = readDeletedEpisodes().filter(function (item) { return item !== marker; });
+    if (next.length) writeStore(TOMBSTONE_STORE, JSON.stringify(next));
+    else {
+      try { localStorage.removeItem(TOMBSTONE_STORE); } catch (error) { /* 隐私模式 */ }
+    }
   }
 
   /* 播放页能拿到的真实媒体标识：站点地址的 ?id=、详情标题、海报、总集数。 */
@@ -842,7 +873,10 @@
 
   /* 下载完成：把这一集记到对应剧名下（同一集重下就覆盖，不留重复）。 */
   function recordDownloaded(payload, meta) {
+    var libraryTaskId = '';
     var info = meta || {};
+    var incomingKey = info.epKey === undefined || info.epKey === null ? '' : String(info.epKey);
+    if (isDeletedEpisode(info.id || info.title, incomingKey)) return;
     var title = String(info.title || '').trim();
     if (!title) return;
     /* 不伪造完成：只有原生真的把文件落到沙盒、回传了 path 才记进片库 */
@@ -862,8 +896,16 @@
     if (info.cover) show.cover = String(info.cover);
     if (Number(info.total) > 0) show.total = Number(info.total);
     var key = info.epKey === undefined || info.epKey === null ? '' : String(info.epKey);
+    for (var q = 0; q < queueTasks.length; q++) {
+      var queued = queueTasks[q];
+      if (queued && String(queued.showId || '') === String(id) && String(queued.epKey || '') === key) {
+        libraryTaskId = String(queued.id || '');
+        break;
+      }
+    }
     var record = {
       key: key,
+      id: String(payload && payload.id ? payload.id : libraryTaskId),
       label: String(info.epLabel || (payload && payload.ep) || ''),
       name: String((payload && payload.name) || ''),
       path: savedPath,
@@ -904,6 +946,7 @@
   }
   /// 真的删除：先把记录从片库里去掉，再让原生删掉那个文件（只删这一行）
   function deleteDownloaded(showId, key) {
+    markDeletedEpisode(showId, key);
     var library = readLibrary();
     var shows = library.shows;
     var removed = [];
@@ -925,7 +968,14 @@
       return false;
     }
     var path = String(removed[0].path || '');
-    if (path) postNative({ action: 'deleteLocal', path: path, name: removed[0].name || '' });
+    postNative({
+      action: 'deleteDownload',
+      id: String(removed[0].id || ''),
+      showId: String(showId || ''),
+      epKey: String(key || ''),
+      path: path,
+      name: String(removed[0].name || '')
+    });
     announce(path ? '已删除这一集和它的文件' : '已删除这一集（没有本地文件）');
     return true;
   }
@@ -1212,13 +1262,14 @@
   }
 
   function restoreQueue() {
-    var parsed = null;
-    try { parsed = JSON.parse(readStore(QUEUE_STORE) || 'null'); } catch (error) { parsed = null; }
-    if (parsed && typeof parsed.length === 'number') queueTasks = parsed;
+    /* 网页自己的队列缓存不再当事实源：原生快照才是唯一记录源。 */
+    queueTasks = [];
+    try { localStorage.removeItem(QUEUE_STORE); } catch (error) { /* 隐私模式 */ }
   }
 
   function saveQueue() {
-    writeStore(QUEUE_STORE, JSON.stringify(queueTasks.slice(0, 300)));
+    /* 快照只在内存里用；不再写回 localStorage，避免旧快照复活。 */
+    queueTasks = queueTasks.slice(0, 300);
   }
 
   function updateQueueProgress(payload) {
@@ -1456,11 +1507,44 @@
     var line = currentLine();
     var total = epNodes().length || Number(meta.total) || 0;
     rememberBatchShow({ id: id, title: meta.title, cover: meta.cover, total: total });
+    /* 乐观行：点完马上能在下载页/我的下载看到这一集，原生快照到达后会被同一 showId+epKey 覆盖。
+       这里只写内存，不写 localStorage，避免旧缓存变成第二个事实源。 */
+    for (var p = 0; p < nodes.length; p++) {
+      var pendingKey = epKeyOf(nodes[p]);
+      if (!pendingKey || isDeletedEpisode(id, pendingKey)) continue;
+      var pendingId = 'dl-' + (id || 'ep') + '-' + pendingKey + '-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
+      var optimistic = null;
+      for (var q = 0; q < queueTasks.length; q++) {
+        if (queueTasks[q] && String(queueTasks[q].showId || '') === String(id)
+            && String(queueTasks[q].epKey || '') === String(pendingKey)) {
+          optimistic = queueTasks[q];
+          break;
+        }
+      }
+      if (!optimistic) {
+        optimistic = { id: pendingId, showId: id, epKey: pendingKey };
+        queueTasks.push(optimistic);
+      }
+      optimistic.id = pendingId;
+      optimistic.epLabel = epLabelOf(nodes[p]) || ('第' + pendingKey + '集');
+      optimistic.title = String(meta.title || '');
+      optimistic.name = safeName(String(meta.title || '未命名') + ' ' + (epLabelOf(nodes[p]) || ('第' + pendingKey + '集'))) + '.mp4';
+      optimistic.status = 'queued';
+      optimistic.received = 0;
+      optimistic.total = 0;
+      optimistic.path = '';
+      optimistic.size = 0;
+      optimistic.reason = '';
+    }
+    saveQueue();
+    renderDownloadLibrary();
+    syncDownloadPage();
     announce('正在解析 ' + nodes.length + ' 集的片源…');
     var jobs = [];
     for (var i = 0; i < nodes.length; i++) {
       (function (node) {
         var key = epKeyOf(node);
+        if (isDeletedEpisode(id, key)) clearDeletedEpisode(id, key);
         jobs.push(resolveEpisodeUrl(id, key, line).then(function (result) {
           if (!result.url) return { reason: result.reason, key: key };
           return { url: result.url, key: key, label: epLabelOf(node) || ('第' + key + '集') };
@@ -1475,7 +1559,7 @@
         var key = results[r].key;
         var label = results[r].label;
         items.push({
-          id: 'dl-' + (id || 'ep') + '-' + key,
+          id: 'dl-' + (id || 'ep') + '-' + key + '-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8),
           showId: id,
           epKey: key,
           epLabel: label,
@@ -1538,6 +1622,9 @@
   /* 原生层回传：同一个 id 才认，避免换集之后旧任务改乱新状态 */
   window.__zhuijuDownload = function (payload) {
     if (!payload) return;
+    var eventShowId = String(payload.showId || '');
+    var eventKey = payload.epKey === undefined || payload.epKey === null ? '' : String(payload.epKey);
+    if (eventShowId && eventKey && isDeletedEpisode(eventShowId, eventKey) && payload.event !== 'done') return;
     var event = payload.event;
     /* 批量任务的 id 和「当前单集」不是同一个：完成事件仍要写进片库。
        只认带真实落盘路径的 done，按 showId + 集号去重且幂等。 */
@@ -1621,7 +1708,9 @@
   /* 原生队列快照：整部剧的进度、排队/暂停/失败状态都从这份快照来（重启后也一样） */
   window.__zhuijuDownloads = function (kind, tasks) {
     if (kind !== 'snapshot' || !tasks || typeof tasks.length !== 'number') return;
-    queueTasks = tasks;
+    queueTasks = tasks.filter(function (task) {
+      return task && !isDeletedEpisode(task.showId, task.epKey);
+    });
     saveQueue();
     renderDownloadLibrary();
     syncDownloadPage();

@@ -75,6 +75,9 @@ final class MediaDownloader: NSObject {
         /// 每启动一次任务 +1：暂停回调靠它确认「这个 resumeData 属于我现在看的这条任务」，
         /// 避免用户立即继续、新任务已经建好之后，旧任务的回调把数据写进新记录。
         var generation: Int? = nil
+        /// 用户显式删除的时间戳（墓碑）。墓碑只留在原生记录里，不会进快照，
+        /// 因此晚到的完成回调、重启、重新进页都不可能把这一集带回来。
+        var deletedAt: Double? = nil
     }
 
     /// 同一时刻最多跑几条：用户要的是「两集一起下」，不是把整部剧一起拉满。
@@ -288,6 +291,75 @@ final class MediaDownloader: NSObject {
         Self.enqueue(requests)
     }
 
+    /// 左滑删除一集：取消任务、把原生记录标成墓碑（不再进快照）、通知网页刷新。
+    /// 真正的本地文件删除由 WebViewController.deleteLocalFile 按路径做，职责分开。
+    func deleteEpisode(id: String?, showId: String, epKey: String) {
+        Self.deleteEpisode(id: id, showId: showId, epKey: epKey)
+    }
+    func moveDownloadedFileToTrash(at path: String?) {
+        guard let raw = path?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else { return }
+        let source = URL(fileURLWithPath: raw).standardizedFileURL
+        guard let directory = Self.directory() else { return }
+        let root = directory.standardizedFileURL
+        let rootComponents = root.pathComponents
+        let sourceComponents = source.pathComponents
+        guard sourceComponents.count > rootComponents.count,
+              Array(sourceComponents.prefix(rootComponents.count)) == rootComponents else { return }
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: source.path, isDirectory: &isDirectory), !isDirectory.boolValue else { return }
+        do {
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            let trash = root.appendingPathComponent(".trash", isDirectory: true)
+            try FileManager.default.createDirectory(at: trash, withIntermediateDirectories: true)
+            let name = source.lastPathComponent
+            let target = trash.appendingPathComponent(name)
+            if FileManager.default.fileExists(atPath: target.path) {
+                let formatter = DateFormatter()
+                formatter.dateFormat = "yyyyMMdd-HHmmss-SSS"
+                let stem = (name as NSString).deletingPathExtension
+                let ext = (name as NSString).pathExtension
+                let suffix = ext.isEmpty ? "" : "." + ext
+                let renamed = stem + "-" + formatter.string(from: Date()) + suffix
+                try FileManager.default.moveItem(at: source, to: trash.appendingPathComponent(renamed))
+            } else {
+                try FileManager.default.moveItem(at: source, to: target)
+            }
+        } catch {
+            NSLog("move downloaded file to trash failed: %@", String(describing: error))
+        }
+    }
+
+    private static func deleteEpisode(id: String?, showId: String, epKey: String) {
+        records = loadRecords()
+        var changed = false
+        for index in records.indices {
+            let record = records[index]
+            let sameId = !(id ?? "").isEmpty && record.id == id
+            let sameEpisode = !showId.isEmpty && !epKey.isEmpty
+                && (record.showId ?? "") == showId && (record.epKey ?? "") == epKey
+            guard sameId || sameEpisode else { continue }
+            records[index].deletedAt = Date().timeIntervalSince1970
+            if !epKey.isEmpty, let deletedAt = records[index].deletedAt {
+                UserDefaults.standard.set(deletedAt, forKey: tombstoneKey(showId: records[index].showId ?? "", epKey: records[index].epKey ?? ""))
+            }
+            records[index].status = "cancelled"
+            records[index].reason = "已删除"
+            records[index].path = ""
+            records[index].received = 0
+            records[index].resumeData = nil
+            records[index].delivered = false
+            if let task = tasks.removeValue(forKey: record.id) { task.cancel() }
+            progressHandlers.removeValue(forKey: record.id)
+            finishHandlers.removeValue(forKey: record.id)
+            changed = true
+        }
+        if changed {
+            persist(force: true)
+            emitStateEvents()
+            pump()
+        }
+    }
+
     /// 暂停一整部剧（正在传的取 resumeData、排队的转 paused）。
     func pause(showId: String) { Self.pause(showId: showId) }
 
@@ -348,6 +420,15 @@ final class MediaDownloader: NSObject {
     ) -> [String] {
         records = loadRecords()
         var accepted: [String] = []
+        let tombstones = deletedKeys()
+        let requestedKeys = Set(requests.map { key(showId: $0.showId, epKey: $0.epKey) })
+        for deadKey in tombstones where !requestedKeys.contains(deadKey) {
+            let parts = deadKey.split(separator: "|", maxSplits: 1, omittingEmptySubsequences: false)
+            if parts.count == 2 {
+                records.removeAll { (($0.showId ?? "") == String(parts[0])) && (($0.epKey ?? "") == String(parts[1])) }
+                UserDefaults.standard.removeObject(forKey: tombstoneKey(showId: String(parts[0]), epKey: String(parts[1])))
+            }
+        }
         var rejected: [(String, String, [String: String])] = []
         for request in requests {
             if let reason = rejection(of: request.url) {
@@ -356,6 +437,14 @@ final class MediaDownloader: NSObject {
             }
             let showId = request.showId
             let epKey = request.epKey
+            if epKey.isEmpty {
+                continue
+            }
+            let episodeKey = key(showId: showId, epKey: epKey)
+            if tombstones.contains(episodeKey) {
+                UserDefaults.standard.removeObject(forKey: tombstoneKey(showId: showId, epKey: epKey))
+                records.removeAll { (($0.showId ?? "") == showId) && (($0.epKey ?? "") == epKey) }
+            }
             if let index = duplicateIndex(in: records, showId: showId, epKey: epKey) {
                 /* 已经在队列里：不重复入队（同一部剧同一集只跑一条） */
                 accepted.append(records[index].id)
@@ -593,7 +682,7 @@ final class MediaDownloader: NSObject {
         records = loadRecords()
         var events: [[String: Any]] = []
         var needsSave = false
-        for record in records {
+        for record in records where !Self.isDeleted(record) {
             if record.status == "running" {
                 events.append([
                     "event": "progress", "id": record.id,
@@ -624,7 +713,7 @@ final class MediaDownloader: NSObject {
             needsSave = true
         }
         if needsSave {
-            for index in records.indices where records[index].status != "running" && records[index].status != "queued" && records[index].status != "paused" {
+            for index in records.indices where !Self.isDeleted(records[index]) && records[index].status != "running" && records[index].status != "queued" && records[index].status != "paused" {
                 records[index].delivered = true
             }
             persist(force: true)
@@ -635,7 +724,7 @@ final class MediaDownloader: NSObject {
     /// 队列快照：所有任务的真实状态（含排队/暂停），网页据此算整剧进度。
     private static func snapshot() -> [[String: Any]] {
         records = loadRecords()
-        return records.map { record in
+        return records.filter { !Self.isDeleted($0) }.map { record in
             [
                 "id": record.id,
                 "showId": record.showId ?? "",
@@ -658,7 +747,7 @@ final class MediaDownloader: NSObject {
         guard let sink = eventSink else { return }
         records = loadRecords()
         var payload: [[String: Any]] = []
-        for record in records {
+        for record in records where !Self.isDeleted(record) {
             var item: [String: Any] = [
                 "event": record.status == "running" ? "progress" : record.status,
                 "id": record.id,
@@ -715,6 +804,26 @@ final class MediaDownloader: NSObject {
         }
     }
 
+    private static let tombstonePrefix = "kj-ios-download-deleted-"
+    private static func key(showId: String, epKey: String) -> String { showId + "|" + epKey }
+    private static func tombstoneKey(showId: String, epKey: String) -> String {
+        tombstonePrefix + showId + "|" + epKey
+    }
+    private static func deletedKeys() -> Set<String> {
+        let defaults = UserDefaults.standard
+        var result = Set<String>()
+        for record in loadRecords() {
+            guard let deletedAt = record.deletedAt, deletedAt > 0 else { continue }
+            let showId = record.showId ?? ""
+            let epKey = record.epKey ?? ""
+            result.insert(key(showId: showId, epKey: epKey))
+            defaults.set(deletedAt, forKey: tombstoneKey(showId: showId, epKey: epKey))
+        }
+        return result
+    }
+
+    private static func isDeleted(_ record: Record) -> Bool { (record.deletedAt ?? 0) > 0 }
+
     private static func update(_ id: String, force: Bool = true, _ mutate: (inout Record) -> Void) {
         if !records.contains(where: { $0.id == id }) { records = loadRecords() }
         guard let index = records.firstIndex(where: { $0.id == id }) else { return }
@@ -753,6 +862,7 @@ final class MediaDownloader: NSObject {
     // MARK: - 收尾
 
     private static func complete(id: String, payload: [String: Any]) {
+        if let current = record(id), Self.isDeleted(current) { return }
         update(id) { record in
             record.status = "done"
             record.path = payload["path"] as? String ?? ""
@@ -773,6 +883,7 @@ final class MediaDownloader: NSObject {
     }
 
     private static func fail(id: String, failure: Failure) {
+        if let current = record(id), Self.isDeleted(current) { return }
         update(id) { record in
             record.status = failure.isCancellation ? "cancelled" : "failed"
             record.reason = failure.message
@@ -803,7 +914,7 @@ extension MediaDownloader: URLSessionDownloadDelegate {
         totalBytesWritten: Int64,
         totalBytesExpectedToWrite: Int64
     ) {
-        guard let id = downloadTask.taskDescription, Self.record(id)?.status == "running" else { return }
+        guard let id = downloadTask.taskDescription, let current = Self.record(id), current.status == "running", !Self.isDeleted(current) else { return }
         Self.update(id, force: false) { record in
             record.received = totalBytesWritten
             record.total = totalBytesExpectedToWrite > 0 ? totalBytesExpectedToWrite : record.total
@@ -827,7 +938,7 @@ extension MediaDownloader: URLSessionDownloadDelegate {
 
     func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
         guard let id = downloadTask.taskDescription else { return }
-        guard Self.record(id)?.status == "running" else { return }
+        guard let current = Self.record(id), current.status == "running", !Self.isDeleted(current) else { return }
         if let response = downloadTask.response as? HTTPURLResponse, !(200...299).contains(response.statusCode) {
             Self.fail(id: id, failure: .http(response.statusCode))
             return
@@ -861,7 +972,7 @@ extension MediaDownloader: URLSessionDownloadDelegate {
         Self.finishedTasks.insert(task.taskIdentifier)
         Self.tasks.removeValue(forKey: id)
         /* 暂停/取消是我们自己先改的状态：这里不能再写成失败。 */
-        guard Self.record(id)?.status == "running" else { return }
+        guard let current = Self.record(id), current.status == "running", !Self.isDeleted(current) else { return }
         if let error = error as NSError? {
             if error.domain == NSURLErrorDomain && error.code == NSURLErrorCancelled {
                 Self.fail(id: id, failure: .cancelled)

@@ -113,6 +113,8 @@ final class WebViewController: UIViewController, UIDocumentInteractionController
                 target?.presentLocalPlayback(path: body["path"] as? String)
             case PlayerAction.openInOtherPlayer.rawValue:
                 target?.presentOpenInMenu(path: body["path"] as? String)
+            case "deleteDownload":
+                target?.deleteDownloadedEpisode(body)
             case PlayerAction.deleteLocal.rawValue:
                 target?.deleteLocalFile(path: body["path"] as? String)
             case PlayerAction.playerFullscreen.rawValue:
@@ -509,23 +511,11 @@ final class WebViewController: UIViewController, UIDocumentInteractionController
 
     /// 把下载好的本地文件交给系统：文件类型（public.movie / public.mpeg-4）是
     /// 播放器 App 能出现在列表里的方式，也是这类 App 唯一合法的入口。
-    /// 已下载列表左滑删除：只删这一集对应的那个文件，记录由网页侧先删。
-    /// 路径必须先确认落在 App 自己的 Documents 里，避免被网页指到别处。
+    /// 兼容老网页的删除消息：只删这一集对应的那个文件，记录由网页侧先删。
+    /// 路径由下载器按真实下载目录边界校验。
     fileprivate func deleteLocalFile(path: String?) {
         guard let raw = path?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else { return }
-        let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-        let target = URL(fileURLWithPath: raw).standardizedFileURL
-        guard target.path.hasPrefix(documents.standardizedFileURL.path) else {
-            NSLog("deleteLocal refused: %@ is outside Documents", raw)
-            return
-        }
-        do {
-            if FileManager.default.fileExists(atPath: target.path) {
-                try FileManager.default.removeItem(at: target)
-            }
-        } catch {
-            NSLog("deleteLocal failed: %@", String(describing: error))
-        }
+        downloader.moveDownloadedFileToTrash(at: raw)
     }
 
     fileprivate func presentLocalPlayback(path: String?) {
@@ -575,6 +565,14 @@ final class WebViewController: UIViewController, UIDocumentInteractionController
             return nil
         }
         return derived
+    }
+
+    fileprivate func deleteDownloadedEpisode(_ body: [String: Any]) {
+        let showId = body["showId"] as? String ?? ""
+        let epKey = body["epKey"] as? String ?? ""
+        downloader.deleteEpisode(id: body["id"] as? String, showId: showId, epKey: epKey)
+        downloader.moveDownloadedFileToTrash(at: body["path"] as? String)
+        sendDownloadSnapshot()
     }
 
     /// 已完成的一集交给系统「打开方式」菜单（UIDocumentInteractionController）。

@@ -948,3 +948,15 @@ testToolbarDownloadButtonReplacesTheDanmakuSlot → missing-button
 - **验证边界**：**真机**：系统菜单里实际出现哪些播放器、对方能否完整读取并离线播放、
   mkv / ts 是否真能被某个播放器接住、iPad 锚点位置。本机是 Windows，Swift 既编不了也跑不了，
   presentOpenInMenu 的路径与类型逻辑**没有本机编译/运行证据**；Node 用例只钉源码守卫，不能替代真机。
+
+## REG-026 build24 单集下载状态双源与删除复活
+
+- **现象**：详情页点某一集下载，下载页不能马上看到这一集；删除后重启或重新进页，已删除的集又出现在片库。
+- **根因**：原生下载器用 `kj-ios-download-tasks` 作为持久队列，网页同时把 `kj-ios-queue` / `kj-ios-downloads` 当状态源。左滑删除只删网页片库和本地文件，原生任务和晚到回调还在；重新进页时旧快照和 done 事件又写回片库。
+- **修复（build24）**：
+  - 原生记录成为唯一事实源：网页不再读写 `kj-ios-queue`，只接收原生 `__zhuijuDownloads('snapshot')`；启动时清掉旧缓存。
+  - 点集先在内存里放一条 `queued` 乐观行，下载页/我的下载立刻显示排队；原生快照到达后按同一 `showId + epKey` 覆盖。
+  - 左滑删除发 `deleteDownload`：原生取消任务、写删除墓碑、移走 `Documents/Downloads` 里的真实文件、立即回传快照；网页同时写墓碑，过滤晚到进度和旧快照。删除后再次主动下载同一集可清墓碑，并用新的任务 id 建记录，旧回调不会污染新任务。
+- **测试名**（Node）：tapping one cell in the episode grid queues exactly that episode、the tapped episode appears immediately while its source is still being resolved、a downloaded row can be deleted on its own, and only that file is asked to be removed、old snapshots, late done events and app restarts never resurrect a deleted episode、native records are the single source and deleted rows never come back
+- **修复版本**：0.1.19（build 24，待出包）
+- **验证边界**：本地 Node 85/85 通过；真机待 Ken 安装 build24 后验收。Windows 无 Xcode，Swift 未本地编译。

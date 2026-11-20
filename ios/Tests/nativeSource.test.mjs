@@ -6,6 +6,7 @@ import test from 'node:test';
    证明「路径边界 / 普通文件 / 类型处理」不会被以后的无意改动删掉。
    真机行为仍然只在 iOS 上验证，Node 通过不代表系统菜单里真的能播。 */
 const source = await readFile(new URL('../ZhuijuAI/WebViewController.swift', import.meta.url), 'utf8');
+const downloaderSource = await readFile(new URL('../ZhuijuAI/MediaDownloader.swift', import.meta.url), 'utf8');
 
 function openInSection() {
   const start = source.indexOf('fileprivate func presentOpenInMenu');
@@ -55,4 +56,15 @@ test('the native notice bridge inserts the escaped message instead of a literal 
   const section = source.slice(start, source.indexOf('fileprivate func presentLocalFile', start));
   assert.ok(section.includes('window.__zhuijuPlayerNotice(\\(quoted)'), '要用 Swift 插值把转义后的字面量拼进脚本');
   assert.ok(!section.includes('window.__zhuijuPlayerNotice((quoted)'), '不能把 ((quoted)) 当字面量写进脚本，否则网页读到未定义变量');
+});
+
+test('native records are the single source and deleted rows never come back', () => {
+  assert.ok(downloaderSource.includes('var deletedAt: Double?'), 'native record has deletion tombstone');
+  assert.ok(downloaderSource.includes('records.filter { !Self.isDeleted($0) }.map'), 'snapshot filters deleted records');
+  assert.ok(downloaderSource.includes('func deleteEpisode(id: String?'), 'native per-episode delete exists');
+  assert.ok(downloaderSource.includes('func moveDownloadedFileToTrash(at path: String?)'), 'delete also removes the file');
+  assert.ok(downloaderSource.includes('rootComponents'), 'full path component check');
+  assert.ok(source.includes('case "deleteDownload"'), 'web delete reaches native handler');
+  assert.ok(source.includes('at: body["path"] as? String'), 'native delete passes real file path');
+  assert.ok(source.includes('sendDownloadSnapshot()'), 'snapshot refreshed after delete');
 });

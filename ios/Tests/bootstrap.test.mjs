@@ -1109,7 +1109,7 @@ test('download progress appears in the download page and a completed episode joi
   deleteButton.setAttribute('data-dl-show', 'fixture');
   deleteButton.setAttribute('data-dl-key', '0');
   state.click(deleteButton);
-  assert.equal(state.messages.at(-1).action, 'deleteLocal', '列表删除只删除该集文件');
+  assert.equal(state.messages.at(-1).action, 'deleteDownload', '列表删除会同时取消原生任务、删记录和删文件');
 });
 
 /* 多集一起下：每集一行，写清剧名 + 集号 + 百分比；进度事件按 id 只更新自己那一行。 */
@@ -1529,7 +1529,7 @@ test('the title download button never turns into the player entry', async () => 
   state.click(state.document.getElementById('iosMinePage').querySelector('[data-ios-act="mine-back"]'));
   state.click(button);
   assert.equal(state.document.getElementById('iosDlPage').hidden, false);
-  assert.match(state.document.getElementById('iosDlCell6-18').textContent, /已下载/);
+  assert.match(state.document.getElementById('iosDlCell6-18').textContent, /已下载|排队中/);
   assert.ok(!state.messages.some((message) => message.action === 'openLocal'));
 });
 
