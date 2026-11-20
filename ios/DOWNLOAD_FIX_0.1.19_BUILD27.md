@@ -79,16 +79,25 @@ Ken 的规则：禁止云端测试/模拟器/XCTest/UI smoke/截图门禁；本�
   - 单集/批量入队的 `meta` 补 `userAgent` 与兜底 `Referer`（页面 origin）。
 - `ios/ZhuijuAI/AppBootstrap.js`
   - 失败格显示「失败 · 点一下重试」（点格子重新解析 `/api/play` 再入队）。
-- `ios/Tests/downloadFailure.test.mjs`（新增 8 条源码守卫）。
-- `ios/REGRESSIONS.md`：REG-029。
+- `ios/Tests/downloadFailure.test.mjs`（新增 10 条源码守卫：UA/Referer、对账、暂停续传、代次作废等）。
+- `ios/REGRESSIONS.md`：REG-029（本问题）、REG-030（删除线，开发二）、REG-031（夹具 40GB）。
+
+**审核第一轮两项（已修）**：暂停中的 HLS job 被 `discardZombies` 当僵尸清分片缓存；同一 id 换清单后旧的清单/密钥/分片回调
+会写进新任务。现在暂停 job 只停调度、缓存留存，重启后按记录恢复暂停态；每次开始/丢弃/失败/合成完成换代次，
+所有异步回调都带代次校验。
+
+**集成**：开发二删除线 `fix/ios-del-record`（4712d53、241fc6f）已合入本分支；共享文件以本分支为唯一写入者，
+REG-029/030/031 三段都保留。
 
 ## 5. 本地验证（真实输出）
 
-- `python C:\Users\kenzh\hark_tasks\memcap.py 2048 bash -c 'node --test Tests/*.test.mjs'` → **112/112 通过**（含新增 8 条），
+- `python C:\Users\kenzh\hark_tasks\memcap.py 2048 bash -c 'node --test Tests/*.test.mjs'` → 本分支初版 **112/112 通过**；
+  整合删除线与审核修复后 `cd ios && python C:/Users/kenzh/hark_tasks/memcap.py 2048 node --test Tests/*.test.mjs` → **126/126 通过**，
   全程 2GB 硬上限内，没有 `[memcap]` 触发。
-- 单跑 `Tests/downloadQueue.test.mjs`、`Tests/downloadFailure.test.mjs` 在 2GB 上限下均通过（约 3.5s / 0.1s）。
-- 关于 Hark 报告的 40GB：当前两个工作树（`kanju-dl-fix`、`kanju-del-record`）在 memcap 2048 下都跑不出该现象，
-  已在验证说明里如实记录“未能复现”，并让所有测试/脚本一律套 memcap 2048。
+- 单跑 `Tests/downloadFailure.test.mjs` → **10/10 通过**（含暂停对账与回调代次两条新守卫）。
+- 关于 Hark 报告的 40GB：已定位到**未提交草稿版 + 一条必然失败的断言**，Node 断言展开夹具 DOM 的双向引用导致指数膨胀；
+  夹具已改成单行 inspect 摘要并加回归，草稿版上复测 52ms 内普通失败、512MB 也不 OOM。证据见 `ios/DOWNLOAD_TEST_MEMORY_20261120.md`。
+  所有测试/脚本继续一律套 memcap 2048。
 
 ## 6. 待真机验收矩阵（新包安装后）
 

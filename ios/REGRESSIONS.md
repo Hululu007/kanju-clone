@@ -1064,10 +1064,11 @@ testToolbarDownloadButtonReplacesTheDanmakuSlot → missing-button
   - `enqueue`：缺集号的请求落一条 `failed` 记录（原因：这一集缺少集号，没法下载），不再静默丢。
   - 取消/失败 → `HLSDownloader.discard`（连分片缓存一起清），暂停才 `pause`（保留已下分片继续续传）。
   - 网页：失败的那一格写「失败 · 点一下重试」，点格子会重新解析 `/api/play`（拿新地址）再入队。
-- **测试名**（Node，`ios/Tests/downloadFailure.test.mjs`，8 条源码守卫）：整文件下载带上页面 Referer 和浏览器 UA，
+- **测试名**（Node，`ios/Tests/downloadFailure.test.mjs`，10 条源码守卫）：整文件下载带上页面 Referer 和浏览器 UA，
   不再发裸请求、媒体请求头：有浏览器 UA 就用网页的，只有 App 令牌就退回兜底 UA、HLS 分片不用裸 App 令牌当 UA、
   启动对账：只接管队列里的任务，孤儿和终态任务一律 cancel、HLS 重启后：没拿到后台回调的 job 也要接着下，
   不能停成僵尸、取消/失败丢分片缓存，暂停保留、没有集号的入队请求要落一条失败记录，不能静默丢掉、
+  暂停的一集不会被启动对账当僵尸清掉：缓存留着，调度停掉、同一 id 换清单：旧清单、密钥、分片回调按代次作废、
   失败的那一格写清「点一下重试」，点格子会重新解析片源再入队。
 - **审核第一轮意见（已修，仍是 build 27 同一交付）**：
   1. `discardZombies` 原来只把 queued/running 当活任务，暂停中的 HLS job 被当僵尸，
@@ -1084,7 +1085,52 @@ testToolbarDownloadButtonReplacesTheDanmakuSlot → missing-button
   取消后队列是否继续、重启后是否续下、失败格是否可重试）。3 部真实样本（谷雨 / 倾世锦鳞谷雨来 / 古玉劫后香）
   是数据库 + 源站探测证据，**不是**真机下载成功证据。
 
-## REG-030 一条失败的测试断言把 node 进程吃到 40GB（夹具 DOM 展开）
+## REG-030 下载记录删不掉（build 27）【真机】
+
+- **现象**：我的下载里某些历史条目，左滑点「删除」后提示删除失败，条目一直留着；重装或换包（build 号变化）后更容易出现。
+  下载中 / 排队 / 失败的集在列表里根本没有删除入口，失败的集连行都不显示；失败的集还一直占着队列名额。
+- **根因（代码可证，非猜测）**：
+  - 记录里存的是**沙盒绝对路径** `/var/mobile/Containers/Data/Application/<UUID>/Documents/Downloads/x.mp4`
+    （网页 `recordDownloaded` 直接存 `payload.path`，原生 `complete(id:)` 也直接存 `payload["path"]`）。
+  - `MediaDownloader.removeDownloadedFile(at:)` 当时把这条绝对路径 `resolvingSymlinksInPath()` 后，
+    与**当前** `Documents/Downloads` 做 `pathComponents` 前缀比较；App 换一次容器，旧记录里的 `<UUID>` 就不再等于当前容器，
+    前缀必然不匹配，函数直接 `return false`（`refuse to delete file outside download directory`），
+    网页把失败原样显示回来 —— 于是这一行永远删不掉。
+  - 同一份绝对路径还喂给离线播放和「其他播放器打开」，换容器后同样失效（表现为「文件不在了」）。
+  - 删除入口只挂在已下载片库行（`.ip-eprow`）上：`data-dl-task` 的下载中/排队行没有删除键，
+    `queueTaskRows()` 也只收 `running/queued`，`failed` 行既不显示也无处清理。
+- **修复（build 27）**：
+  - 只持久化**相对路径** `Downloads/<文件名>`：网页 `relativeDownloadPath()`、原生 `MediaDownloader.relativePath(for:)`；
+    `downloadsFolder` 只写一处。`loadRecords()` 读到旧绝对路径就就地迁移成相对路径（只改写法，不动文件）。
+  - 新增唯一解析入口 `MediaDownloader.fileURL(forStoredPath:)`：先校验来路（只认裸文件名、`Downloads/<文件名>`、
+    旧容器 `…/Documents/Downloads/<文件名>`），再取最后一段文件名拼到**当前** `Documents/Downloads`，
+    仍做「必须是下载目录直接子项」的边界检查（`..`、`.`、空串、目录一律拒绝）。
+    删除、App 内离线播放、外部播放器打开、删除后回填都走这一个入口。
+    网页侧 `relativeDownloadPath()` 用同一套写法校验：`/tmp/x.mp4`、`../../outside.mp4`、`Downloads/子目录/x.mp4`
+    这类越界路径一律归一成空串（记录仍可删，文件不动），不再凭文件名映射到下载目录里的同名文件。
+  - `removeDownloadedFile(at:)` 不再拿旧绝对路径去比较；文件本来就不存在视为**清理成功**并清记录；
+    真实权限/磁盘错误仍返回失败并把原因回给网页，不虚报释放空间。
+  - 下载中 / 排队 / 失败三种行都能左滑删：网页 `deleteQueuedTask()` 写墓碑后发 `deleteDownload`（`path` 为空表示没有文件要删）；
+    原生 `deleteEpisode` 先 `task.cancel()`、`HLSDownloader.discard(id:)`、清 `path`、写墓碑，再 `pump()` 释放并发名额；
+    取消回调 / 旧快照 / 晚到 done 都被墓碑挡住，不会复活记录。
+  - 删除正在 App 内播放的那一集：`WebViewController` 记住当前播放器和文件，先 `pause()` + 收起播放器，再删文件。
+  - 已下载列表仍然只有左滑删除一个入口，没有新增其它删除按钮；队列行的删除键沿用同一套左滑露出。
+- **改动文件**：`ios/ZhuijuAI/MediaDownloader.swift`、`ios/ZhuijuAI/WebViewController.swift`、
+  `ios/ZhuijuAI/AppBootstrap.js`、`ios/Tests/bootstrap.test.mjs`、`ios/Tests/downloadQueue.test.mjs`、`ios/Tests/nativeSource.test.mjs`。
+- **测试名（Node）**：a downloaded row saved with an old app-container path can still be deleted、a new download is stored as a relative path, never the absolute sandbox path、downloading, queued and failed rows can all be deleted and never come back、deleting a running row asks native for that task only and lets the queue move on、a stored path from an old app container still resolves inside the current downloads folder、download records only persist a relative path and rebuild the absolute one on use、deleting the episode that is playing offline stops the player before removing the file、deleting a running job cancels the task, drops its cache and frees the queue slot、a cancelled job callback never writes a deleted record back、a stored path outside the downloads folder is never mapped onto a same-named file、the native path resolver only accepts paths that really point into downloads。
+- **审核第一轮意见（已修）**：只取文件名归一，会把任意来源的路径（包括越界路径）也落到下载目录里的同名文件，删除时可能误删。
+  已加与原生一致的写法校验，并补两条测试（网页侧行为测试 + 原生源码测试）；旧测试里用 `/tmp/...` 伪路径当原生 done 回传的夹具
+  改成真实沙盒 `…/Documents/Downloads/...` 形式（只改夹具数据，断言一条未改）。
+- **本地验证**：套内存硬上限跑 `python C:\Users\kenzh\hark_tasks\memcap.py 2048 node --test Tests/*.test.mjs` → 删除线单独 **115/115 通过**；
+  两条线合并后同一命令 **126/126 通过**（0 失败，未触发 memcap）。Windows 无 Xcode，Swift 未本地编译，
+  编译只在 packaging-only 工作流里发生。
+- **验收边界**：以下都要**真机**（Ken 装新包后）核对：旧记录（换过容器的绝对路径）能删、删完文件真的不在了、
+  下载中/排队/失败左滑删后队列继续走、删正在播的那一集先停播、删除失败时条目留在列表里。
+  本轮未做云端测试、未跑模拟器/XCUITest/UI smoke/截图门禁（HARK-NO-CLOUD-TEST）。
+- **已知限制**：记录只存文件名，两条不同记录若文件名恰好相同会指向同一个文件（现网文件名带剧名+集号，未发现撞名）；
+  这不是跨目录映射：非下载目录的路径已按上一条校验拒绝解析。
+
+## REG-031 一条失败的测试断言把 node 进程吃到 40GB（夹具 DOM 展开）
 
 - **现象**：跑 `Tests/downloadQueue.test.mjs` 的 `a failed episode never lets the show look complete...` 时，node 进程涨到 40GB，把电脑撑死，被 Hark 杀掉；`--max-old-space-size` 完全拦不住。
 - **根因（已复现，按版本对过）**：触发版本是 `kanju-build27` 工作树里**未提交的草稿 AppBootstrap**（补丁 `Temp/kanju-build27-draft-queue.patch`，blob `556d9d2`，后被改成 `c0a99fc`，两者都复现），不是任何已提交版本（4f1b14f / 4712d53 / 2f3297b 全部通过）。草稿把 failed/paused 也渲染进 `iosMineQueue`，测试断言 `assert.equal(queueNode, null, ...)` 必然失败；Node 的 assert 用 `customInspect:false, depth:1000` 展开 actual，而夹具节点的 `children` / `parentNode` 都可枚举且互相引用，共享子树被反复展开，报错字符串指数膨胀：只有 3 行队列就 **569,919 字符**，规模再大就是几十 GB。进程死于 `Committing semi space failed` / `Fatal process out of memory: Worklist::Segment::Create`。不是 App 代码的死循环。

@@ -42,9 +42,14 @@ function node(tag = 'div') {
       else if (name.startsWith('data-')) element.dataset[name.slice(5).replace(/-([a-z])/g, (_, letter) => letter.toUpperCase())] = value;
       else element[name] = value;
     },
+    /* 真 DOM 里没写过的属性 getAttribute 返回 null，不是 undefined。
+       注入层有 `getAttribute('data-dl-key') !== null` 这类判断，夹具必须照真行为来，
+       否则删除按钮永远只能删到它自己（历史上这条差异被用例手写属性绕过去了）。 */
     getAttribute(name) {
-      if (name.startsWith('data-')) return element.dataset[name.slice(5).replace(/-([a-z])/g, (_, letter) => letter.toUpperCase())];
-      return element[name];
+      const value = name.startsWith('data-')
+        ? element.dataset[name.slice(5).replace(/-([a-z])/g, (_, letter) => letter.toUpperCase())]
+        : element[name];
+      return value === undefined ? null : value;
     },
     removeAttribute(name) { if (name === 'hidden') element.hidden = false; else delete element[name]; },
     get nextSibling() {
@@ -1108,7 +1113,7 @@ test('download progress appears in the download page and a completed episode joi
   assert.match(runningRow.textContent, /第1集/);
   assert.match(runningRow.textContent, /60%/);
   assert.equal(runningRow.querySelectorAll('.ios-dl-task-progress')[0].value, 60);
-  state.window.__zhuijuDownload({ id: 'task-a', event: 'done', showId: 'fixture', epKey: '0', ep: '第1集', epLabel: '第1集', title: '测试剧', path: '/tmp/追剧AI_第1集.mp4', name: '测试剧 第1集.mp4', size: 104857600 });
+  state.window.__zhuijuDownload({ id: 'task-a', event: 'done', showId: 'fixture', epKey: '0', ep: '第1集', epLabel: '第1集', title: '测试剧', path: '/var/mobile/Containers/Data/Application/TEST-CONTAINER/Documents/Downloads/追剧AI_第1集.mp4', name: '测试剧 第1集.mp4', size: 104857600 });
   assert.match(state.document.getElementById('iosMineBody').textContent, /已下载 1 集/);
   const deleteButton = state.document.getElementById('iosMineBody').querySelector('.ip-epdel');
   assert.ok(deleteButton);
@@ -1195,7 +1200,7 @@ test('a stale queue snapshot cannot replace current single-download state', () =
   const state = fixture({ signedIn: true, episodes: [18], newDownloadUI: true }); state.ready();
   state.click(state.siteDownload);
   state.window.__zhuijuDownloads('snapshot', [
-    { id: 'old-task', showId: 'other', epKey: '18', status: 'done', path: '/tmp/old.mp4' },
+    { id: 'old-task', showId: 'other', epKey: '18', status: 'done', path: '/var/mobile/Containers/Data/Application/TEST-CONTAINER/Documents/Downloads/old.mp4' },
   ]);
   assert.equal(state.document.getElementById('iosDlCell6-18').__iosState.textContent, '未下载');
 });
@@ -1264,11 +1269,11 @@ test('a running download restores its state and appears in my downloads', () => 
   assert.match(restored.textContent, /第3集/);
   assert.match(restored.textContent, /60%/);
   state.window.__zhuijuDownloads('snapshot', [
-    { id: 'dl9', showId: 'fixture', epKey: '2', epLabel: '第3集', title: '测试剧', status: 'done', received: 100, total: 100, path: '/tmp/追剧AI_第3集.mp4', size: 104857600 },
+    { id: 'dl9', showId: 'fixture', epKey: '2', epLabel: '第3集', title: '测试剧', status: 'done', received: 100, total: 100, path: '/var/mobile/Containers/Data/Application/TEST-CONTAINER/Documents/Downloads/追剧AI_第3集.mp4', size: 104857600 },
   ]);
-  state.window.__zhuijuDownload({ id: 'dl9', event: 'done', showId: 'fixture', epKey: '2', epLabel: '第3集', title: '测试剧', path: '/tmp/追剧AI_第3集.mp4', name: '测试剧 第3集.mp4', size: 104857600 });
-  state.window.__zhuijuDownload({ id: 'dl9', event: 'done', showId: 'fixture', epKey: '2', epLabel: '第3集', title: '测试剧', path: '/tmp/追剧AI_第3集.mp4', name: '测试剧 第3集.mp4', size: 104857600 });
-  state.window.__zhuijuDownload({ id: 'dl9', event: 'done', showId: 'fixture', epKey: '2', epLabel: '第3集', title: '测试剧', path: '/tmp/追剧AI_第3集.mp4', name: '测试剧 第3集.mp4', size: 104857600 });
+  state.window.__zhuijuDownload({ id: 'dl9', event: 'done', showId: 'fixture', epKey: '2', epLabel: '第3集', title: '测试剧', path: '/var/mobile/Containers/Data/Application/TEST-CONTAINER/Documents/Downloads/追剧AI_第3集.mp4', name: '测试剧 第3集.mp4', size: 104857600 });
+  state.window.__zhuijuDownload({ id: 'dl9', event: 'done', showId: 'fixture', epKey: '2', epLabel: '第3集', title: '测试剧', path: '/var/mobile/Containers/Data/Application/TEST-CONTAINER/Documents/Downloads/追剧AI_第3集.mp4', name: '测试剧 第3集.mp4', size: 104857600 });
+  state.window.__zhuijuDownload({ id: 'dl9', event: 'done', showId: 'fixture', epKey: '2', epLabel: '第3集', title: '测试剧', path: '/var/mobile/Containers/Data/Application/TEST-CONTAINER/Documents/Downloads/追剧AI_第3集.mp4', name: '测试剧 第3集.mp4', size: 104857600 });
   assert.match(state.document.getElementById('iosMineBody').textContent, /已下载 1 集/);
 });
 
@@ -1315,7 +1320,7 @@ test('tapping the dimmed backdrop closes the settings panel', () => {
    无论如何都要落地，否则换页回来还是上一次的旧进度。 */
 test('replayed queue completion is reflected once in the downloads list', () => {
   const state = fixture({ homePage: true }); state.ready();
-  const task = { id: 'task-a', showId: 'fixture', epKey: '18', epLabel: '第19集', title: '测试剧', status: 'done', path: '/tmp/19.mp4', size: 10 };
+  const task = { id: 'task-a', showId: 'fixture', epKey: '18', epLabel: '第19集', title: '测试剧', status: 'done', path: '/var/mobile/Containers/Data/Application/TEST-CONTAINER/Documents/Downloads/19.mp4', size: 10 };
   state.window.__zhuijuDownloads('snapshot', [task]);
   const completion = { ...task, event: 'done' };
   state.window.__zhuijuDownload(completion);
@@ -1361,13 +1366,13 @@ const librarySeed = {
     {
       id: 'show-a', title: '百日谎言', cover: 'https://zhuiju.dpdns.org/posters/a.jpg', total: 12,
       eps: [
-        { key: '18', label: '第19集', name: '追剧AI_第19集.mp4', path: '/tmp/a19.mp4', size: 1, at: 20 },
-        { key: '19', label: '第20集', name: '追剧AI_第20集.mp4', path: '/tmp/a20.mp4', size: 1, at: 21 },
+        { key: '18', label: '第19集', name: '追剧AI_第19集.mp4', path: '/var/mobile/Containers/Data/Application/TEST-CONTAINER/Documents/Downloads/a19.mp4', size: 1, at: 20 },
+        { key: '19', label: '第20集', name: '追剧AI_第20集.mp4', path: '/var/mobile/Containers/Data/Application/TEST-CONTAINER/Documents/Downloads/a20.mp4', size: 1, at: 21 },
       ],
     },
     {
       id: 'movie-b', title: '某部电影', cover: '', total: 0,
-      eps: [{ key: '0', label: '正片', name: '追剧AI_正片.mp4', path: '/tmp/b.mp4', size: 2, at: 10 }],
+      eps: [{ key: '0', label: '正片', name: '追剧AI_正片.mp4', path: '/var/mobile/Containers/Data/Application/TEST-CONTAINER/Documents/Downloads/b.mp4', size: 2, at: 10 }],
     },
   ],
 };
@@ -1407,10 +1412,12 @@ test('a finished episode offers the system player hand-off, a running one does n
   assert.equal(entries.length, 3, '每集已下载的都要有自己的外部播放入口');
   const ext = entries[0];
   assert.equal(ext.textContent, '外部播放');
-  assert.equal(ext.getAttribute('data-dl-path'), '/tmp/a19.mp4', '入口要带这集真实的本地文件路径');
+  /* 现在入口带的是相对路径（Downloads/文件名）：App 换一次沙盒容器，绝对路径就失效，
+     相对路径由原生拼到当前下载目录，跨版本也能播、也能删。 */
+  assert.equal(ext.getAttribute('data-dl-path'), 'Downloads/a19.mp4', '入口要带这集在下载目录里的相对路径');
   state.click(ext);
   assert.equal(state.messages.at(-1).action, 'openInOtherPlayer');
-  assert.equal(state.messages.at(-1).path, '/tmp/a19.mp4');
+  assert.equal(state.messages.at(-1).path, 'Downloads/a19.mp4');
 
   const running = fixture({ episodes: [0], newDownloadUI: true });
   running.ready();
@@ -1439,7 +1446,7 @@ test('a finished download joins the library with its show, episode and total', (
   const state = fixture({ signedIn: true, episodes: ['18'], newDownloadUI: true });
   state.ready();
   state.click(state.siteDownload);
-  state.window.__zhuijuDownload({ id: 'done-18', event: 'done', showId: 'fixture', epKey: '18', ep: '第19集', epLabel: '第19集', title: '测试剧', path: '/tmp/x.mp4', name: '测试剧 第19集.mp4', size: 10485760 });
+  state.window.__zhuijuDownload({ id: 'done-18', event: 'done', showId: 'fixture', epKey: '18', ep: '第19集', epLabel: '第19集', title: '测试剧', path: '/var/mobile/Containers/Data/Application/TEST-CONTAINER/Documents/Downloads/x.mp4', name: '测试剧 第19集.mp4', size: 10485760 });
 
   const saved = JSON.parse(state.storage['kj-ios-downloads']);
   assert.equal(saved.shows.length, 1, '下完一集就要记进片库');
@@ -1447,7 +1454,7 @@ test('a finished download joins the library with its show, episode and total', (
   assert.equal(saved.shows[0].cover, 'https://zhuiju.dpdns.org/posters/fixture.jpg');
   assert.equal(saved.shows[0].total, 1, '选集按钮数就是已知总集数');
   assert.equal(saved.shows[0].eps[0].label, '第19集');
-  assert.equal(saved.shows[0].eps[0].path, '/tmp/x.mp4');
+  assert.equal(saved.shows[0].eps[0].path, 'Downloads/x.mp4', '片库只存相对路径，绝对路径留到用时拼');
 
   state.click(state.document.getElementById('iosDlListBtn'));
   const item = state.document.getElementById('iosMineBody').querySelector('.ip-show');
@@ -1493,7 +1500,7 @@ test('the running download shows its show, episode and percent in the library', 
     { id: 'dl9', showId: 'show-a', epKey: '20', epLabel: '第21集', title: '百日谎言', status: 'running', received: 60, total: 100 },
   ]);
 
-  state.window.__zhuijuDownload({ id: 'dl9', event: 'done', epKey: '20', ep: '第21集', epLabel: '第21集', showId: 'show-a', title: '百日谎言', path: '/tmp/a21.mp4', name: '追剧AI_第21集.mp4', size: 3 });
+  state.window.__zhuijuDownload({ id: 'dl9', event: 'done', epKey: '20', ep: '第21集', epLabel: '第21集', showId: 'show-a', title: '百日谎言', path: '/var/mobile/Containers/Data/Application/TEST-CONTAINER/Documents/Downloads/a21.mp4', name: '追剧AI_第21集.mp4', size: 3 });
   state.window.__zhuijuDownloads('snapshot', []);
   const saved = JSON.parse(state.storage['kj-ios-downloads']);
   const show = saved.shows.find((entry) => entry.title === '百日谎言');
@@ -1535,7 +1542,7 @@ test('the title download button never turns into the player entry', async () => 
   assert.equal(button.getAttribute('aria-label'), '下载');
   assert.equal(state.document.getElementById('ppToolDownload'), null);
   const { item } = await queueCurrentEpisode(state);
-  state.window.__zhuijuDownload({ ...item, event: 'done', path: '/tmp/x.mp4', size: 10 });
+  state.window.__zhuijuDownload({ ...item, event: 'done', path: '/var/mobile/Containers/Data/Application/TEST-CONTAINER/Documents/Downloads/x.mp4', size: 10 });
   state.click(state.document.getElementById('iosDlListBtn'));
   state.click(state.document.getElementById('iosMinePage').querySelector('[data-ios-act="mine-back"]'));
   state.click(button);
@@ -1552,4 +1559,132 @@ test('the download file is named after the show, not the app', async () => {
   const { item } = await queueCurrentEpisode(state);
   assert.equal(item.name, '测试剧 第19集.mp4');
   assert.ok(!/追剧AI/.test(item.name), '文件名里不能再用 App 名冒充剧名');
+});
+
+/* ---------- 下载记录删不掉（REG-030） ---------- */
+
+const OLD_CONTAINER_PATH = '/var/mobile/Containers/Data/Application/OLD-CONTAINER-UUID/Documents/Downloads/测试剧 第1集.mp4';
+
+function seededDoneRow(state) {
+  state.click(state.siteDownload);
+  state.click(state.document.getElementById('iosDlListBtn'));
+}
+
+/* 老版本把旧沙盒容器的绝对路径写进片库；App 换容器后这个路径在真机上已经不存在，
+   旧实现会在「路径越界」这一步直接失败，那一行永远删不掉。
+   现在只存相对路径（Downloads/文件名），删除时按当前下载目录拼回去。 */
+test('a downloaded row saved with an old app-container path can still be deleted', () => {
+  const state = fixture({ seed: {
+    'kj-ios-downloads': JSON.stringify({ shows: [{
+      id: 'fixture', title: '测试剧', total: 12,
+      eps: [{ key: '0', label: '第1集', name: '测试剧 第1集.mp4', path: OLD_CONTAINER_PATH, size: 1024, at: 1 }],
+    }] }),
+  } });
+  state.ready();
+  seededDoneRow(state);
+  const del = state.document.getElementById('iosMineBody').querySelector('.ip-epdel');
+  assert.ok(del, '老路径的记录也要有删除入口');
+  const play = state.document.getElementById('iosMineBody').querySelector('.ip-epbody');
+  assert.equal(play.getAttribute('data-dl-path'), 'Downloads/测试剧 第1集.mp4', '读出来就迁成相对路径，离线播放也用当前下载目录');
+  state.click(del);
+  const message = state.messages.at(-1);
+  assert.equal(message.action, 'deleteDownload');
+  assert.equal(message.path, 'Downloads/测试剧 第1集.mp4', '只把相对路径交给原生，跨版本换容器也删得掉');
+  assert.equal(message.showId, 'fixture');
+  assert.equal(message.epKey, '0');
+  const saved = JSON.parse(state.storage['kj-ios-downloads']);
+  assert.equal(saved.shows.length, 0, '最后一集删掉后不留下空壳剧名');
+});
+
+/* 只凭文件名归一会把越界路径（/tmp/…、../../…、下载目录以外的目录）也映射成下载目录里的同名文件：
+   删除时可能把别人的文件当成这一集删掉。不是裸文件名 / Downloads/文件名 /
+   旧沙盒 …/Documents/Downloads/文件名 的，一律不解析，只允许清掉记录本身。 */
+test('a stored path outside the downloads folder is never mapped onto a same-named file', () => {
+  const outsidePaths = [
+    '/tmp/测试剧 第1集.mp4',
+    '../../测试剧 第1集.mp4',
+    '/var/mobile/Containers/Data/Application/OLD/Documents/Other/测试剧 第1集.mp4',
+    'Downloads/子目录/测试剧 第1集.mp4',
+  ];
+  for (const stored of outsidePaths) {
+    const state = fixture({ seed: {
+      'kj-ios-downloads': JSON.stringify({ shows: [{
+        id: 'fixture', title: '测试剧', total: 12,
+        eps: [{ key: '0', label: '第1集', name: '测试剧 第1集.mp4', path: stored, size: 1024, at: 1 }],
+      }] }),
+    } });
+    state.ready();
+    seededDoneRow(state);
+    const play = state.document.getElementById('iosMineBody').querySelector('.ip-epbody');
+    assert.equal(play.getAttribute('data-dl-path'), null, stored + ' 不能被当成下载目录里的同名文件');
+    assert.equal(play.disabled, true, stored + ' 不该给出离线播放入口');
+    const del = state.document.getElementById('iosMineBody').querySelector('.ip-epdel');
+    assert.ok(del, stored + ' 的记录本身仍然能删');
+    state.click(del);
+    const message = state.messages.at(-1);
+    assert.equal(message.action, 'deleteDownload');
+    assert.equal(message.path, '', stored + ' 只让原生清记录，不把越界路径交给它');
+  }
+});
+
+test('a new download is stored as a relative path, never the absolute sandbox path', () => {
+  const state = fixture({ signedIn: true, episodes: [0], newDownloadUI: true }); state.ready();
+  state.click(state.siteDownload);
+  state.window.__zhuijuDownloads('snapshot', [
+    { id: 'dl-a', showId: 'fixture', epKey: '0', epLabel: '第1集', title: '测试剧', status: 'running', received: 10, total: 100 },
+  ]);
+  state.window.__zhuijuDownload({ id: 'dl-a', event: 'done', showId: 'fixture', epKey: '0', ep: '第1集', epLabel: '第1集', title: '测试剧',
+    path: '/var/mobile/Containers/Data/Application/NEW-CONTAINER/Documents/Downloads/测试剧 第1集.mp4', name: '测试剧 第1集.mp4', size: 2048 });
+  const saved = JSON.parse(state.storage['kj-ios-downloads']);
+  assert.equal(saved.shows[0].eps[0].path, 'Downloads/测试剧 第1集.mp4');
+  state.click(state.document.getElementById('iosDlListBtn'));
+  const body = state.document.getElementById('iosMineBody');
+  const play = body.querySelector('.ip-epbody');
+  assert.equal(play.getAttribute('data-dl-path'), 'Downloads/测试剧 第1集.mp4', '离线播放也用相对路径，由原生拼当前目录');
+});
+
+/* 下载中 / 排队 / 失败三种行以前根本没有删除入口：只有「已下载」的片库行能左滑删，
+   失败的集连行都不显示，任务也一直占着队列。 */
+test('downloading, queued and failed rows can all be deleted and never come back', () => {
+  const snapshot = [
+    { id: 'dl-a', showId: 'fixture', epKey: '0', epLabel: '第1集', title: '测试剧', status: 'running', received: 40, total: 100 },
+    { id: 'dl-b', showId: 'fixture', epKey: '1', epLabel: '第2集', title: '测试剧', status: 'queued' },
+    { id: 'dl-c', showId: 'fixture', epKey: '2', epLabel: '第3集', title: '测试剧', status: 'failed', reason: '网络中断' },
+  ];
+  const state = fixture({ episodes: [0, 1, 2], newDownloadUI: true }); state.ready();
+  state.click(state.siteDownload);
+  state.window.__zhuijuDownloads('snapshot', snapshot);
+  state.click(state.document.getElementById('iosDlListBtn'));
+  const rows = ['dl-a', 'dl-b', 'dl-c'].map((id) => state.document.getElementById('iosMineTask-' + id));
+  assert.ok(rows.every(Boolean), '下载中 / 排队 / 失败三种行都要显示');
+  assert.match(rows[2].textContent, /失败/, '失败的行要写清原因');
+  const del = rows[2].querySelector('.ip-epdel');
+  assert.ok(del, '失败的那一行也要能删');
+  state.click(del);
+  const message = state.messages.at(-1);
+  assert.equal(message.action, 'deleteDownload');
+  assert.equal(message.id, 'dl-c');
+  assert.equal(message.showId, 'fixture');
+  assert.equal(message.epKey, '2');
+  /* 原生还没确认时重发旧快照：这一行不能因为晚到的快照又冒出来。 */
+  state.window.__zhuijuDownloads('snapshot', snapshot);
+  assert.equal(state.document.getElementById('iosMineTask-dl-c'), null, '删掉的失败行不能被旧快照复活');
+  assert.ok(state.document.getElementById('iosMineTask-dl-a'), '别的行不能被顺手删掉');
+});
+
+test('deleting a running row asks native for that task only and lets the queue move on', () => {
+  const state = fixture({ episodes: [0, 1], newDownloadUI: true }); state.ready();
+  state.click(state.siteDownload);
+  state.window.__zhuijuDownloads('snapshot', [
+    { id: 'dl-a', showId: 'fixture', epKey: '0', epLabel: '第1集', title: '测试剧', status: 'running', received: 40, total: 100 },
+    { id: 'dl-b', showId: 'fixture', epKey: '1', epLabel: '第2集', title: '测试剧', status: 'queued' },
+  ]);
+  state.click(state.document.getElementById('iosDlListBtn'));
+  const before = state.messages.length;
+  state.click(state.document.getElementById('iosMineTask-dl-a').querySelector('.ip-epdel'));
+  const message = state.messages.at(-1);
+  assert.equal(state.messages.length, before + 1, '一次删除只发一条原生消息');
+  assert.equal(message.action, 'deleteDownload');
+  assert.equal(message.id, 'dl-a', '按任务 id 取消底层任务，不能按剧把整部都删了');
+  assert.equal(message.path, '');
 });

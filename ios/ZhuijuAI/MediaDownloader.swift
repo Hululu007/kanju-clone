@@ -288,9 +288,60 @@ final class MediaDownloader: NSObject {
         return String(trimmed.prefix(120))
     }
 
+    /// 下载目录名只写一处：记录里存相对路径时也用它拼回来。
+    static let downloadsFolder = "Downloads"
+
     static func directory() -> URL? {
         guard let base = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else { return nil }
-        return base.appendingPathComponent("Downloads", isDirectory: true)
+        return base.appendingPathComponent(downloadsFolder, isDirectory: true)
+    }
+
+    /// 落盘时只记相对路径（`Downloads/文件名`）。沙盒容器的绝对路径会随重装/换包变化，
+    /// 存绝对路径等于给下一条记录埋一颗「删不掉」的雷。
+    static func relativePath(for raw: String?) -> String {
+        guard let name = storedFileName(raw) else { return "" }
+        return downloadsFolder + "/" + name
+    }
+
+    /// 把网页传来的 / 记录里的路径解析成**当前**下载目录里的文件地址：
+    /// 先确认写法确实指向下载目录，再取最后一段文件名拼到当前 Documents/Downloads；
+    /// 旧容器的绝对路径、相对路径、裸文件名三种写法都落到同一个地方，跨版本换容器也能删/能播。
+    static func fileURL(forStoredPath raw: String?) -> URL? {
+        guard let text = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty,
+              let directory = directory() else { return nil }
+        /* 只取最后一段文件名，但必须先校验来路：不能什么路径都按文件名塞进下载目录。 */
+        let name = (text as NSString).lastPathComponent
+        guard !name.isEmpty, name != ".", name != "..", name != "/",
+              storedPathIsInsideDownloads(text, name: name) else { return nil }
+        let root = directory.standardizedFileURL.resolvingSymlinksInPath()
+        let candidate = root.appendingPathComponent(name).standardizedFileURL
+        guard candidate.pathComponents.count == root.pathComponents.count + 1,
+              Array(candidate.pathComponents.prefix(root.pathComponents.count)) == root.pathComponents else {
+            return nil
+        }
+        return candidate
+    }
+
+    /// 收到路径的写法校验：只认裸文件名、`Downloads/文件名`、旧容器 `…/Documents/Downloads/文件名`。
+    /// 其它路径（`/tmp/x.mp4`、`../../outside.mp4`、`Downloads/子目录/x.mp4`）不解析：
+    /// 只凭文件名就把越界路径映射成下载目录里的同名文件，删除时会误删别人的文件。
+    private static func storedPathIsInsideDownloads(_ text: String, name: String) -> Bool {
+        /* 裸文件名：网页只给了名字。 */
+        if !text.contains("/") { return true }
+        /* 记录里存的相对路径。 */
+        if text == downloadsFolder + "/" + name { return true }
+        /* 旧版本的沙盒绝对路径：必须整段以 /Documents/Downloads/<文件名> 结尾，
+           前面是哪个容器都不管；中间多一层目录的不认。 */
+        let legacySuffix = "/Documents/" + downloadsFolder + "/" + name
+        return text.count >= legacySuffix.count && String(text.suffix(legacySuffix.count)) == legacySuffix
+    }
+
+    /// 落盘用的文件名：和 `fileURL(forStoredPath:)` 同一套规则，取最后一段、`..`/`.`/空串不认。
+    private static func storedFileName(_ raw: String?) -> String? {
+        guard let text = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty else { return nil }
+        let name = (text as NSString).lastPathComponent
+        guard !name.isEmpty, name != ".", name != "..", name != "/" else { return nil }
+        return name
     }
 
     // MARK: - 对外（实例方法都落到同一份状态上）
@@ -335,8 +386,10 @@ final class MediaDownloader: NSObject {
     @discardableResult
     static func removeDownloadedFile(at path: String?) -> Bool {
         guard let raw = path?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else { return true }
-        let source = URL(fileURLWithPath: raw).standardizedFileURL.resolvingSymlinksInPath()
-        guard let directory = directory() else { return false }
+        guard let directory = directory(), let source = fileURL(forStoredPath: raw) else {
+            NSLog("refuse to delete file outside download directory: %@", raw)
+            return false
+        }
         let root = directory.standardizedFileURL.resolvingSymlinksInPath()
         let rootComponents = root.pathComponents
         let sourceComponents = source.pathComponents
@@ -916,7 +969,14 @@ final class MediaDownloader: NSObject {
 
     private static func loadRecords() -> [Record] {
         guard let data = UserDefaults.standard.data(forKey: tasksKey) else { return [] }
-        return (try? JSONDecoder().decode([Record].self, from: data)) ?? []
+        var list = (try? JSONDecoder().decode([Record].self, from: data)) ?? []
+        /* 老版本记录的是沙盒绝对路径：读出来就迁成相对路径，下一次 persist 落库。
+           迁移只改写法，不动文件，也不影响「文件真的在还是在」。 */
+        for index in list.indices where !list[index].path.isEmpty {
+            let relative = relativePath(for: list[index].path)
+            if list[index].path != relative { list[index].path = relative }
+        }
+        return list
     }
 
     private static func persist(force: Bool) {
@@ -1064,7 +1124,8 @@ final class MediaDownloader: NSObject {
         if let current = record(id), Self.isDeleted(current) { return }
         update(id) { record in
             record.status = "done"
-            record.path = payload["path"] as? String ?? ""
+            /* 只存相对路径：真机换一次容器，旧绝对路径就不存在了（删除会永远失败）。 */
+            record.path = Self.relativePath(for: payload["path"] as? String)
             if let finalName = payload["name"] as? String, !finalName.isEmpty { record.name = finalName }
             record.size = (payload["size"] as? NSNumber)?.int64Value ?? 0
             record.received = record.size

@@ -558,11 +558,11 @@ test('a downloaded row can be deleted on its own, and only that file is asked to
   const state = fixture({ signedIn: true, episodes: [0, 1] });
   state.ready();
   state.window.__zhuijuDownloads('snapshot', [
-    { id: 'a', showId: 'fixture', epKey: '0', epLabel: '第1集', title: '测试剧', status: 'done', received: 10, total: 10, path: '/tmp/a.mp4', size: 10, name: 'a.mp4' },
-    { id: 'b', showId: 'fixture', epKey: '1', epLabel: '第2集', title: '测试剧', status: 'done', received: 10, total: 10, path: '/tmp/b.mp4', size: 10, name: 'b.mp4' }
+    { id: 'a', showId: 'fixture', epKey: '0', epLabel: '第1集', title: '测试剧', status: 'done', received: 10, total: 10, path: '/var/mobile/Containers/Data/Application/TEST-CONTAINER/Documents/Downloads/a.mp4', size: 10, name: 'a.mp4' },
+    { id: 'b', showId: 'fixture', epKey: '1', epLabel: '第2集', title: '测试剧', status: 'done', received: 10, total: 10, path: '/var/mobile/Containers/Data/Application/TEST-CONTAINER/Documents/Downloads/b.mp4', size: 10, name: 'b.mp4' }
   ]);
-  state.window.__zhuijuDownload({ id: 'a', event: 'done', showId: 'fixture', epKey: '0', epLabel: '第1集', title: '测试剧', path: '/tmp/a.mp4', size: 10, name: 'a.mp4' });
-  state.window.__zhuijuDownload({ id: 'b', event: 'done', showId: 'fixture', epKey: '1', epLabel: '第2集', title: '测试剧', path: '/tmp/b.mp4', size: 10, name: 'b.mp4' });
+  state.window.__zhuijuDownload({ id: 'a', event: 'done', showId: 'fixture', epKey: '0', epLabel: '第1集', title: '测试剧', path: '/var/mobile/Containers/Data/Application/TEST-CONTAINER/Documents/Downloads/a.mp4', size: 10, name: 'a.mp4' });
+  state.window.__zhuijuDownload({ id: 'b', event: 'done', showId: 'fixture', epKey: '1', epLabel: '第2集', title: '测试剧', path: '/var/mobile/Containers/Data/Application/TEST-CONTAINER/Documents/Downloads/b.mp4', size: 10, name: 'b.mp4' });
   state.click(state.document.getElementById('iosDlListBtn'));
   const list = state.document.getElementById('iosMineBody');
   const rows = list.querySelectorAll('.ip-eprow');
@@ -578,13 +578,16 @@ test('a downloaded row can be deleted on its own, and only that file is asked to
   assert.equal(typeof message.id, 'string', '把原生任务 id 一起带过去');
   assert.equal(message.showId, 'fixture');
   assert.equal(message.epKey, '0');
-  assert.equal(message.path, '/tmp/a.mp4', '只删这一行对应的那个文件');
+  /* 记录里只存相对路径（build 27 起）：网页把 `Downloads/a.mp4` 交给原生，
+     原生只取文件名再拼到当前 Documents/Downloads，换过容器也删得掉。
+     旧断言的 `/tmp/a.mp4` 是「原样转发绝对路径」的旧行为，已随相对路径迁移作废。 */
+  assert.equal(message.path, 'Downloads/a.mp4', '只删这一行对应的那个文件，且只存相对路径');
 });
 
 test('old snapshots, late done events and app restarts never resurrect a deleted episode', () => {
   const state = fixture({ signedIn: true, episodes: [0, 1] });
   state.ready();
-  state.window.__zhuijuDownload({ id: 'a', event: 'done', showId: 'fixture', epKey: '0', epLabel: '第1集', title: '测试剧', path: '/tmp/a.mp4', size: 10, name: 'a.mp4' });
+  state.window.__zhuijuDownload({ id: 'a', event: 'done', showId: 'fixture', epKey: '0', epLabel: '第1集', title: '测试剧', path: '/var/mobile/Containers/Data/Application/TEST-CONTAINER/Documents/Downloads/a.mp4', size: 10, name: 'a.mp4' });
   state.click(state.document.getElementById('iosDlListBtn'));
   const row = state.document.getElementById('iosMineBody').querySelectorAll('.ip-eprow')[0];
   const button = childWithClass(row, 'ip-epdel');
@@ -594,11 +597,11 @@ test('old snapshots, late done events and app restarts never resurrect a deleted
   assert.ok(state.storage['kj-ios-deleted-episodes'], '删除要写墓碑，防止旧事实源回灌');
 
   assert.equal(state.document.getElementById('iosMineBody').querySelectorAll('.ip-eprow').length, 0, '列表马上不再显示这一集');
-  state.window.__zhuijuDownload({ id: 'a', event: 'done', showId: 'fixture', epKey: '0', epLabel: '第1集', title: '测试剧', path: '/tmp/a.mp4', size: 10, name: 'a.mp4' });
+  state.window.__zhuijuDownload({ id: 'a', event: 'done', showId: 'fixture', epKey: '0', epLabel: '第1集', title: '测试剧', path: '/var/mobile/Containers/Data/Application/TEST-CONTAINER/Documents/Downloads/a.mp4', size: 10, name: 'a.mp4' });
   state.window.__zhuijuDownloads('snapshot', [
-    { id: 'a', showId: 'fixture', epKey: '0', epLabel: '第1集', title: '测试剧', status: 'done', received: 10, total: 10, path: '/tmp/a.mp4', size: 10, name: 'a.mp4' }
+    { id: 'a', showId: 'fixture', epKey: '0', epLabel: '第1集', title: '测试剧', status: 'done', received: 10, total: 10, path: '/var/mobile/Containers/Data/Application/TEST-CONTAINER/Documents/Downloads/a.mp4', size: 10, name: 'a.mp4' }
   ]);
-  state.window.__zhuijuDownload({ id: 'a', event: 'done', showId: 'fixture', epKey: '0', epLabel: '第1集', title: '测试剧', path: '/tmp/a.mp4', size: 10, name: 'a.mp4' });
+  state.window.__zhuijuDownload({ id: 'a', event: 'done', showId: 'fixture', epKey: '0', epLabel: '第1集', title: '测试剧', path: '/var/mobile/Containers/Data/Application/TEST-CONTAINER/Documents/Downloads/a.mp4', size: 10, name: 'a.mp4' });
   assert.equal(state.document.getElementById('iosMineBody').querySelectorAll('.ip-eprow').length, 0, '晚到回调和重启快照都不能让它复活');
   assert.ok(!state.storage['kj-ios-queue'], '网页不能再把旧队列快照当持久事实源');
 });
@@ -607,7 +610,7 @@ test('old snapshots, late done events and app restarts never resurrect a deleted
 test('a deleted row is only reported gone after the native confirms the file is removed', () => {
   const state = fixture({ signedIn: true, episodes: [0, 1] });
   state.ready();
-  state.window.__zhuijuDownload({ id: 'a', event: 'done', showId: 'fixture', epKey: '0', epLabel: '第1集', title: '测试剧', path: '/tmp/a.mp4', size: 10, name: 'a.mp4' });
+  state.window.__zhuijuDownload({ id: 'a', event: 'done', showId: 'fixture', epKey: '0', epLabel: '第1集', title: '测试剧', path: '/var/mobile/Containers/Data/Application/TEST-CONTAINER/Documents/Downloads/a.mp4', size: 10, name: 'a.mp4' });
   state.click(state.document.getElementById('iosDlListBtn'));
   const row = state.document.getElementById('iosMineBody').querySelectorAll('.ip-eprow')[0];
   const button = childWithClass(row, 'ip-epdel');
@@ -623,7 +626,7 @@ test('a deleted row is only reported gone after the native confirms the file is 
 test('a failed native delete puts the row back and clears the web tombstone', () => {
   const state = fixture({ signedIn: true, episodes: [0, 1] });
   state.ready();
-  state.window.__zhuijuDownload({ id: 'a', event: 'done', showId: 'fixture', epKey: '0', epLabel: '第1集', title: '测试剧', path: '/tmp/a.mp4', size: 10, name: 'a.mp4' });
+  state.window.__zhuijuDownload({ id: 'a', event: 'done', showId: 'fixture', epKey: '0', epLabel: '第1集', title: '测试剧', path: '/var/mobile/Containers/Data/Application/TEST-CONTAINER/Documents/Downloads/a.mp4', size: 10, name: 'a.mp4' });
   state.click(state.document.getElementById('iosDlListBtn'));
   const row = state.document.getElementById('iosMineBody').querySelectorAll('.ip-eprow')[0];
   const button = childWithClass(row, 'ip-epdel');
@@ -631,7 +634,7 @@ test('a failed native delete puts the row back and clears the web tombstone', ()
   button.setAttribute('data-dl-key', '0');
   state.click(button);
   state.window.__zhuijuDownloads('deleteResult', {
-    ok: false, id: 'a', showId: 'fixture', epKey: '0', path: '/tmp/a.mp4', name: 'a.mp4', size: 10,
+    ok: false, id: 'a', showId: 'fixture', epKey: '0', path: '/var/mobile/Containers/Data/Application/TEST-CONTAINER/Documents/Downloads/a.mp4', name: 'a.mp4', size: 10,
     title: '测试剧', epLabel: '第1集', reason: '删除本地文件失败，这一集还留在下载列表里'
   });
   const rows = state.document.getElementById('iosMineBody').querySelectorAll('.ip-eprow');
@@ -664,13 +667,18 @@ test('a failed episode never lets the show look complete and an unknown length h
   state.ready();
   state.click(state.document.getElementById('iosDlListBtn'));
   state.window.__zhuijuDownloads('snapshot', [
-    { id: 'a', showId: 'fixture', epKey: '0', epLabel: '第1集', title: '测试剧', status: 'done', received: 1048576, total: 1048576, path: '/tmp/a.mp4', size: 1048576, name: 'a.mp4' },
+    { id: 'a', showId: 'fixture', epKey: '0', epLabel: '第1集', title: '测试剧', status: 'done', received: 1048576, total: 1048576, path: '/var/mobile/Containers/Data/Application/TEST-CONTAINER/Documents/Downloads/a.mp4', size: 1048576, name: 'a.mp4' },
     { id: 'b', showId: 'fixture', epKey: '1', epLabel: '第2集', title: '测试剧', status: 'failed', received: 0, total: 0, path: '', size: 0, name: 'b.mp4' },
     { id: 'c', showId: 'fixture', epKey: '2', epLabel: '第3集', title: '测试剧', status: 'paused', received: 1048576, total: 0, path: '', size: 0, name: 'c.mp4' }
   ]);
   const queueNode = state.document.getElementById('iosMineQueue');
   const text = state.document.getElementById('iosMineBody').textContent;
-  assert.equal(queueNode, null, '失败或暂停任务不伪装成正在下载');
+  /* build 27 起失败的那一集要留在列表里（可以左滑删掉），但它的状态必须写「失败」，
+     不能伪装成「下载中」；暂停的那一集仍然不占列表。 */
+  assert.ok(queueNode, '失败任务要留在下载列表里才能删');
+  assert.equal(queueNode.querySelectorAll('.ios-dl-task').length, 1, '只剩失败那一行，暂停/已完成不进下载区');
+  assert.match(text, /失败/, text);
+  assert.doesNotMatch(text, /下载中/, '失败任务不能伪装成正在下载');
   assert.match(text, /还没有下载完成的剧集/, text);
   assert.ok(!/全部完成/.test(text), `有一集失败就不能说整部剧完成：${text}`);
   assert.doesNotMatch(text, /全部完成/, '失败任务不应显示全部完成');
@@ -694,7 +702,7 @@ test('each finished episode lands in my downloads, and replay stays idempotent',
   state.click(state.document.getElementById('iosDlListBtn'));
 
   const done = (item) => ({
-    event: 'done', id: item.id, path: '/tmp/' + item.epKey + '.mp4', name: item.name, size: 2048,
+    event: 'done', id: item.id, path: '/var/mobile/Containers/Data/Application/TEST-CONTAINER/Documents/Downloads/' + item.epKey + '.mp4', name: item.name, size: 2048,
     showId: 'fixture', epKey: item.epKey, ep: item.epLabel, epLabel: item.epLabel,
     title: '测试剧', cover: '', showTotal: '3',
   });
@@ -728,7 +736,7 @@ test('a show already in the library by title keeps its queue progress when the r
       'kj-ios-downloads': JSON.stringify({
         shows: [{
           id: '测试剧', title: '测试剧', cover: '', total: 3,
-          eps: [{ key: '18', label: '第19集', path: '/tmp/19.mp4', size: 1, at: 1 }],
+          eps: [{ key: '18', label: '第19集', path: '/var/mobile/Containers/Data/Application/TEST-CONTAINER/Documents/Downloads/19.mp4', size: 1, at: 1 }],
         }],
       }),
     },
