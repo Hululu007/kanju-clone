@@ -81,4 +81,3 @@ node --test ios/Tests/bootstrap.test.mjs ios/Tests/downloadQueue.test.mjs
 - 校验日志：C:\Users\kenzh\AppData\Local\Temp\ios-build22-verify.log
   本机 Node 校验日志：C:\Users\kenzh\AppData\Local\Temp\ios-build22-node.log
 - **真机未测**：上面第五节需要在手机上逐条走一遍才算这版真的可用；手机当前装的是 build 21，必须先装这个 build 22 新包再测，不能用 build 21 的实测结果代替。
-
