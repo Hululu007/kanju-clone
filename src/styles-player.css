@@ -49,6 +49,9 @@
 /* 控制层 */
 .pl-ctrl { position: relative; z-index: 7; padding: 12px 12px 8px; transition: opacity .22s, transform .22s; }
 .pl[data-controls="off"] .pl-ctrl { opacity: 0; transform: translateY(8px); pointer-events: none; }
+/* 全屏隐藏控制栏时，鼠标光标也一起隐藏 */
+.pl:is(.is-fullscreen, .is-webfull)[data-controls="off"],
+.pl:is(.is-fullscreen, .is-webfull)[data-controls="off"] * { cursor: none; }
 .pl-seek { position: relative; height: 5px; margin: 0 0 8px; cursor: pointer; touch-action: none; }
 .pl-seek::before { content: ''; position: absolute; inset: 0; border-radius: 0; background: rgba(255,255,255,.18); }
 .pl-buf { position: absolute; left: 0; top: 0; height: 5px; background: rgba(215,215,215,.62); }

@@ -333,42 +333,101 @@ function clearPlayStatus() {
 }
 const dmSend = document.getElementById('dmSend')
 
-/* ---------------- 控制栏显隐（3 秒无操作隐藏） ---------------- */
+/* ---------------- 控制栏显隐（点画面切换，播放中 3 秒无操作隐藏） ----------------
+ *
+ * 规则：
+ * - 播放中点画面显示控制栏；再点一次立刻隐藏；显示后 3 秒没有操作也隐藏。
+ * - 暂停、拖动进度条、鼠标停在控制栏上、设置/清晰度/弹幕/选集面板打开时保持显示。
+ * - 非全屏与全屏（网页全屏）同一套规则；全屏隐藏时连鼠标光标一起隐藏（见样式）。
+ */
 
+const AUTO_HIDE_MS = 3000
 let hideTimer = null
-let pointerInside = false
+let barHover = false
+let dragging = false
 
 function playing() {
   return !video.paused && !video.ended
+}
+
+function popupOpen() {
+  if (gear && !gear.hidden) return true
+  if (linePop && !linePop.hidden) return true
+  if (dmPop && !dmPop.hidden) return true
+  if (plEps && !plEps.hidden) return true
+  return false
+}
+
+function canAutoHide() {
+  if (!playing()) return false
+  if (dragging || video.seeking) return false
+  if (barHover) return false
+  if (popupOpen()) return false
+  // 只有正在往弹幕输入框里打字才保持显示；按钮的焦点不算「操作中」
+  const active = document.activeElement
+  if (active && ppCtrl && ppCtrl.contains(active) && (active.matches('input, textarea, select') || active.isContentEditable)) return false
+  return true
+}
+
+function hideControls() {
+  clearTimeout(hideTimer)
+  hideTimer = null
+  player.dataset.controls = 'off'
+  ppCtrl?.classList.remove('on')
+}
+
+function scheduleHide() {
+  clearTimeout(hideTimer)
+  hideTimer = null
+  if (!canAutoHide()) return
+  hideTimer = setTimeout(() => {
+    hideTimer = null
+    if (canAutoHide()) hideControls()
+  }, AUTO_HIDE_MS)
 }
 
 function showControls({ keep = false } = {}) {
   player.dataset.controls = 'on'
   ppCtrl?.classList.add('on')
   clearTimeout(hideTimer)
-  if (keep || !playing() || !player.matches('.is-webfull, .is-fullscreen')) return
-  hideTimer = setTimeout(() => {
-    if (!playing() || video.seeking) return
-    if (ppCtrl && document.activeElement && ppCtrl.contains(document.activeElement)) return
-    if (gear && !gear.hidden) return
-    if (linePop && !linePop.hidden) return
-    if (dmPop && !dmPop.hidden) return
-    if (plEps && !plEps.hidden) return
-    player.dataset.controls = 'off'
-    ppCtrl?.classList.remove('on')
-  }, 3000)
+  hideTimer = null
+  if (keep) return
+  scheduleHide()
 }
 
-player.addEventListener('pointermove', () => showControls())
-player.addEventListener('pointerdown', () => showControls())
+// 点画面：显示 → 隐藏；隐藏 → 显示。暂停时只负责显示，不主动隐藏。
+function toggleControls() {
+  if (player.dataset.controls === 'off') {
+    showControls()
+    return
+  }
+  if (!playing() || popupOpen()) {
+    showControls({ keep: !playing() })
+    return
+  }
+  hideControls()
+}
+
+// 控件上的操作算「有操作」：刷新 3 秒计时。
+player.addEventListener('pointerdown', (event) => {
+  const target = event.target
+  if (!(target instanceof Element)) return
+  if (target.closest('.pl-ctrl, .pl-pop, .pl-top, .pl-eps')) showControls()
+})
+// 鼠标在画面上移动只在控制栏已显示时续时；隐藏状态下要靠点击才出现。
+player.addEventListener('pointermove', () => {
+  if (player.dataset.controls === 'on') showControls()
+})
 player.addEventListener('focusin', () => showControls())
-player.addEventListener('pointerleave', () => {
-  pointerInside = false
+ppCtrl?.addEventListener('pointerenter', () => {
+  barHover = true
   showControls()
 })
-player.addEventListener('pointerenter', () => {
-  pointerInside = true
+ppCtrl?.addEventListener('pointerleave', () => {
+  barHover = false
+  showControls()
 })
+ppCtrl?.addEventListener('focusout', () => showControls())
 video.addEventListener('play', () => {
   syncPlayButton()
   showControls()
@@ -377,6 +436,7 @@ video.addEventListener('pause', () => {
   syncPlayButton()
   showControls({ keep: true })
 })
+video.addEventListener('seeked', () => showControls())
 
 /* ---------------- 播放 / 进度 / 时间 ---------------- */
 
@@ -421,12 +481,12 @@ function seekTo(clientX) {
   paintProgress()
 }
 
-let dragging = false
 seekBar.addEventListener('pointerdown', (event) => {
   dragging = true
   player.classList.add('seeking')
   seekBar.setPointerCapture?.(event.pointerId)
   seekTo(event.clientX)
+  showControls({ keep: true })
 })
 seekBar.addEventListener('pointermove', (event) => {
   if (!dragging) return
@@ -455,10 +515,11 @@ function togglePlay() {
 
 btnPlay.addEventListener('click', togglePlay)
 bigPlay.addEventListener('click', togglePlay)
+// 轻触 / 单击画面：切换控制栏显隐；双击仍是全屏。
 video.addEventListener('click', (event) => {
   // 打开选集抽屉/面板时不抢点击
   if (event.target !== video) return
-  togglePlay()
+  toggleControls()
 })
 video.addEventListener('dblclick', () => toggleFullscreen())
 
@@ -675,6 +736,7 @@ function togglePop(pop) {
   closePops(pop)
   pop.hidden = !willOpen
   if (willOpen) showControls({ keep: true })
+  else showControls()
 }
 
 btnGear.addEventListener('click', () => {
