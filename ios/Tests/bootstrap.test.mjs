@@ -640,16 +640,62 @@ test('a site fullscreen request on the player uses the native video player, not 
   assert.equal(state.elementFullscreenCalls, 0, '不能再进入会丢画面、退不出的容器元素全屏');
 
   Object.setPrototypeOf(state.video, state.elementProto);
-  const again = state.video.requestFullscreen();
-  state.emit('webkitbeginfullscreen', { target: state.video });
-  await again;
-  assert.equal(state.video.nativeFullscreen, 2, 'video 自己的全屏请求也走原生');
+  await state.video.requestFullscreen();
+  assert.equal(state.video.nativeFullscreen, 1, '已经在这个视频的全屏里，不再重复调用系统播放器');
 
   const other = node('div');
   Object.setPrototypeOf(other, state.elementProto);
   other.requestFullscreen();
   assert.equal(state.elementFullscreenCalls, 1, '不包含视频的元素仍走原来的全屏实现');
-  assert.equal(state.video.nativeFullscreen, 2, '无关元素不能误触发视频全屏');
+  assert.equal(state.video.nativeFullscreen, 1, '无关元素不能误触发视频全屏');
+
+test('a second fullscreen request while one is pending is rejected instead of stacking up', async () => {
+  const state = fixture({ episodes: [0] }); state.ready();
+  Object.setPrototypeOf(state.player, state.elementProto);
+  const first = state.player.requestFullscreen();
+  const second = await state.player.requestFullscreen().then(() => 'resolved', () => 'rejected');
+  assert.equal(second, 'rejected', '同一时间只允许一个原生全屏请求');
+  state.emit('webkitbeginfullscreen', { target: state.video });
+  assert.equal(await first.then(() => 'resolved', () => 'rejected'), 'resolved');
+  assert.equal(state.video.nativeFullscreen, 1, '系统播放器只被调一次，一次 begin 只兑现一个请求');
+});
+
+test('another video ending never ends the fullscreen video', () => {
+  const state = fixture({ episodes: [0] }); state.ready();
+  state.emit('webkitbeginfullscreen', { target: state.video });
+  state.emit('webkitendfullscreen', { target: { tagName: 'VIDEO' } });
+  const events = state.messages.filter((message) => message.action === 'playerFullscreen');
+  assert.deepEqual(events.map((message) => message.on), [true], '别的视频退出不能报回竖屏');
+  assert.equal(state.document.dispatchLog, undefined, '也不能给站点补退出事件');
+  state.emit('webkitendfullscreen', { target: state.video });
+  assert.deepEqual(state.messages.filter((message) => message.action === 'playerFullscreen').map((message) => message.on),
+    [true, false], '当前这段视频退出才回竖屏');
+});
+
+test('the public webkitDisplayingFullscreen property can confirm a started fullscreen', async () => {
+  const state = fixture({ episodes: [0] }); state.ready();
+  Object.defineProperty(state.video, 'webkitDisplayingFullscreen', { configurable: true, value: true, writable: true });
+  Object.setPrototypeOf(state.player, state.elementProto);
+  const entered = state.player.requestFullscreen();
+  assert.equal(await entered.then(() => 'resolved', () => 'rejected'), 'resolved',
+    '系统已经全屏但事件没来时，按公开属性确认成功');
+});
+
+test('coming back to the page clears a fullscreen the system already ended', () => {
+  const state = fixture({ episodes: [0] }); state.ready();
+  Object.defineProperty(state.video, 'webkitDisplayingFullscreen', { configurable: true, value: true, writable: true });
+  state.emit('webkitbeginfullscreen', { target: state.video });
+  state.video.webkitDisplayingFullscreen = false;
+  state.emit('visibilitychange', { target: state.document });
+  const events = state.messages.filter((message) => message.action === 'playerFullscreen');
+  assert.deepEqual(events.map((message) => message.on), [true, false], '恢复核对要补一次退出');
+
+  const legacy = fixture({ episodes: [0] }); legacy.ready();
+  legacy.emit('webkitbeginfullscreen', { target: legacy.video });
+  legacy.emit('visibilitychange', { target: legacy.document });
+  assert.deepEqual(legacy.messages.filter((message) => message.action === 'playerFullscreen').map((message) => message.on),
+    [true], '没有公开属性时只认事件，不做方向反推');
+});
   state.emit('webkitbeginfullscreen', { target: state.video });
   state.emit('webkitendfullscreen', { target: state.video });
   assert.deepEqual(state.document.dispatchLog, ['fullscreenchange', 'webkitfullscreenchange'],

@@ -285,6 +285,13 @@ final class WebViewController: UIViewController, UIDocumentInteractionController
         }
     }
 
+    /// 网页的退出事件可能丢（换页、进程被杀）：页面一重新加载就把全屏方向状态复位，
+    /// 避免全局掩码一直停在横屏。只动方向，不碰播放器。
+    fileprivate func resetPlayerFullscreen() {
+        guard Self.playerFullscreenActive else { return }
+        setPlayerFullscreen(false)
+    }
+
     /// iOS 16 起可以主动请求旋转；更老的系统只能让系统重新评估一次支持方向。
     private func applyOrientation(_ mask: UIInterfaceOrientationMask) {
         if #available(iOS 16.0, *) {
@@ -536,23 +543,63 @@ final class WebViewController: UIViewController, UIDocumentInteractionController
         presenter.present(controller, animated: true) { player.play() }
     }
 
+    /// 下载器实际落盘的扩展名（MediaDownloader 只接受这五种，别的格式不会被下载成文件）。
+    fileprivate static let externalPlayerExtensions: Set<String> = ["mp4", "m4v", "mov", "mkv", "ts"]
+
+    /// 只有下载器真正的落盘目录（Documents/Downloads）里的文件才能交给外部播放器。
+    /// 两边都标准化并解析符号链接，再按**完整路径组件**比较：
+    /// `.../Documents-evil/x.mp4` 这种同前缀的兄弟目录不算在下载目录里。
+    private func isInDownloadDirectory(_ fileURL: URL) -> Bool {
+        guard let directory = MediaDownloader.directory() else { return false }
+        let root = directory.standardizedFileURL.resolvingSymlinksInPath()
+        let target = fileURL.standardizedFileURL.resolvingSymlinksInPath()
+        let rootComponents = root.pathComponents
+        let targetComponents = target.pathComponents
+        guard targetComponents.count > rootComponents.count else { return false }
+        return Array(targetComponents.prefix(rootComponents.count)) == rootComponents
+    }
+
+    /// 「打开方式」用的系统类型。mp4/m4v/mov 用系统声明好的类型；
+    /// mkv/ts 在部分系统上没有声明类型，用同扩展名、conforming 到 public.movie 的动态类型，
+    /// 而不是把所有扩展名硬套成 public.movie。只处理下载器实际允许的扩展名，
+    /// 取不到类型就返回 nil，由调用方明确提示，不猜别的格式能不能播。
+    private func externalPlayerType(for fileURL: URL) -> UTType? {
+        let ext = fileURL.pathExtension.lowercased()
+        guard Self.externalPlayerExtensions.contains(ext) else { return nil }
+        if let declared = UTType(filenameExtension: ext),
+           declared.conforms(to: .movie) || declared.conforms(to: .audiovisualContent) {
+            return declared
+        }
+        guard let derived = UTType(tag: ext, tagClass: .filenameExtension, conformingTo: .movie),
+              derived.conforms(to: .movie) || derived.conforms(to: .audiovisualContent) else {
+            return nil
+        }
+        return derived
+    }
+
     /// 已完成的一集交给系统「打开方式」菜单（UIDocumentInteractionController）。
     /// 系统会把本地文件复制进用户选中的播放器，不需要后台服务，也不给别的 App 传我们读不到的 file 地址。
-    /// 下载中 / 未完成的集网页侧不会给入口；这里再挡一次缺文件、路径越界和没有可接收 App 的情况。
+    /// 下载中 / 未完成的集网页侧不会给入口；这里再挡一次缺文件、路径越界、格式不支持
+    /// 和没有可接收 App 的情况。
     fileprivate func presentOpenInMenu(path: String?) {
         let raw = path?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         guard !raw.isEmpty else {
             notifyPlayerNotice("这一集还没有下载完成")
             return
         }
-        let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-        let fileURL = URL(fileURLWithPath: raw).standardizedFileURL
-        guard fileURL.path.hasPrefix(documents.standardizedFileURL.path) else {
+        let fileURL = URL(fileURLWithPath: raw).standardizedFileURL.resolvingSymlinksInPath()
+        guard isInDownloadDirectory(fileURL) else {
             notifyPlayerNotice("这个文件不在 App 的下载目录里")
             return
         }
-        guard FileManager.default.fileExists(atPath: fileURL.path) else {
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: fileURL.path, isDirectory: &isDirectory),
+              !isDirectory.boolValue else {
             notifyPlayerNotice("这一集的文件已经不在了，请重新下载")
+            return
+        }
+        guard let type = externalPlayerType(for: fileURL) else {
+            notifyPlayerNotice("这个格式不能交给其他播放器，请用 App 内播放")
             return
         }
         /* 上一次的菜单没关干净：先收起来，避免同时挂两个控制器。 */
@@ -562,9 +609,9 @@ final class WebViewController: UIViewController, UIDocumentInteractionController
         }
         sendingToExternalPlayer = false
         let controller = UIDocumentInteractionController(url: fileURL)
-        /* 扩展名决定类型：mp4/m4v/mov 是 public.mpeg-4 / public.movie，
-           播放器 App 就是靠这个出现在「打开方式」里的。 */
-        controller.uti = UTType(filenameExtension: fileURL.pathExtension)?.identifier
+        /* 类型来自系统声明或按扩展名派生的 conforming 类型；mkv/ts 能不能出现在某个播放器的菜单里
+           取决于那个 App 自己声明的类型，真机未验证。 */
+        controller.uti = type.identifier
         controller.delegate = self
         documentInteraction = controller
         /* iPad 上这是 popover，必须给锚点；放屏幕中间的小矩形，iPhone 会忽略。 */
@@ -763,6 +810,8 @@ extension WebViewController: WKNavigationDelegate {
 
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
         errorContainer.isHidden = true
+        /* 换页之后网页已经不在全屏，end 事件可能永远不来：这里兜底回竖屏。 */
+        resetPlayerFullscreen()
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
@@ -786,6 +835,8 @@ extension WebViewController: WKNavigationDelegate {
 
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
         lastFailedURL = webView.url
+        /* 网页进程都没了，页内状态一起消失：方向也要跟着复位。 */
+        resetPlayerFullscreen()
         webView.reload()
     }
 

@@ -875,17 +875,28 @@ testToolbarDownloadButtonReplacesTheDanmakuSlot → missing-button
   不搬动视频节点、不写全屏 CSS、不做旋转、不重布局。
   - 返回的 Promise 按 Fullscreen 契约兑现：等 webkitbeginfullscreen 才算成功；调用抛错或 1.5 秒内
     系统没回事件就拒绝，不会假装进了全屏（站点自己能提示）。
+  - 同一时间只保留**一个**原生全屏请求（token 就是这次请求对象）：已经在这个视频的全屏里，
+    新请求直接 resolve；已有请求在等结果时，新请求明确 reject，不按 video 堆队列，
+    也不会出现一次 begin 把多个请求一起算成功。旧请求的定时器只认自己的 token，不会误伤后一次。
+  - begin / end 只认「这次请求的视频」或「当前在全屏的视频」：别的 video 进退全屏一律忽略，
+    不清全局状态、不报方向。
   - 有视频的元素只走原生播放器这条路，**失败也不回退**到会黑屏的容器元素全屏。
   - iOS 15.0–15.3 的 WKWebView 没有 Element 全屏 API（isElementFullscreenEnabled 从 15.4 才有），
     注入层会补出 requestFullscreen / webkitRequestFullscreen 和 document.fullscreenEnabled，
     让站点的全屏按钮照常出现并改道到原生视频全屏；document.exitFullscreen 也转成原生退出。
     video.webkitEnterFullscreen 本身不受这个开关管：WebKit 源码 HTMLVideoElement.idl 里
     webkitEnterFullscreen / webkitExitFullscreen 没有 EnabledBySetting 门控。
+    **这条兼容层没有真机证据**（手上没有 15.0–15.3 的设备），只按公开 API 可用性实现，按未验证处理。
   - 退出后补发的 fullscreenchange / webkitfullscreenchange 只发给站点；补发期间注入层不再根据
     残留的 document.fullscreenElement 判断「进全屏」，避免原生方向又横过去。
-  - 只注入主 frame（forMainFrameOnly: true）。站点的 video、剧集网格、下载按钮都在主文档里
-    （注入层的下载/选集功能在真机上一直有效，跨域 iframe 里读不到这些节点），没有为猜想的
-    iframe 场景加逻辑。
+  - 只注入主 frame（forMainFrameOnly: true）。**播放器到底在不在主 frame，仓库里没有证据**：
+    站点播放页要口令，首页拿不到；下载地址来自站点 API，不能反推 <video> 的位置。
+    所以这里不猜 iframe、也不加跨 frame 逻辑，列为待真机核实的缺口。
+  - 公开属性 webkitDisplayingFullscreen 可用时做两件事：调用后 300ms 宽限核对一次（事件没来但
+    系统已全屏就算成功），以及页面回到前台（pageshow / visibilitychange）时核对一次（属性说不是
+    全屏就补一次退出）。属性不存在就只认 begin / end 事件，风险如实记在这里。
+  - 原生兜底：页面开始新导航或网页进程被杀时，把全局方向状态复位回竖屏；它只处理换页/崩溃，
+    **不能代替系统播放器 Done / 下滑退出**的事件兜底。
   原来「进 / 出全屏 → 原生锁横屏 / 回竖屏」的两态方向处理保持不动；退出后页面没有重建，
   详情页位置和播放进度都保持原样。
 - **测试名**（Node）：
@@ -894,11 +905,16 @@ testToolbarDownloadButtonReplacesTheDanmakuSlot → missing-button
   a native video fullscreen only resolves after the system reports it started、
   a native video fullscreen failure rejects and never falls back to the black element fullscreen、
   leaving the native player keeps portrait even if the page still reports a fullscreen element、
+  a second fullscreen request while one is pending is rejected instead of stacking up、
+  another video ending never ends the fullscreen video、
+  the public webkitDisplayingFullscreen property can confirm a started fullscreen、
+  coming back to the page clears a fullscreen the system already ended、
   iOS 15.0-15.3 without the element fullscreen API still reaches the native video player、
   the injected layer reports site fullscreen state without touching the page
 - **修复版本**：0.1.19（build 23）
 - **验证边界**：**真机**：容器全屏确实走原生视频全屏、横屏铺满、退出回原位续播；
-  Node 用例只证明注入层的行为，iOS 15.0–15.3 的按钮与全屏仍要在对应系统版本的真机上复核。
+  Node 用例只证明注入层行为。未验证项：iOS 15.0–15.3 的实际表现、播放器是否在 iframe 里、
+  真实设备上是否保留用户手势、以及 system Done 退出时事件会不会丢；这几项都不声称已通过。
 
 ## REG-025 已下载的集交给其他播放器离线播放（build 23）
 
@@ -908,13 +924,21 @@ testToolbarDownloadButtonReplacesTheDanmakuSlot → missing-button
 - **入口**：「我的下载」里某部剧的某一集（已完成）行内「外部播放」；下载中 / 未完成的集没有 path，
   不显示这个入口。点整行仍然是 App 内 AVPlayer 播放，两条路并存。
 - **原生**：WebViewController.presentOpenInMenu 用 UIDocumentInteractionController：
-  路径必须在 App 的 Documents 内、文件必须存在、按扩展名给 UTI（mp4/m4v/mov → public.mpeg-4 / public.movie），
+  路径必须是下载器**真实落盘目录**（MediaDownloader.directory() = Documents/Downloads）里的**普通文件**；
+  目标和根都做 standardizedFileURL + resolvingSymlinksInPath，再按**完整路径组件**比较，
+  `.../Documents-evil/x.mp4` 这种同前缀兄弟目录、目录本身、符号链接逃逸都拒绝。
+  类型只处理下载器实际允许的 mp4/m4v/mov/mkv/ts：系统有声明类型且 conforms 到 movie / audiovisualContent 就用它；
+  mkv/ts 在部分系统上没有声明类型，改用同扩展名、conforming 到 public.movie 的动态类型，
+  不把所有扩展名硬套成 public.movie；取不到类型就明确提示「这个格式不能交给其他播放器」，不开菜单。
   iPad 用屏幕中间的小矩形做 popover 锚点；控制器由 documentInteraction 强引用，菜单关闭后释放。
-- **反馈**：文件不在 / 没有能接收的 App / 用户取消，都用网页 toast 说一句；
+- **反馈**：文件不在 / 文件已删 / 格式不支持 / 没有能接收的 App / 用户取消，都用网页 toast 说一句；
   用户真的选了 App 就直接切走，不再多弹提示。
 - **测试名**（Node）：
   a finished episode offers the system player hand-off, a running one does not、
-  the native open-in result is shown as a toast
+  the native open-in result is shown as a toast、
+  the open-in hand-off only accepts regular files inside the real download folder、
+  the open-in hand-off gives every allowed format a real type or a clear refusal
 - **修复版本**：0.1.19（build 23）
 - **验证边界**：**真机**：系统菜单里实际出现哪些播放器、对方能否完整读取并离线播放、
-  iPad 锚点位置；Node 只能证明入口、传参和提示文案。
+  mkv / ts 是否真能被某个播放器接住、iPad 锚点位置。本机是 Windows，Swift 既编不了也跑不了，
+  presentOpenInMenu 的路径与类型逻辑**没有本机编译/运行证据**；Node 用例只钉源码守卫，不能替代真机。

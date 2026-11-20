@@ -33,24 +33,38 @@
 - **Promise 不撒谎**：站点调 requestFullscreen() 时，只有系统真的报出“视频全屏开始”才算成功；
   调用失败或系统 1.5 秒没反应就返回失败，站点可以自己提示。有视频的请求只走原生播放器，
   失败也不回退到会黑屏的容器全屏。
-- **iOS 15.0–15.3 也能用**：这几个系统的 WKWebView 没有 Element 全屏 API（开关从 15.4 才有），
+- **同一时间只跟一个请求**：已经在这个视频的全屏里，新请求直接成功；上一次还没结果时，
+  新请求明确失败，不排队、也不会一次“开始”把好几个请求一起算成功。
+  进入 / 退出只认这次请求的视频或当前全屏的那段视频，别的 video 事件直接忽略（不会误报回竖屏）。
+- **能核对就核对**：系统公开的 webkitDisplayingFullscreen 属性可用时，调用后 300ms 看一眼、
+  页面回到前台再核对一次（属性说已经退出就补一次退出）；属性不存在就只认系统事件，
+  这条风险写在 REG-024 里。
+- **原生兜底**：页面开始新导航、网页进程被杀时，方向状态复位回竖屏；它只管换页/崩溃，
+  不能代替系统播放器 Done / 下滑退出那条路。
+- **iOS 15.0–15.3（未验证）**：这几个系统的 WKWebView 没有 Element 全屏 API（开关从 15.4 才有），
   注入层把 requestFullscreen / document.fullscreenEnabled 补出来，全屏按钮照常出现并改道到
   系统原生视频全屏；退出时 document.exitFullscreen 也转成原生退出。
   系统原生的 video.webkitEnterFullscreen 不受这个开关限制（WebKit 源码里没有门控）。
-- **iframe**：注入只作用于主页面。站点的播放器、剧集网格、下载按钮都在主文档里
-  （注入层的选集/下载在真机上一直能用；跨域 iframe 里读不到这些节点），所以没有为猜测的
-  iframe 场景加代码。
+  手上没有 15.0–15.3 的设备，这一条只按公开 API 实现，**不算真机通过**。
+- **iframe（未验证）**：注入只作用于主页面。站点播放页要口令、仓库里拿不到页面结构，
+  “下载/选集在主文档能用”也推不出视频在哪一层，所以没有为猜测的 iframe 场景加代码，
+  这一项留待真机核实。
 - **方向逻辑保持不变**：进入全屏 → 横屏铺满，退出 → 回竖屏原位（build 22 的两态策略照旧）。
 - 版本号：build 22 → **build 23**；MARKETING_VERSION 仍是 0.1.19。
 
 ## 四、本机验证
 
 - `node --check ios/ZhuijuAI/AppBootstrap.js`：通过
-- `node --test ios/Tests/bootstrap.test.mjs ios/Tests/downloadQueue.test.mjs`：**72 条全过**，
-  新增 4 条全屏用例：容器全屏改道、Promise 契约与失败不回退、退出不回头、iOS 15 老系统补 API
+- `node --test ios/Tests/*.test.mjs`：**80 条全过**，新增全屏用例覆盖：容器全屏改道、
+  Promise 契约与失败不回退、退出不回头、iOS 15 补 API、重复请求只算一次、别的 video 退出不影响、
+  公开属性宽限确认、回到前台核对退出；另有两条「外部播放」源码守卫（下载目录的完整路径边界、
+  普通文件校验、允许格式的类型处理）
 - `git diff --check`：通过
-- 日志：`C:\Users\kenzh\AppData\Local\Temp\ios-build23-node.log`
-- 本机是 Windows、没有 Xcode：Swift 侧本次没有改；App 编译和出包只能在打包工作流里验证。
+- 日志：`C:\Users\kenzh\AppData\Local\Temp\build23-logs\node-check.log`、
+  `C:\Users\kenzh\AppData\Local\Temp\build23-logs\node-test.log`
+- 本机是 Windows、没有 Xcode：Swift 侧有改动（原生方向兜底、打开方式菜单），本地不能编译，
+  只能靠只打包 workflow 编译；**Swift 和真机都未测过**。Node 里那两条对 WebViewController.swift 的
+  断言只是钉住源码里的守卫，不能当成编译通过或真机通过。
 
 ## 五、真机要逐条确认（build 23）
 
@@ -62,6 +76,7 @@
 6. 我的下载里已完成的一集点「外部播放」→ 系统“打开方式”里能看到已安装的播放器。
 7. 选一个播放器 → 能完整播放这一集（离线、可拖动）。
 8. 下载中的集没有「外部播放」入口；把文件删掉后再点，应该给提示而不是静默失败。
+9. 下到 mkv / ts 这类格式时，看一眼系统菜单里有没有播放器愿意接；没有就换 VLC / Infuse 再试（这几项本机没法验）。
 
 ## 六、第二项：用其他播放器打开（已授权、已实现）
 
@@ -70,9 +85,13 @@
 - Ken 2026-11-20 明确同意出现一次这个菜单（“允许，选择播放器后打开本地视频”），所以这次实现的是：
   「我的下载」→ 已完成的那一集 → 行内「外部播放」→ 系统弹出“打开方式”→ 用户选播放器。
   系统把本地文件复制给对方，之后完全离线；点整行还是 App 内 AVPlayer 播放，两条路并存。
-- 只有已完成、文件存在的集才有这个入口：原生会再查一次路径在不在 Documents、文件在不在；
-  缺文件、没有能接收的播放器、用户取消，都会用 toast 说一句。没有后台服务，也不传在线地址。
-- 原生用 UIDocumentInteractionController（不是分享面板）：按扩展名给 UTI，iPad 用中间锚点，
+- 只有已完成、文件存在的集才有这个入口：原生会再查一次——文件必须在下载器真实落盘的
+  Documents/Downloads 里，两边解析符号链接后按完整路径组件比较（`Documents-evil` 这类同前缀兄弟目录、
+  目录本身都拒绝），必须是存在的普通文件；缺文件、格式不支持、没有能接收的播放器、用户取消，
+  都会用 toast 说一句。没有后台服务，也不传在线地址。
+- 原生用 UIDocumentInteractionController（不是分享面板）：类型只处理下载器允许的 mp4/m4v/mov/mkv/ts，
+  系统有声明类型且属于视听类型就用它，mkv/ts 没有声明时用同扩展名、conforming 到 public.movie 的
+  动态类型（不硬套 public.movie），取不到类型就明确提示、不开菜单；iPad 用中间锚点，
   控制器在菜单关闭前一直由视图控制器持有，避免提前释放。
 - 当前状态：修复提交在 `fix/ios-0.1.19-build23-fullscreen`，**尚未合 main、尚未出包**；
   审核通过后合并并只跑 `ios-ipa-only.yml`（只打包，不跑测试 job）。

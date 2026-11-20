@@ -476,42 +476,51 @@
      document.exitFullscreen 才有东西可退。 */
   var nativeVideoFullscreen = null;
 
-  /* 原生视频全屏从调到真正开始是异步的：requestFullscreen 返回的 Promise 要等
-     webkitbeginfullscreen 才算成功，系统没反应或调用失败时要拒绝，不能骗站点说已经进全屏。
-     调用本身仍然发生在用户手势的同步链路里（先 webkitEnterFullscreen()，再等事件）。 */
-  var pendingFullscreenRequests = [];
+  /* 同一时间只跟一个原生视频全屏请求：站点连点两次时第二个请求明确拒绝，
+     不会堆成两条 pending，也就不会出现「一次 begin 把两个请求都算成功」。
+     token 就是 request 对象本身；定时器只认自己那一次，结束后绝不会动后来的请求。 */
+  var pendingFullscreenRequest = null;
   var reportingSynthesizedChange = false;
 
-  function settleFullscreenRequests(video, started) {
-    var remaining = [];
-    for (var index = 0; index < pendingFullscreenRequests.length; index++) {
-      var request = pendingFullscreenRequests[index];
-      if (video && request.video !== video) { remaining.push(request); continue; }
-      request.finish(started);
-    }
-    pendingFullscreenRequests = remaining;
+  function settleFullscreenRequest(request, started) {
+    if (!request || request !== pendingFullscreenRequest) return;
+    pendingFullscreenRequest = null;
+    if (request.timer) clearTimeout(request.timer);
+    request.timer = null;
+    if (started) request.resolve();
+    else request.reject(new TypeError('Fullscreen was not started'));
+  }
+
+  /* 公开属性 webkitDisplayingFullscreen 在部分系统上没有：有才拿来做宽限核对，
+     没有就只认 begin / end 事件。不读 WebKit 私有控制器，也不靠屏幕方向反推退出。 */
+  function nativeFullscreenSupported(video) {
+    return !!(video && typeof video.webkitDisplayingFullscreen === 'boolean');
   }
 
   function startNativeVideoFullscreen(video) {
-    var request = { video: video, finish: null };
+    if (nativeVideoFullscreen === video) return Promise.resolve();
+    if (pendingFullscreenRequest) return Promise.reject(new TypeError('Fullscreen request already pending'));
+    var request = { video: video, resolve: null, reject: null, timer: null };
     var promise = new Promise(function (resolve, reject) {
-      var settled = false;
-      var timer = null;
-      request.finish = function (started) {
-        if (settled) return;
-        settled = true;
-        if (timer) clearTimeout(timer);
-        if (started) resolve();
-        else reject(new TypeError('Fullscreen was not started'));
-      };
-      /* 系统不回事件（手势被拒、解码器忙）时按失败处理，站点可以自己提示。 */
-      timer = setTimeout(function () { request.finish(false); }, 1500);
+      request.resolve = resolve;
+      request.reject = reject;
     });
-    pendingFullscreenRequests.push(request);
+    pendingFullscreenRequest = request;
+    var finish = function (started) { settleFullscreenRequest(request, started); };
     try {
       video.webkitEnterFullscreen();
     } catch (error) {
-      settleFullscreenRequests(video, false);
+      finish(false);
+      return promise;
+    }
+    /* 系统不回事件（手势被拒、解码器忙）时按失败处理，站点可以自己提示。 */
+    request.timer = setTimeout(function () { finish(false); }, 1500);
+    if (nativeFullscreenSupported(video)) {
+      /* 事件还没来但系统其实已经全屏：给一个很短的宽限核对，成功就不用干等。 */
+      setTimeout(function () {
+        if (request !== pendingFullscreenRequest) return;
+        if (video.webkitDisplayingFullscreen) finish(true);
+      }, 300);
     }
     return promise;
   }
@@ -556,17 +565,46 @@
     finally { reportingSynthesizedChange = false; }
   }
 
-  /* <video> 直接调 webkitEnterFullscreen 时只派发这两个事件，而且不冒泡，只能在 document 上捕获。 */
+  /* <video> 直接调 webkitEnterFullscreen 时只派发这两个事件，而且不冒泡，只能在 document 上捕获。
+     begin / end 只认「这次请求的视频」或「当前在全屏的视频」，别的视频一律忽略。 */
   document.addEventListener('webkitbeginfullscreen', function (event) {
-    nativeVideoFullscreen = event && event.target && event.target.tagName === 'VIDEO' ? event.target : null;
-    if (nativeVideoFullscreen) settleFullscreenRequests(nativeVideoFullscreen, true);
+    var video = event && event.target && event.target.tagName === 'VIDEO' ? event.target : null;
+    if (!video) return;
+    var matchesPending = pendingFullscreenRequest && pendingFullscreenRequest.video === video;
+    var matchesCurrent = nativeVideoFullscreen === video;
+    if (!matchesPending && !matchesCurrent && (pendingFullscreenRequest || nativeVideoFullscreen)) return;
+    if (matchesPending) settleFullscreenRequest(pendingFullscreenRequest, true);
+    nativeVideoFullscreen = video;
     reportPlayerFullscreen(true);
   }, true);
   document.addEventListener('webkitendfullscreen', function (event) {
-    settleFullscreenRequests(event && event.target ? event.target : null, false);
+    var video = event && event.target && event.target.tagName === 'VIDEO' ? event.target : null;
+    if (!video) return;
+    if (pendingFullscreenRequest && pendingFullscreenRequest.video === video) {
+      /* 还没开始就结束：这次请求算失败，但全局状态没变，不动方向。 */
+      settleFullscreenRequest(pendingFullscreenRequest, false);
+      return;
+    }
+    /* 另一段视频退出：跟当前这次全屏无关，不能清状态、也不能报「回竖屏」。 */
+    if (nativeVideoFullscreen !== video) return;
     nativeVideoFullscreen = null;
     reportPlayerFullscreen(false);
     notifyNativeFullscreenEnded();
+  }, true);
+
+  /* 页面回到前台时核对一次：end 事件丢了的话，这里补一次退出，避免原生一直停在横屏。
+     只在 webkitDisplayingFullscreen 可用时做；属性不存在就只依赖事件（真机风险见文档）。 */
+  function reconcileNativeFullscreen() {
+    if (!nativeVideoFullscreen) return;
+    if (!nativeFullscreenSupported(nativeVideoFullscreen)) return;
+    if (nativeVideoFullscreen.webkitDisplayingFullscreen) return;
+    nativeVideoFullscreen = null;
+    reportPlayerFullscreen(false);
+    notifyNativeFullscreenEnded();
+  }
+  onWindow('pageshow', reconcileNativeFullscreen);
+  document.addEventListener('visibilitychange', function () {
+    if (document.visibilityState === 'visible') reconcileNativeFullscreen();
   }, true);
 
   /* 站点全屏是「把整个播放器容器 requestFullscreen」。iOS 的 WKWebView 对这种容器元素全屏
