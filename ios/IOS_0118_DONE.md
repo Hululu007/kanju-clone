@@ -1,100 +1,49 @@
-# 追剧AI iOS 0.1.19 / build 23：全屏黑屏怎么修的
+# 追剧AI iOS 0.1.19 / build 23 交付说明
 
-分支：`fix/ios-0.1.19-build23-fullscreen`　版本：0.1.19（build 23）
+分支：`fix/ios-0.1.19-build23-fullscreen`
+审核通过提交：`c22894362dd9cf4c9fbc85034e9908d8befab42e`（reviewer 只读审核通过，无新增源码阻断）
+main 合并/推送：已快进推送到 `origin/main`，main 现在就是上面的 SHA。
 
-这份给 Ken 看大白话：build 22 在手机上点全屏会黑屏、只剩声音、退不出去，这次说明原因、改法和真机要确认的事。
+这份用大白话说明 build 23 修了什么、包在哪里、怎么验收。
 
-## 一、真机上看到的事（build 22）
+## 一、两个问题的根因
 
-点站点播放器自己的全屏后：画面全黑，声音还在；站点自己的退出按钮也找不到，像卡在全屏里。
+1. **全屏黑屏、只剩声音、退不出去**：站点点全屏时，原本让整个播放器容器进全屏；iOS 的 WKWebView 对这种“容器元素全屏”会丢掉 video 画面，只剩声音，站点画在容器里的退出按钮也被盖住。build 22 只切换了横竖屏方向，没有换掉“用哪套全屏”，所以方向对了但画面还是黑的。
+2. **下载完成后要能交给别的播放器**：iOS 上别的 App 读不到我们 App 沙盒里的文件；URL scheme 只能跳过去，传不了真实的本地视频文件；自己架本地 HTTP 服务，切到别的 App 后会被系统挂起，供不了整集。Ken 已明确授权出现一次系统“打开方式”菜单，所以 build 23 用系统文档交接，把本地文件复制给播放器。
 
-这一条是 Ken 在 build 22 上的反馈。Pinky 手机测试还没跑（Pinky 没开），所以这次没有 tester 的复现记录，第五节仍然算待测。
+## 二、这次改了什么
 
-## 二、根因（大白话）
+- **全屏改走系统原生视频播放器**：站点请求全屏时，不再让整块容器进全屏，而是调 `video.webkitEnterFullscreen()`。画面由 iOS 原生播放器渲染；系统播放器自带 Done / 下滑退出；退出后回到详情页原位，页面不重建，播放进度和选集状态保持不变。
+- **状态机只认一个请求、一个视频**：同一时间只跟一个全屏请求；另一个请求直接拒绝，不排队。公开属性 `webkitDisplayingFullscreen` 可用时做 300ms 宽限核对和回到前台核对；核对发现“其实已经全屏”时，和收到 begin 事件走同一条成功路径：记住当前视频、让原生切横屏、兑现这次请求。这样退出事件和 `document.exitFullscreen` 都找得到视频。
+- **外部播放入口**：「我的下载」里已完成的那一集显示「外部播放」；下载中的集没有入口。点击后由系统弹出“打开方式”，用户选已安装的播放器（VLC / Infuse / nPlayer / SenPlayer 等），系统把本地文件复制过去，之后完全离线播放。点整行仍然是 App 内 AVPlayer 播放，两条路并存。
+- **严格守卫**：只允许 `Documents/Downloads` 这个真实下载目录里的普通文件；目标与根目录都解析符号链接后按完整路径组件比较，`Documents-evil` 这类同前缀兄弟目录、目录本身、符号链接逃逸都会拒绝。类型只处理下载器实际允许的 mp4/m4v/mov/mkv/ts；系统有声明且属于视听类型就用它，mkv/ts 没有声明时用同扩展名、conforming 到 public.movie 的动态类型；找不到类型就明确提示，不用 nil UTI 开菜单。缺文件、取消、无接收 App 都有 toast 提示。
+- **冻结项**：下载进度渲染和首页无设置齿轮都没改。
 
-1. **站点是按“整块播放器容器”去全屏的**，不是只把视频本身放大。它调的是浏览器标准的
-   `requestFullscreen()`，iOS 的 WKWebView 会把整块容器交给系统的“元素全屏”。
-2. **iOS 对这种“容器元素全屏”会丢掉视频画面。** 容器进去了，但里面的 video 图层没有被正确渲染，
-   于是只剩声音、画面全黑——这不是解码问题，是选错了全屏方式。
-3. **退出按钮画在这个容器里**，它跟着容器一起被系统全屏层盖住或失效，所以看起来退不出去。
-   build 22 只做了“进/出全屏时把屏幕切横屏/竖屏”，没有换掉“用哪套全屏”，所以方向对了、画面还是黑的。
+## 三、包与交付信息
 
-## 三、这次怎么改
-
-- **把全屏改道到系统原生视频全屏**：注入层在页面脚本之前，把容器的
-  `requestFullscreen` / `webkitRequestFullscreen` 包了一层；只要请求的元素（或它里面的 video）
-  有视频，就改成调 `video.webkitEnterFullscreen()`。这样由 iOS 原生视频播放器接管：
-  画面正常、自带 Done 和下滑退出，退出后视频回到详情页原位继续播。
-- **不搬动视频、不写全屏 CSS、不做旋转、不重布局**：页面不重建，所以详情页位置、选集和播放进度都保持原样。
-  不是主视频的普通元素，仍然走浏览器原来的全屏实现。
-- **退出后补一个退出事件**：如果站点是靠 `fullscreenchange` 收尾的，原生全屏退出后会补发一次，
-  让站点把自己的沉浸态样式/退出按钮收回去；补发期间注入层自己不再拿残留的
-  document.fullscreenElement 判断状态，避免原生方向又横过去。
-- **Promise 不撒谎**：站点调 requestFullscreen() 时，只有系统真的报出“视频全屏开始”才算成功；
-  调用失败或系统 1.5 秒没反应就返回失败，站点可以自己提示。有视频的请求只走原生播放器，
-  失败也不回退到会黑屏的容器全屏。
-- **同一时间只跟一个请求**：已经在这个视频的全屏里，新请求直接成功；上一次还没结果时，
-  新请求明确失败，不排队、也不会一次“开始”把好几个请求一起算成功。
-  进入 / 退出只认这次请求的视频或当前全屏的那段视频，别的 video 事件直接忽略（不会误报回竖屏）。
-- **能核对就核对**：系统公开的 webkitDisplayingFullscreen 属性可用时，调用后 300ms 看一眼、
-  页面回到前台再核对一次（属性说已经退出就补一次退出）。300ms 发现“其实已经全屏、只是 begin 事件没来”时，
-  和收到 begin 事件走同一条成功路径：记住当前视频、让原生切横屏、兑现这次请求；
-  这样 end 事件和 document.exitFullscreen 才找得到视频。属性不存在就只认系统事件，
-  这条风险写在 REG-024 里。
-- **原生兜底**：页面开始新导航、网页进程被杀时，方向状态复位回竖屏；它只管换页/崩溃，
-  不能代替系统播放器 Done / 下滑退出那条路。
-- **iOS 15.0–15.3（未验证）**：这几个系统的 WKWebView 没有 Element 全屏 API（开关从 15.4 才有），
-  注入层把 requestFullscreen / document.fullscreenEnabled 补出来，全屏按钮照常出现并改道到
-  系统原生视频全屏；退出时 document.exitFullscreen 也转成原生退出。
-  系统原生的 video.webkitEnterFullscreen 不受这个开关限制（WebKit 源码里没有门控）。
-  手上没有 15.0–15.3 的设备，这一条只按公开 API 实现，**不算真机通过**。
-- **iframe（未验证）**：注入只作用于主页面。站点播放页要口令、仓库里拿不到页面结构，
-  “下载/选集在主文档能用”也推不出视频在哪一层，所以没有为猜测的 iframe 场景加代码，
-  这一项留待真机核实。
-- **方向逻辑保持不变**：进入全屏 → 横屏铺满，退出 → 回竖屏原位（build 22 的两态策略照旧）。
-- 版本号：build 22 → **build 23**；MARKETING_VERSION 仍是 0.1.19。
+- 桌面包：`C:\Users\kenzh\Desktop\ZhuijuAI-0.1.18-build23-unsigned.ipa`
+- 文件大小：4410400 bytes
+- 包内实际版本：`CFBundleShortVersionString=0.1.19`，`CFBundleVersion=23`，`CFBundleIdentifier=org.dpdns.zhuiju.ios`（文件名沿用 Ken 指定的 0.1.18 前缀，包内内容以这三个字段为准）
+- SHA256：`f1d6997001ff972735cb8647a3706a1381b7108e803378370139ec1ddd1070c1`
+- 审核：reviewer 对 `c228943` 整体只读审核通过；此前认可项沿用，无新增源码阻断。
+- 打包 workflow：只运行 `ios-ipa-only.yml` package job，run `44684378544`，`code_ref=c22894362dd9cf4c9fbc85034e9908d8befab42e`；workflow `build-info.log` / `ipa-info.log` 里的 checkout SHA 与目标一致，没有运行任何测试 job。
+- 推送 main 自动触发的旧 `Build unsigned iOS IPA` run `44684329726` 已按禁止云测指令取消；没有删除或禁用 workflow 配置。
 
 ## 四、本机验证
 
-- `node --check ios/ZhuijuAI/AppBootstrap.js`：通过
-- `node --test ios/Tests/*.test.mjs`：**82 条全过**，新增全屏用例覆盖：容器全屏改道、
-  Promise 契约与失败不回退、退出不回头、iOS 15 补 API、重复请求只算一次、别的 video 退出不影响、
-  公开属性宽限确认、回到前台核对退出；另有两条「外部播放」源码守卫（下载目录的完整路径边界、
-  普通文件校验、允许格式的类型处理）
-- `git diff --check`：通过
-- 日志：`C:\Users\kenzh\AppData\Local\Temp\build23-logs\node-check.log`、
-  `C:\Users\kenzh\AppData\Local\Temp\build23-logs\node-test.log`
-- 本机是 Windows、没有 Xcode：Swift 侧有改动（原生方向兜底、打开方式菜单），本地不能编译，
-  只能靠只打包 workflow 编译；**Swift 和真机都未测过**。Node 里那两条对 WebViewController.swift 的
-  断言只是钉住源码里的守卫，不能当成编译通过或真机通过。
+- `node --check ios/ZhuijuAI/AppBootstrap.js`：通过，日志 `C:\Users\kenzh\AppData\Local\Temp\build23-logs\node-check.log`
+- `node --test ios/Tests/*.test.mjs`：82/82 通过，日志 `C:\Users\kenzh\AppData\Local\Temp\build23-logs\node-test.log`
+- `git diff --check`：通过，日志 `C:\Users\kenzh\AppData\Local\Temp\build23-logs\diff-check.log`
+- 打包与校验日志文件夹：`C:\Users\kenzh\AppData\Local\Temp\build23-delivery-logs\`（git push、workflow run/watch、下载、桌面 SHA256、Info.plist 复算都在里面）
+- Windows 本机没有 Xcode，Swift 侧不能本地编译；云端只打包 workflow 已成功编译出 IPA。
 
-## 五、真机要逐条确认（build 23）
+## 五、真机待办（必须 Ken 安装 build 23 后再做）
 
-1. 详情页点站点播放器的全屏 → 有画面、横屏铺满。
-2. 全屏里始终有退出方式：系统播放器的 Done，或下滑退出。
-3. 退出后回到详情页原位，播放进度没变，可以接着播。
-4. 再点一次全屏，重复 1–3 仍然正常（不能只第一次生效）。
-5. 暂停状态下点全屏也要有画面、能退出。
-6. 我的下载里已完成的一集点「外部播放」→ 系统“打开方式”里能看到已安装的播放器。
-7. 选一个播放器 → 能完整播放这一集（离线、可拖动）。
-8. 下载中的集没有「外部播放」入口；把文件删掉后再点，应该给提示而不是静默失败。
-9. 下到 mkv / ts 这类格式时，看一眼系统菜单里有没有播放器愿意接；没有就换 VLC / Infuse 再试（这几项本机没法验）。
+1. 详情页点站点播放器全屏 → 有画面、横屏铺满。
+2. 系统播放器 Done 或下滑退出 → 回到详情页原位，播放进度不变。
+3. 重复进/出全屏、暂停时点全屏都要正常。
+4. 我的下载里已完成的一集点「外部播放」→ 系统“打开方式”列出已安装播放器；选一个能离线播完整集。
+5. 下载中的集没有「外部播放」；删掉文件后点，应有提示。
+6. mkv / ts 是否真能被播放器接住，要在真机上核实；本机没有验证。
 
-## 六、第二项：用其他播放器打开（已授权、已实现）
-
-- 前面的核实结论不变：别的 App 读不到我们沙盒里的文件，URL scheme 只能跳转、递不了 file://；
-  本地 HTTP 服务在切走后会被系统挂起，供不了整集。唯一可靠的是系统「打开方式」面板。
-- Ken 2026-11-20 明确同意出现一次这个菜单（“允许，选择播放器后打开本地视频”），所以这次实现的是：
-  「我的下载」→ 已完成的那一集 → 行内「外部播放」→ 系统弹出“打开方式”→ 用户选播放器。
-  系统把本地文件复制给对方，之后完全离线；点整行还是 App 内 AVPlayer 播放，两条路并存。
-- 只有已完成、文件存在的集才有这个入口：原生会再查一次——文件必须在下载器真实落盘的
-  Documents/Downloads 里，两边解析符号链接后按完整路径组件比较（`Documents-evil` 这类同前缀兄弟目录、
-  目录本身都拒绝），必须是存在的普通文件；缺文件、格式不支持、没有能接收的播放器、用户取消，
-  都会用 toast 说一句。没有后台服务，也不传在线地址。
-- 原生用 UIDocumentInteractionController（不是分享面板）：类型只处理下载器允许的 mp4/m4v/mov/mkv/ts，
-  系统有声明类型且属于视听类型就用它，mkv/ts 没有声明时用同扩展名、conforming 到 public.movie 的
-  动态类型（不硬套 public.movie），取不到类型就明确提示、不开菜单；iPad 用中间锚点，
-  控制器在菜单关闭前一直由视图控制器持有，避免提前释放。
-- 当前状态：修复提交在 `fix/ios-0.1.19-build23-fullscreen`，**尚未合 main、尚未出包**；
-  审核通过后合并并只跑 `ios-ipa-only.yml`（只打包，不跑测试 job）。
-- **真机未测**：上面第五节要在手机上逐条走一遍才算这版可用。
+**真机尚未测试**：以上只是代码审核、本地 Node 回归和云端 packaging-only 编译通过。等 Ken 安装桌面 build 23 包并确认后，才由 Lead 派手机测试； tester 要先核对版本/build 23。iOS 15.0–15.3、iframe 结构、系统 Done 事件丢失这几项仍是证据缺口，不声称已通过。
