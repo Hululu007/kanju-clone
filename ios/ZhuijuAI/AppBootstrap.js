@@ -373,7 +373,6 @@
       /* App 内场景：固定/粘性顶栏的 backdrop-filter 在 iOS 的 WebKit 里滚动时每帧重算，
          长列表明显掉帧。换成等效的半透明底色（观感基本不变）。 */
       '.topbar,.page-head{-webkit-backdrop-filter:none!important;backdrop-filter:none!important;background:linear-gradient(180deg,rgba(10,20,28,.97),rgba(10,20,28,.9))!important}',
-      '.topbar .tb-right>*{display:none!important}',
       'html[data-theme=\'light\'] .topbar,html[data-theme=\'light\'] .page-head{background:linear-gradient(180deg,rgba(255,255,255,.97),rgba(255,255,255,.92))!important}',
       '.tabbar{-webkit-backdrop-filter:none!important;backdrop-filter:none!important}',
       /* 首页一屏有大量海报角标；逐卡 backdrop-filter 会让 WebKit 在惯性滚动中反复重算模糊。 */
@@ -925,7 +924,7 @@
     var name = String(raw || '')
       .replace(/[\/\:*?"<>|]/g, '_')
       /* eslint-disable-next-line no-control-regex */
-      .replace(/[ -]/g, '')
+      .replace(/[\u0000-\u001f\u007f]/g, '')
       .replace(/\s+/g, ' ')
       .replace(/^[. ]+/, '')
       .trim();
@@ -1128,7 +1127,7 @@
         var key = results[r].key;
         var label = results[r].label;
         items.push({
-          id: 'dl' + Date.now() + '-' + key,
+          id: 'dl-' + (id || 'ep') + '-' + key,
           showId: id,
           epKey: key,
           epLabel: label,
@@ -1912,11 +1911,6 @@
       for (var i = 0; i < nodes.length; i++) {
         if (nodes[i].textContent !== pairs[p][1]) nodes[i].textContent = pairs[p][1];
       }
-    }
-    var episodeCast = document.querySelectorAll ? document.querySelectorAll('.ep-head [data-action="cast"]') : [];
-    for (var c = 0; c < episodeCast.length; c++) {
-      episodeCast[c].hidden = true;
-      if (episodeCast[c].setAttribute) episodeCast[c].setAttribute('aria-hidden', 'true');
     }
   }
 

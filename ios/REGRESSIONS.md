@@ -712,40 +712,98 @@ testToolbarDownloadButtonReplacesTheDanmakuSlot → missing-button
   4. 注入层仿了站点 `#ppCtrl` 一套控件，还用 `#playTools,.pp-toolbar,#btnFull,…{display:none!important}` 藏掉站点自己的工具条；
      全屏由注入层发 `fullscreen/inline` 让原生锁竖屏、改约束，与站点自己的 `requestFullscreen` / `data-ios-immersive` 互相打架。
 - **修复**：
-  - 删除注入层整套原生叠加控件与沉浸态 CSS，不再隐藏站点任何按钮；全屏和画面尺寸交回站点播放器。
-  - `orientationMask(isFullscreen:)` 恒为 `.allButUpsideDown`，删掉 `requestRotation`、全屏约束与状态栏覆盖。
-  - 下载不再要 App 登录态；`beginDownload` 缺 `id` 时补 `dl-<uuid>`；`beginBatchDownload` 接受不带 `signedIn` 的消息。
-  - 下载入口统一认 `[data-pw-act="dl"]` 和站点「下载本集」`#ppDownload`。
-  - 进度/完成/回到前台三条路径都走 `syncDownloadPage()` + `renderMinePageIfOpen()`。
-  - 新增 `playLocal`：离线播放用原生播放器播本地文件。
-- **测试名**（Node 夹具）：
+  - **全屏 / 方向交回网站**：删除注入层的 `PlayerAction.fullscreen/inline`、`setPlayerFullscreen`、`requestRotation`、
+    全屏约束与状态栏覆盖；`WebViewController.allowedOrientations` 恒为 `.allButUpsideDown`，`shouldAutorotate` 为真。
+    全屏由 WKWebView 里的网站播放器自己走 Fullscreen API，横竖屏跟着系统转。
+  - **不再画第二套播放器**：删掉注入层自建的顶部条、全屏浮层、画面档位下拉、倍速 / 外放 / 投屏菜单、复制链接按钮，
+    以及全部 `data-ios-immersive` 全屏样式与几何计算。站点自己的工具条、顶栏右侧按钮、选集投屏入口一律不再隐藏。
+  - **下载不再被登录态或 id 拦掉**：`beginDownload` / `beginBatchDownload` 不再要求 `signedIn`，也不因缺 id 静默返回；
+    缺 id 时按「剧号 + 集号」补一个稳定 id（`dl-<剧号>-<集号>`），全空才用一次性 UUID。
+  - **单集消息也带身份**：`beginDownload` 把 `showId` / `epKey` / `epLabel` / 剧名补进 meta，
+    下载页格子、「我的下载」和离线播放才能按同一部剧、同一集对上。
+  - **网页侧 id 稳定**：`startBatch` 原来用 `'dl' + Date.now() + '-' + key`，同一集再点一次会变成新 id、续传数据接不上；
+    改成 `dl-<剧号>-<集号>`。
+  - **进度 / 完成 / 回前台**三条路径都走 `syncDownloadPage()` + `renderMinePageIfOpen()`；
+    队列快照 `__zhuijuDownloads('snapshot')` 负责下载页格子的进度条与「我的下载」的百分比。
+  - 新增 `playLocal`：离线播放用原生播放器播本地已下载文件。
+- **测试名**（Node 夹具，`ios/Tests/bootstrap.test.mjs`、`ios/Tests/downloadQueue.test.mjs`）：
   - `the site own download menu row opens the native download page`
   - `download page opens without an app login and queues the tapped episode`
   - `a single-episode download queues without any login state`
   - `download progress appears in the download page and a completed episode joins my downloads`
   - `each finished episode lands in my downloads, and replay stays idempotent`
   - `no native player overlay is injected any more`
-  - `layout fallback keeps the light tabbar, category cards and hidden site right-side tools`
+  - `layout fallback keeps the light tabbar and category cards without touching site tools`
+    （站点顶栏右侧按钮、选集投屏入口都不再被隐藏）
+  - `the injected layer leaves the site fullscreen api alone`（全屏事件不写属性、不通知原生、不写全屏样式）
+  - `tapping the same episode twice reuses the same download id`（同一集重复点下载 id 稳定）
   - `tapping one cell in the episode grid queues exactly that episode`
-- **随功能退役的用例**（对应功能已按 0.1.19 的决定删除，不是为过测试而删）：
-  `landscape playback becomes immersive without forcing rotation`、`portrait playback stays inline until the fullscreen button is used`、
-  `explicit exit wins over automatic landscape immersion`、`landscape playback goes immersive again after a fullscreen round trip`、
-  `rotating back to landscape during playback restores immersive mode`、`the standard fullscreen api hides the title and keeps immersion in sync`、
-  `fullscreen hides every floating control and restores them on exit`、`entering fullscreen closes the top toolbar panels`、
-  `fullscreen fit dropdown selects and remembers the requested mode`、`portrait playback keeps video sizing untouched and immersive fit geometry is restored`、
-  `fullscreen sits at the right end of the control bar and drives native rotation`、`native fullscreen requests are rerouted to the in-page bar`、
-  `rate menu offers 2.5x and 3x and applies the chosen one`、`a clamped playback rate is reported instead of pretending 3x works`、
-  `control bar follows playback position and seeking`、`external playback hands the direct url to the native share sheet`、
-  `external playback refuses blob streams and says why`、`external playback without the app bridge falls back to the system share sheet`、
-  `cast menu lists playback actions without download or local-player entries`、`the cast button hands the episode to a third-party player in one tap by default`、
-  `a long press on the cast button still opens the full menu`、`the cast menu keeps playback actions and excludes downloads`、
-  `HLS lines can still be played by an external player even though they cannot be downloaded`、`copy link puts the direct url on the clipboard`、
-  `a played episode keeps its direct url after the player element is rebuilt`、`an unresolved episode is not mistaken for a media url`、
-  `the player page url is refused even when it fills the source tag`（页面地址这条改成 `download refuses a resolved player page url instead of saving the page`）、
-  `immersive hides the site page header that carries the film title`。
-  模拟器侧同时退役：`InjectedUITests` 的六条（横屏沉浸、标准全屏规则、投屏一键外放、外放菜单、外放开关、全屏铺满）。
-  因此 **REG-001 / REG-005 / REG-011 / REG-015 / REG-017 里的描述从 0.1.19 起不再适用**（沉浸态与画面档位已删除）；
-  REG-003 / REG-014 的「外放菜单」「投屏让位」也不再适用（站点的投屏入口不再被隐藏）。
+- **测试名**（Swift 单元，`ios/Tests/VersionTests.swift`；本机无 Xcode，未能在 Windows 上编译）：
+  - `testRotationStaysFreeInEveryDirection`
+  - `testDownloadIdentifierIsStableForTheSameEpisode`
+  - `testDownloadIdentifierKeepsTheIDThePageSent`
+  - `testDownloadIdentifierFallsBackToTheFileNameAndThenAUUID`
+- **随功能退役的用例**（只退役「被删掉的注入层功能」自己的用例，不是退役用户看得见的问题）：
+  - 控件本身已不存在：注入层的全屏按钮、画面档位下拉、倍速菜单、外放菜单、投屏菜单、复制链接，
+    以及「注入层自造沉浸态」这条实现路径。对应
+    `landscape playback becomes immersive without forcing rotation`、
+    `portrait playback stays inline until the fullscreen button is used`、
+    `explicit exit wins over automatic landscape immersion`、
+    `landscape playback goes immersive again after a fullscreen round trip`、
+    `rotating back to landscape during playback restores immersive mode`、
+    `the standard fullscreen api hides the title and keeps immersion in sync`、
+    `fullscreen hides every floating control and restores them on exit`、
+    `entering fullscreen closes the top toolbar panels`、
+    `fullscreen fit dropdown selects and remembers the requested mode`、
+    `portrait playback keeps video sizing untouched and immersive fit geometry is restored`、
+    `fullscreen sits at the right end of the control bar and drives native rotation`、
+    `native fullscreen requests are rerouted to the in-page bar`、
+    `rate menu offers 2.5x and 3x and applies the chosen one`、
+    `a clamped playback rate is reported instead of pretending 3x works`、
+    `control bar follows playback position and seeking`、
+    `external playback hands the direct url to the native share sheet`、
+    `external playback refuses blob streams and says why`、
+    `external playback without the app bridge falls back to the system share sheet`、
+    `cast menu lists playback actions without download or local-player entries`、
+    `the cast button hands the episode to a third-party player in one tap by default`、
+    `a long press on the cast button still opens the full menu`、
+    `the cast menu keeps playback actions and excludes downloads`、
+    `HLS lines can still be played by an external player even though they cannot be downloaded`、
+    `copy link puts the direct url on the clipboard`、
+    `a played episode keeps its direct url after the player element is rebuilt`、
+    `an unresolved episode is not mistaken for a media url`、
+    `the player page url is refused even when it fills the source tag`（页面地址这条改成
+    `download refuses a resolved player page url instead of saving the page`）、
+    `immersive hides the site page header that carries the film title`。
+  - 模拟器侧同时退役 `InjectedUITests` 的六条（横屏沉浸、标准全屏规则、投屏一键外放、外放菜单、外放开关、全屏铺满）。
+  - **仍然适用的站点全屏 / 头栏回归**：REG-001、REG-005、REG-011、REG-015、REG-017 讲的是用户看得见的要求
+    （全屏时头栏与工具条不能压在画面上、画面比例不能被裁、退出全屏要能回上一页）。这些要求**不退役**，
+    只是实现从「注入层隐藏 + 像素几何」换成「站点播放器自己的 Fullscreen API + 系统方向」：
+    真实全屏只渲染播放器元素，站点头栏本来就不在画面里。具体按真机复核，并由新增的 REG-021 钉住
+    「App 不锁方向、注入层不接管全屏」这条策略。
+  - REG-003 / REG-014 里「注入层的外放菜单 / 投屏让位」随注入控件删除而退役；站点自己的投屏入口不再被隐藏，
+    投屏回到站点原生行为（属于站点功能，不在 App 回归清单里）。
 - **修复版本**：0.1.19（build 21）
-- **验证边界**：Node 夹具能证明逻辑与消息；Swift 未在本机编译（Windows 无 Xcode），
-  真站选择器、WKWebView 里的网站全屏、原生下载进度与离线播放都必须真机复核。
+- **验证边界**：Node 夹具能证明逻辑与消息（本机 64 条全过）；Swift 未在本机编译（Windows 无 Xcode），
+  真站选择器、WKWebView 里的网站全屏与旋转、原生下载进度、离线播放都必须真机复核。
+
+## REG-021 网页播放器全屏与横竖屏旋转（0.1.19 起）
+
+- **要求（不是新 bug，是必须守住的策略）**：全屏、画面尺寸和方向全部交给 WKWebView 里的网站播放器；
+  App 不锁方向，注入层不监听 `fullscreenchange`、不写 `data-ios-immersive`、不改页面几何、不给原生发全屏消息。
+- **复现 / 复核步骤**：
+  1. 播放任意一集，点**网站**播放器自己的全屏。
+  2. 横过来、再竖回去，确认画面跟着转、工具条与头栏按站点自己的规则收起 / 恢复。
+  3. 退出全屏，确认能继续播放、能返回上一页。
+  4. 单集 / 批量各点一次下载，确认下载页格子出现进度、「我的下载」出现进度条和百分比。
+- **根因（0.1.19 前）**：注入层自己仿了一套全屏控件，进全屏时发 `fullscreen/inline` 让原生锁竖屏、改约束，
+  同时改页面几何、隐藏站点头栏；站点的 `requestFullscreen` 和这套假的沉浸态互相打架，方向也就跟着乱。
+- **本次保证**：`WebViewController.allowedOrientations == .allButUpsideDown`、`shouldAutorotate == true`；
+  注入层没有 `fullscreenchange` 监听、没有 `:fullscreen` 规则、没有 `data-ios-immersive`。
+- **测试名**：
+  - Node：`the injected layer leaves the site fullscreen api alone`、`no native player overlay is injected any more`、
+    `layout fallback keeps the light tabbar and category cards without touching site tools`
+  - Swift：`VersionTests.testRotationStaysFreeInEveryDirection`
+- **修复版本**：0.1.19（build 21）
+- **验证边界**：**真机**（模拟器测不准 WKWebView 里网站全屏的真行为）：全屏元素的面板位置、旋转时序、
+  刘海安全区、退出全屏后的返回栈。

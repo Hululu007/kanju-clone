@@ -47,6 +47,8 @@
   沉浸态（`data-ios-immersive`）规则。现在不再有 `#iosTopBar`、`#iosFullBtn`、`#ppCtrl` 这些注入节点。
 - 删掉 `#playTools`、`.pp-toolbar`、`#btnFull` 等「隐藏网站按钮」的规则；网站工具条原样显示。
 - 删掉 `signedIn()` / `askLogin()` 门控：新站没有 App 登录态，点下载直接入队。
+- 入队 id 改成稳定的 `dl-<剧号>-<集号>`（原来用 `Date.now()`，同一集再点一次会变成新 id，续传数据接不上）。
+- 不再隐藏站点任何按钮：顶栏右侧（搜索 / 历史 / 菜单）和选集旁的投屏入口都原样显示。
 - 下载入口认两处：新版播放页的 `[data-pw-act="dl"]`，和网站控制栏里的「下载本集」`#ppDownload`。
 - 集数、标题、封面改读新站的 `.pw-title` / `#pwEpCount` / `.pw-card-bg`，并保留旧站的选择器兜底。
 - 修正运行期错误调用：`syncDownloadRow()` / `syncTencentUI()` → `syncDownloadPage()`；
@@ -56,9 +58,8 @@
 ### `ios/ZhuijuAI/WebViewController.swift`
 
 - 删掉全屏接管：`PlayerAction.fullscreen/inline`、全屏约束、`setPlayerFullscreen`、`requestRotation`、
-  状态栏/指示条隐藏的覆盖。`orientationMask(isFullscreen:)` 恒为 `.allButUpsideDown`，App 不再锁方向。
-- `beginDownload` 不再要求 `signedIn`；缺 `id` 时用 `dl-<uuid>` 补，不再静默丢弃。
-- `beginBatchDownload` 改成 `signedIn != false`（网页不再带这个字段）。
+  状态栏/指示条隐藏的覆盖。`allowedOrientations` 恒为 `.allButUpsideDown`，`shouldAutorotate` 为真，App 不再锁方向。
+- `beginDownload` 不再要求 `signedIn`；缺 `id` 时按「剧号 + 集号」补一个稳定 id（`dl-<剧号>-<集号>`），
 - 新增 `playLocal`：离线播放走 `AVPlayerViewController` 全屏播本地文件（网站播放器放不了本地文件，这条只能原生做）。
 
 ### 其他
@@ -90,7 +91,7 @@ node --check ios/ZhuijuAI/AppBootstrap.js
 node --test ios/Tests/*.test.mjs
 ```
 
-结果：`node --check` 通过；Node 回归 **62 条全过**（日志：`C:\Users\kenzh\AppData\Local\Temp\ios-0.1.19-node-checks.log`）。
+结果：`node --check` 通过；Node 回归 **64 条全过**（日志：`C:\Users\kenzh\AppData\Local\Temp\ios-0.1.19-node-checks.log`）。
 
 没做、也不该假装做过的：
 

@@ -225,14 +225,11 @@ final class WebViewController: UIViewController {
         .lightContent
     }
 
-    /// 播放和全屏都交给 WKWebView 里的网页播放器，App 不再锁方向。
-    override var supportedInterfaceOrientations: UIInterfaceOrientationMask {
-        Self.orientationMask(isFullscreen: false)
-    }
+    /// 横竖屏都由系统决定：全屏是网页播放器自己的事，App 不在任何模式下锁方向。
+    static let allowedOrientations: UIInterfaceOrientationMask = .allButUpsideDown
 
-    static func orientationMask(isFullscreen: Bool) -> UIInterfaceOrientationMask {
-        _ = isFullscreen
-        return .allButUpsideDown
+    override var supportedInterfaceOrientations: UIInterfaceOrientationMask {
+        Self.allowedOrientations
     }
 
     override var shouldAutorotate: Bool {
@@ -309,47 +306,84 @@ final class WebViewController: UIViewController {
 
     // MARK: - 下载
 
-    /// 网站自己的下载按钮只带 url / name；缺 id 时补一个，不能静默丢掉。
+    /// 网站自己的下载按钮只带 url / name：这里既不查登录态，也不因缺 id 丢掉请求。
     fileprivate func beginDownload(_ body: [String: Any]) {
-        guard body["signedIn"] as? Bool != false else { return }
-        let id = (body["id"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? "dl-(UUID().uuidString)"
+        let fallbackName = body["name"] as? String ?? "video.mp4"
+        let showId = Self.showIdentifier(body)
+        let epKey = body["epKey"] as? String ?? ""
+        let id = Self.downloadIdentifier(
+            explicit: body["id"] as? String,
+            showId: showId,
+            epKey: epKey,
+            name: fallbackName
+        )
         guard let link = Self.shareableURL(body["url"] as? String) else {
             sendDownloadEvent(["event": "failed", "id": id, "reason": "这条线路的地址不能下载"])
             return
         }
-        let name = MediaDownloader.fileName(from: link.absoluteString, fallback: body["name"] as? String ?? "video.mp4")
+        let name = MediaDownloader.fileName(from: link.absoluteString, fallback: fallbackName)
+        /* 单集消息也要把「哪部剧、哪一集」交给原生：下载页的格子、我的下载和离线播放都按这两个字段认。 */
+        var meta: [String: Any] = body["meta"] as? [String: Any] ?? [:]
+        if !showId.isEmpty { meta["showId"] = showId }
+        if !epKey.isEmpty { meta["epKey"] = epKey }
+        if meta["epLabel"] == nil, let label = body["epLabel"] as? String { meta["epLabel"] = label }
+        if meta["title"] == nil, let title = (body["show"] as? [String: Any])?["title"] as? String { meta["title"] = title }
         downloader.start(
             id: id,
             url: link,
             name: name,
-            meta: body["meta"] as? [String: Any],
+            meta: meta,
             onProgress: { _, _ in },
             onFinish: { _ in /* 状态由 eventSink + snapshot 统一回传，避免同一条终态投两遍 */ }
         )
         sendDownloadSnapshot()
     }
 
-    /// 批量入队：一条消息带整批选集，原生层负责去重、并发上限和持久化。
-    fileprivate func beginBatchDownload(_ body: [String: Any]) {
-        guard body["signedIn"] as? Bool != false else {
-            sendDownloadEvent(["event": "failed", "id": "batch", "reason": "下载被拒绝"])
-            return
+    /// 网页消息里用来认剧的字段：新版用 showId，旧版放在 show.id / show.title 里。
+    static func showIdentifier(_ body: [String: Any]) -> String {
+        if let showId = body["showId"] as? String, !showId.isEmpty { return showId }
+        if let show = body["show"] as? [String: Any] {
+            if let id = show["id"] as? String, !id.isEmpty { return id }
+            if let title = show["title"] as? String, !title.isEmpty { return title }
         }
+        return ""
+    }
+
+    /// 下载任务的稳定 id：同一集重复点下载必须落到同一条记录（续传数据、暂停/继续都按 id 存）。
+    /// 优先用网页给的 id，其次「剧号-集号」，再其次文件名，最后才用一次性 UUID。
+    static func downloadIdentifier(explicit: String?, showId: String, epKey: String, name: String) -> String {
+        if let explicit = explicit, !explicit.isEmpty { return explicit }
+        let show = showId.trimmingCharacters(in: .whitespacesAndNewlines)
+        let key = epKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !show.isEmpty, !key.isEmpty { return "dl-\(show)-\(key)" }
+        let fileName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !fileName.isEmpty { return "dl-" + fileName }
+        return "dl-" + UUID().uuidString
+    }
+
+    /// 批量入队：一条消息带整批选集，原生层负责去重、并发上限和持久化。
+    /// 不看登录态（新站没有 App 登录态）；某条缺 id 就按剧号+集号补，绝不整条丢掉。
+    fileprivate func beginBatchDownload(_ body: [String: Any]) {
         guard let items = body["items"] as? [[String: Any]], !items.isEmpty else { return }
+        let bodyShow = Self.showIdentifier(body)
         var requests: [MediaDownloader.Request] = []
         for item in items {
-            guard let id = item["id"] as? String, !id.isEmpty else { continue }
+            let itemName = item["name"] as? String ?? "video.mp4"
+            let itemShow = (item["showId"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? bodyShow
+            let itemEpKey = item["epKey"] as? String ?? ""
+            let id = Self.downloadIdentifier(explicit: item["id"] as? String,
+                                             showId: itemShow, epKey: itemEpKey, name: itemName)
             guard let link = Self.shareableURL(item["url"] as? String) else {
                 sendDownloadEvent(["event": "failed", "id": id, "reason": "这条线路的地址不能下载"])
                 continue
             }
-            let name = MediaDownloader.fileName(from: link.absoluteString, fallback: item["name"] as? String ?? "video.mp4")
+            let name = MediaDownloader.fileName(from: link.absoluteString, fallback: itemName)
             var meta: [String: String] = (body["show"] as? [String: Any])?.reduce(into: [:]) { result, pair in
                 if let text = pair.value as? String { result[pair.key] = text }
                 else if let number = pair.value as? NSNumber { result[pair.key] = number.stringValue }
             } ?? [:]
-            meta["showId"] = (item["showId"] as? String) ?? meta["id"] ?? ""
-            meta["epKey"] = (item["epKey"] as? String) ?? ""
+            meta["showId"] = itemShow.isEmpty ? (meta["id"] ?? "") : itemShow
+            meta["epKey"] = itemEpKey
             meta["epLabel"] = (item["epLabel"] as? String) ?? ""
             meta["title"] = (item["title"] as? String) ?? meta["title"] ?? ""
             requests.append(MediaDownloader.Request(id: id, url: link, name: name, meta: meta))

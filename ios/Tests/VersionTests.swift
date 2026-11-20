@@ -5,9 +5,37 @@ import XCTest
 /// 版本号写在 UA 里。0.1.2 到 0.1.5 每发一版都要手改那一行字符串，
 /// 忘一次就会和包版本对不上，所以这里直接把两者钉在一起。
 final class VersionTests: XCTestCase {
-    func testOrientationMaskKeepsBothPortraitAndLandscapeAvailable() {
-        XCTAssertEqual(WebViewController.orientationMask(isFullscreen: true), .allButUpsideDown)
-        XCTAssertEqual(WebViewController.orientationMask(isFullscreen: false), .allButUpsideDown)
+    /// 全屏交给网页播放器，App 在任何模式下都不锁方向：横竖屏都必须能转。
+    func testRotationStaysFreeInEveryDirection() {
+        XCTAssertEqual(WebViewController.allowedOrientations, .allButUpsideDown)
+        XCTAssertTrue(WebViewController.allowedOrientations.contains(.portrait))
+        XCTAssertTrue(WebViewController.allowedOrientations.contains(.landscapeLeft))
+        XCTAssertTrue(WebViewController.allowedOrientations.contains(.landscapeRight))
+        XCTAssertFalse(WebViewController.allowedOrientations.contains(.portraitUpsideDown))
+    }
+
+    /// 网站只带 url / name：缺 id 时按「剧号 + 集号」补一个稳定 id，同一集重复点不会变成两条记录。
+    func testDownloadIdentifierIsStableForTheSameEpisode() {
+        let first = WebViewController.downloadIdentifier(explicit: nil, showId: "show-1", epKey: "3", name: "测试剧 第3集.mp4")
+        let second = WebViewController.downloadIdentifier(explicit: nil, showId: "show-1", epKey: "3", name: "测试剧 第3集.mp4")
+        XCTAssertEqual(first, "dl-show-1-3")
+        XCTAssertEqual(first, second, "同一集的 id 必须稳定，续传数据才接得上")
+    }
+
+    func testDownloadIdentifierKeepsTheIDThePageSent() {
+        let explicit = WebViewController.downloadIdentifier(explicit: "dl-page-9", showId: "show-1", epKey: "3", name: "x.mp4")
+        XCTAssertEqual(explicit, "dl-page-9")
+        let blank = WebViewController.downloadIdentifier(explicit: "", showId: "show-1", epKey: "3", name: "x.mp4")
+        XCTAssertEqual(blank, "dl-show-1-3", "空 id 当作没给，退回稳定值")
+    }
+
+    func testDownloadIdentifierFallsBackToTheFileNameAndThenAUUID() {
+        let named = WebViewController.downloadIdentifier(explicit: nil, showId: "", epKey: "", name: "a.mp4")
+        XCTAssertEqual(named, "dl-a.mp4")
+        let one = WebViewController.downloadIdentifier(explicit: nil, showId: "", epKey: "", name: "")
+        let two = WebViewController.downloadIdentifier(explicit: nil, showId: "", epKey: "", name: "")
+        XCTAssertTrue(one.hasPrefix("dl-"), "什么都没有时也要给一个能入队的 id，不能丢请求")
+        XCTAssertNotEqual(one, two, "完全没有身份信息时才允许一次性 UUID")
     }
 
     func testUserAgentCarriesTheBundleVersion() {

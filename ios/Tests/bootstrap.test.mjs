@@ -557,12 +557,12 @@ test('media URL is not rewritten', async () => {
   assert.equal(state.calls[0].input, 'https://media.example/19.mp4');
 });
 
-test('layout fallback keeps the light tabbar, category cards and hidden site right-side tools', () => {
+test('layout fallback keeps the light tabbar and category cards without touching site tools', () => {
   const state = fixture(); state.ready();
   const style = state.head.children.find((child) => child.id === 'iosShellStyle');
   assert.ok(style, 'injected style is missing');
-  assert.match(style.textContent, /\.topbar \.tb-right>\*\{display:none!important\}/,
-    'iOS 顶栏右侧恢复到 0.1.17 的空白布局');
+  assert.doesNotMatch(style.textContent, /\.topbar \.tb-right/,
+    '站点顶栏右侧按钮（搜索 / 历史 / 菜单）不能再被藏掉');
   assert.doesNotMatch(style.textContent, /\.page-head \[data-action="settings"\]/,
     '其他页面原有的菜单设置入口不能被误隐藏');
   assert.match(style.textContent, /html\[data-theme='light'\] \.tabbar \.tab\{color:rgba\(15,20,24/);
@@ -572,6 +572,43 @@ test('layout fallback keeps the light tabbar, category cards and hidden site rig
   assert.doesNotMatch(style.textContent, /#playTools[^}]*display:none/,
     '站点自己的工具条不能被 CSS 藏掉');
   assert.match(style.textContent, /safe-area-inset-bottom/);
+  const cast = state.document.querySelectorAll('.ep-head [data-action="cast"]')[0];
+  assert.ok(cast, '夹具里要有站点自己的投屏入口');
+  assert.ok(!cast.hidden, '站点的投屏入口不能被注入层藏掉');
+  assert.notEqual(cast.getAttribute('aria-hidden'), 'true', '也不能被标成 aria-hidden');
+});
+
+test('the injected layer leaves the site fullscreen api alone', () => {
+  const state = fixture({ episodes: [0] }); state.ready();
+  const messagesBefore = state.messages.length;
+  const attributesBefore = Object.keys(state.attributes).length;
+  state.document.fullscreenElement = state.player;
+  state.emit('fullscreenchange', { target: state.document });
+  state.emit('webkitfullscreenchange', { target: state.document });
+  assert.equal(Object.keys(state.attributes).length, attributesBefore,
+    '注入层不能在全屏时写 data-ios-immersive 之类的属性');
+  assert.equal(state.document.documentElement.hasAttribute('data-ios-immersive'), false);
+  assert.equal(state.messages.length, messagesBefore, '全屏变化不再通知原生锁方向 / 改约束');
+  state.document.fullscreenElement = null;
+  state.emit('fullscreenchange', { target: state.document });
+  assert.equal(Object.keys(state.attributes).length, attributesBefore, '退出全屏也不该写属性');
+  const style = state.head.children.find((child) => child.id === 'iosShellStyle');
+  assert.doesNotMatch(style.textContent, /:fullscreen/, '注入层不再写任何全屏样式');
+});
+
+test('tapping the same episode twice reuses the same download id', async () => {
+  const state = fixture({ episodes: [0], newDownloadUI: true }); state.ready();
+  state.click(state.siteDownload);
+  state.replies.push(json({ ...valid, idx: 0, episodeNumber: 1 }));
+  state.click(state.document.getElementById('iosDlCell6-0'));
+  await settle();
+  const first = state.messages.at(-1).items[0].id;
+  state.replies.push(json({ ...valid, idx: 0, episodeNumber: 1 }));
+  state.click(state.document.getElementById('iosDlCell6-0'));
+  await settle();
+  const second = state.messages.at(-1).items[0].id;
+  assert.match(first, /^dl-/, '入队请求要带 id');
+  assert.equal(first, second, '同一集重复点下载必须用同一个 id，续传 / 暂停才接得上');
 });
 
 test('both brand logos use the supplied artwork and hide the old svg', () => {
