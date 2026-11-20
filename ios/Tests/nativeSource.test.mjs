@@ -123,7 +123,7 @@ test('the tombstone store keeps blocking after the task records are trimmed', ()
   assert.match(cleanup, /records\.removeAll/, '旧记录可以清掉，墓碑留着');
 });
 
-/* ---------- REG-029 下载记录删不掉 ---------- */
+/* ---------- REG-030 下载记录删不掉 ---------- */
 
 /* 旧记录里存的是「/var/mobile/Containers/Data/Application/<UUID>/Documents/Downloads/x.mp4」。
    换一次容器（重装/换包）这个绝对路径就不存在了，旧实现按完整路径比较，
@@ -147,6 +147,27 @@ test('a stored path from an old app container still resolves inside the current 
   assert.match(section, /fileURL\(forStoredPath: raw\)/, '删除也要走同一个拼路径入口');
   assert.match(section, /guard fileManager\.fileExists\(atPath: source\.path, isDirectory: &isDirectory\) else \{ return true \}/, '文件本来就不在了也算清理成功');
   assert.doesNotMatch(section, /\bmoveItem\(/, '删除不能变成移动');
+});
+
+/* 只凭文件名拼路径会把越界路径（/tmp/x.mp4、../../x.mp4、下载目录以外）也落到下载目录的同名文件：
+   删除可能误删别人的文件。拼之前必须校验写法。 */
+test('the native path resolver only accepts paths that really point into downloads', () => {
+  const start = downloaderSource.indexOf('static func fileURL(forStoredPath');
+  const end = downloaderSource.indexOf('private static func storedPathIsInsideDownloads', start);
+  assert.ok(start > 0 && end > start, '找不到 fileURL(forStoredPath');
+  const resolver = downloaderSource.slice(start, end);
+  assert.match(resolver, /storedPathIsInsideDownloads\(text, name: name\)/, 'fileURL 拼路径前要先校验来路');
+
+  const helperStart = downloaderSource.indexOf('private static func storedPathIsInsideDownloads');
+  assert.ok(helperStart > 0, '找不到 storedPathIsInsideDownloads');
+  const helperEnd = downloaderSource.indexOf('private static func storedFileName', helperStart);
+  assert.ok(helperEnd > helperStart, '找不到校验函数结尾');
+  const helper = downloaderSource.slice(helperStart, helperEnd);
+  assert.match(helper, /!text\.contains\("\/"\)/, '裸文件名可以');
+  assert.match(helper, /text == downloadsFolder \+ "\/" \+ name/, 'Downloads/文件名 可以');
+  assert.match(helper, /"\/Documents\/" \+ downloadsFolder \+ "\/" \+ name/, '旧容器 Documents/Downloads/文件名 可以');
+  /* 三种写法之外都落到这最后一句比较上、结果为 false：不解析。 */
+  assert.match(helper, /return text\.count >= legacySuffix\.count && String\(text\.suffix\(legacySuffix\.count\)\) == legacySuffix/, '其它写法一律不解析');
 });
 
 test('download records only persist a relative path and rebuild the absolute one on use', () => {

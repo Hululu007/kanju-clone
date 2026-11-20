@@ -280,14 +280,15 @@ final class MediaDownloader: NSObject {
     }
 
     /// 把网页传来的 / 记录里的路径解析成**当前**下载目录里的文件地址：
-    /// 只取最后一段文件名，再拼到当前 Documents/Downloads；旧容器的绝对路径、
-    /// 相对路径、裸文件名三种写法都落到同一个地方，跨版本换容器也能删/能播。
+    /// 先确认写法确实指向下载目录，再取最后一段文件名拼到当前 Documents/Downloads；
+    /// 旧容器的绝对路径、相对路径、裸文件名三种写法都落到同一个地方，跨版本换容器也能删/能播。
     static func fileURL(forStoredPath raw: String?) -> URL? {
         guard let text = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty,
               let directory = directory() else { return nil }
-        /* 只认最后一段文件名：旧容器的绝对路径、`Downloads/文件名`、裸文件名都落到同一处。 */
+        /* 只取最后一段文件名，但必须先校验来路：不能什么路径都按文件名塞进下载目录。 */
         let name = (text as NSString).lastPathComponent
-        guard !name.isEmpty, name != ".", name != "..", name != "/" else { return nil }
+        guard !name.isEmpty, name != ".", name != "..", name != "/",
+              storedPathIsInsideDownloads(text, name: name) else { return nil }
         let root = directory.standardizedFileURL.resolvingSymlinksInPath()
         let candidate = root.appendingPathComponent(name).standardizedFileURL
         guard candidate.pathComponents.count == root.pathComponents.count + 1,
@@ -295,6 +296,20 @@ final class MediaDownloader: NSObject {
             return nil
         }
         return candidate
+    }
+
+    /// 收到路径的写法校验：只认裸文件名、`Downloads/文件名`、旧容器 `…/Documents/Downloads/文件名`。
+    /// 其它路径（`/tmp/x.mp4`、`../../outside.mp4`、`Downloads/子目录/x.mp4`）不解析：
+    /// 只凭文件名就把越界路径映射成下载目录里的同名文件，删除时会误删别人的文件。
+    private static func storedPathIsInsideDownloads(_ text: String, name: String) -> Bool {
+        /* 裸文件名：网页只给了名字。 */
+        if !text.contains("/") { return true }
+        /* 记录里存的相对路径。 */
+        if text == downloadsFolder + "/" + name { return true }
+        /* 旧版本的沙盒绝对路径：必须整段以 /Documents/Downloads/<文件名> 结尾，
+           前面是哪个容器都不管；中间多一层目录的不认。 */
+        let legacySuffix = "/Documents/" + downloadsFolder + "/" + name
+        return text.count >= legacySuffix.count && String(text.suffix(legacySuffix.count)) == legacySuffix
     }
 
     /// 落盘用的文件名：和 `fileURL(forStoredPath:)` 同一套规则，取最后一段、`..`/`.`/空串不认。

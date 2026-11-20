@@ -1027,7 +1027,7 @@ testToolbarDownloadButtonReplacesTheDanmakuSlot → missing-button
 - **修复版本**：0.1.19（build 26）
 - **验证边界**：Windows 本机没有 Xcode，`xcodebuild` 只在云端打包时跑；真机桌面名与「设置」里的 App 名需 Ken 装新包后核对。
 
-## REG-029 下载记录删不掉（build 27）【真机】
+## REG-030 下载记录删不掉（build 27）【真机】
 
 - **现象**：我的下载里某些历史条目，左滑点「删除」后提示删除失败，条目一直留着；重装或换包（build 号变化）后更容易出现。
   下载中 / 排队 / 失败的集在列表里根本没有删除入口，失败的集连行都不显示；失败的集还一直占着队列名额。
@@ -1044,9 +1044,12 @@ testToolbarDownloadButtonReplacesTheDanmakuSlot → missing-button
 - **修复（build 27）**：
   - 只持久化**相对路径** `Downloads/<文件名>`：网页 `relativeDownloadPath()`、原生 `MediaDownloader.relativePath(for:)`；
     `downloadsFolder` 只写一处。`loadRecords()` 读到旧绝对路径就就地迁移成相对路径（只改写法，不动文件）。
-  - 新增唯一解析入口 `MediaDownloader.fileURL(forStoredPath:)`：只取最后一段文件名，拼到**当前** `Documents/Downloads`，
+  - 新增唯一解析入口 `MediaDownloader.fileURL(forStoredPath:)`：先校验来路（只认裸文件名、`Downloads/<文件名>`、
+    旧容器 `…/Documents/Downloads/<文件名>`），再取最后一段文件名拼到**当前** `Documents/Downloads`，
     仍做「必须是下载目录直接子项」的边界检查（`..`、`.`、空串、目录一律拒绝）。
     删除、App 内离线播放、外部播放器打开、删除后回填都走这一个入口。
+    网页侧 `relativeDownloadPath()` 用同一套写法校验：`/tmp/x.mp4`、`../../outside.mp4`、`Downloads/子目录/x.mp4`
+    这类越界路径一律归一成空串（记录仍可删，文件不动），不再凭文件名映射到下载目录里的同名文件。
   - `removeDownloadedFile(at:)` 不再拿旧绝对路径去比较；文件本来就不存在视为**清理成功**并清记录；
     真实权限/磁盘错误仍返回失败并把原因回给网页，不虚报释放空间。
   - 下载中 / 排队 / 失败三种行都能左滑删：网页 `deleteQueuedTask()` 写墓碑后发 `deleteDownload`（`path` 为空表示没有文件要删）；
@@ -1056,10 +1059,14 @@ testToolbarDownloadButtonReplacesTheDanmakuSlot → missing-button
   - 已下载列表仍然只有左滑删除一个入口，没有新增其它删除按钮；队列行的删除键沿用同一套左滑露出。
 - **改动文件**：`ios/ZhuijuAI/MediaDownloader.swift`、`ios/ZhuijuAI/WebViewController.swift`、
   `ios/ZhuijuAI/AppBootstrap.js`、`ios/Tests/bootstrap.test.mjs`、`ios/Tests/downloadQueue.test.mjs`、`ios/Tests/nativeSource.test.mjs`。
-- **测试名（Node）**：a downloaded row saved with an old app-container path can still be deleted、a new download is stored as a relative path, never the absolute sandbox path、downloading, queued and failed rows can all be deleted and never come back、deleting a running row asks native for that task only and lets the queue move on、a stored path from an old app container still resolves inside the current downloads folder、download records only persist a relative path and rebuild the absolute one on use、deleting the episode that is playing offline stops the player before removing the file、deleting a running job cancels the task, drops its cache and frees the queue slot、a cancelled job callback never writes a deleted record back。
-- **本地验证**：`cd ios && node --test Tests/*.test.mjs` → **113/113 通过**（0 失败）。Windows 无 Xcode，Swift 未本地编译，
+- **测试名（Node）**：a downloaded row saved with an old app-container path can still be deleted、a new download is stored as a relative path, never the absolute sandbox path、downloading, queued and failed rows can all be deleted and never come back、deleting a running row asks native for that task only and lets the queue move on、a stored path from an old app container still resolves inside the current downloads folder、download records only persist a relative path and rebuild the absolute one on use、deleting the episode that is playing offline stops the player before removing the file、deleting a running job cancels the task, drops its cache and frees the queue slot、a cancelled job callback never writes a deleted record back、a stored path outside the downloads folder is never mapped onto a same-named file、the native path resolver only accepts paths that really point into downloads。
+- **审核第一轮意见（已修）**：只取文件名归一，会把任意来源的路径（包括越界路径）也落到下载目录里的同名文件，删除时可能误删。
+  已加与原生一致的写法校验，并补两条测试（网页侧行为测试 + 原生源码测试）；旧测试里用 `/tmp/...` 伪路径当原生 done 回传的夹具
+  改成真实沙盒 `…/Documents/Downloads/...` 形式（只改夹具数据，断言一条未改）。
+- **本地验证**：套内存硬上限跑 `python C:\Users\kenzh\hark_tasks\memcap.py 2048 node --test Tests/*.test.mjs` → **115/115 通过**（0 失败，未触发 memcap）。Windows 无 Xcode，Swift 未本地编译，
   编译只在打包工作流里发生。
 - **验收边界**：以下都要**真机**（Ken 装新包后）核对：旧记录（换过容器的绝对路径）能删、删完文件真的不在了、
   下载中/排队/失败左滑删后队列继续走、删正在播的那一集先停播、删除失败时条目留在列表里。
   本轮未做云端测试、未跑模拟器/XCUITest/UI smoke/截图门禁（HARK-NO-CLOUD-TEST）。
-- **已知限制**：迁移按「文件名」归一，如果两条不同记录的文件名恰好相同，会指向同一个文件（现网文件名带剧名+集号，未发现撞名）。
+- **已知限制**：记录只存文件名，两条不同记录若文件名恰好相同会指向同一个文件（现网文件名带剧名+集号，未发现撞名）；
+  这不是跨目录映射：非下载目录的路径已按上一条校验拒绝解析。

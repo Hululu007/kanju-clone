@@ -757,13 +757,21 @@
 
   /* 记录里只存相对路径（`Downloads/文件名`）。沙盒容器的绝对路径会随重装/换包变化：
      存绝对路径的旧记录在真机上删不掉（路径早就不存在），播放也会找不到文件。
-     老记录、原生回传的绝对路径、已经迁移过的相对路径，都归一到同一个写法。 */
+     只有确认来路真的指向下载目录的路径才归一：① 裸文件名；② `Downloads/文件名`；
+     ③ 旧容器的 `…/Documents/Downloads/文件名`。其它路径（`/tmp/x.mp4`、`../../outside.mp4`、
+     `Downloads/子目录/x.mp4`）一律返回空串：不能只凭文件名把它们映射成下载目录里的同名文件，
+     那样删除时会误删别人的文件。 */
   function relativeDownloadPath(raw) {
     var text = String(raw === undefined || raw === null ? '' : raw).trim();
     if (!text) return '';
     var name = String(text.split('/').pop() || '').trim();
     if (!name || name === '.' || name === '..') return '';
-    return DOWNLOADS_FOLDER + '/' + name;
+    var relative = DOWNLOADS_FOLDER + '/' + name;
+    if (text.indexOf('/') < 0) return relative;
+    if (text === relative) return relative;
+    var legacySuffix = '/Documents/' + DOWNLOADS_FOLDER + '/' + name;
+    if (text.length >= legacySuffix.length && text.slice(-legacySuffix.length) === legacySuffix) return relative;
+    return '';
   }
 
   function readLibrary() {
@@ -1745,7 +1753,7 @@
       downloadState.percent = total > 0 ? Math.min(100, Math.round(received / total * 100)) : 0;
       downloadState.total = total;
       downloadState.received = received;
-      downloadState.path = payload.path || downloadState.path || '';
+      downloadState.path = relativeDownloadPath(payload.path) || downloadState.path || '';
       saveDownload(false);
       var downloadPage = document.getElementById('iosDlPage');
       if (downloadPage && !downloadPage.hidden) syncDownloadPage();
