@@ -109,3 +109,18 @@ REG-029/030/031 三段都保留。
 | 杀 App 重开 | 下到一半杀掉 App 再打开 | 队列接着下，不从头、不僵尸 |
 | 删除后队列 | 删掉正在下的一集 | 队列继续，无复活记录 |
 | 离线播放 | 已下载完成的一集 | App 内直接播 |
+
+## 7. 合并与打包记录（2026-11-21）
+
+- 合并：`4f1b14f`（main，build 26）→ `ce927cc`（main，build 27），快进合并，无中间版本进 main。
+  打包的 commit 就是 `ce927cc041872ef68fc7a17f31ae05fb2a0ad4c0`。
+- build 号只加一次：`ios/project.yml` 的 `CURRENT_PROJECT_VERSION` 26 → 27；
+  打包工作流 `ios-ipa-only.yml` 里的版本断言同步改为 27。
+- 打包 run：[44773625470](https://github.com/kenzhao11/kanju-clone/actions/runs/44773625470) —— **只编译打包**，没有云端测试/模拟器/UI 冒烟。
+  失败的 44773256147 是把 commit SHA 填进 `code_ref` 导致的 checkout 失败，与代码无关。
+- 产物：`ZhuijuAI-0.1.19-build27-unsigned.ipa`，4 514 877 字节，
+  sha256 `8a73b7ca9171e1866a95fb1998729cdfd1910eafdb118cdada41ac63614c8320`，
+  已放 `C:\Users\kenzh\Desktop\`。
+- 审核：下载队列线「审核开发」通过（`4f1b14f..dfd97ee`）；删除线「审核开发二」通过（`4f1b14f..241fc6f`）；
+  整合版「审核开发」通过（含暂停分片保留、回调代次、删除线整合）。
+- 真机项仍未验收（见第 6 节），需 Ken 安装 build 27 后测。
