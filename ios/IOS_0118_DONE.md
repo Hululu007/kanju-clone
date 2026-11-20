@@ -2,7 +2,7 @@
 # 追剧AI iOS build24 下载修复（审核后返工稿）
 
 分支：`fix/ios-0.1.19-build24-downloads`
-提交：`e46549fa6afbd895f68d7d0d2bdcc0c664f630ab`（分支 `fix/ios-0.1.19-build24-downloads`，未合 main、未出包）
+提交：`21f88224d3e6cc5f31857b712d1bc185b57d3784`（分支 `fix/ios-0.1.19-build24-downloads`，未合 main、未出包）
 
 这份只说 build24 的下载修复。全屏和首页齿轮保持 build23 原样，本轮没碰。
 
