@@ -470,6 +470,51 @@
      所以退出全屏后详情页位置和播放进度都保持原样。 */
   var playerFullscreenOn = null;
 
+  /* 系统原生视频全屏当前锁定的视频。iOS 15.0–15.3 的 WKWebView 没有 Element 全屏 API，
+     站点自己也可能没有可调的全屏方法；这里记住是哪段视频在全屏，补出来的
+     document.exitFullscreen 才有东西可退。 */
+  var nativeVideoFullscreen = null;
+
+  /* 原生视频全屏从调到真正开始是异步的：requestFullscreen 返回的 Promise 要等
+     webkitbeginfullscreen 才算成功，系统没反应或调用失败时要拒绝，不能骗站点说已经进全屏。
+     调用本身仍然发生在用户手势的同步链路里（先 webkitEnterFullscreen()，再等事件）。 */
+  var pendingFullscreenRequests = [];
+  var reportingSynthesizedChange = false;
+
+  function settleFullscreenRequests(video, started) {
+    var remaining = [];
+    for (var index = 0; index < pendingFullscreenRequests.length; index++) {
+      var request = pendingFullscreenRequests[index];
+      if (video && request.video !== video) { remaining.push(request); continue; }
+      request.finish(started);
+    }
+    pendingFullscreenRequests = remaining;
+  }
+
+  function startNativeVideoFullscreen(video) {
+    var request = { video: video, finish: null };
+    var promise = new Promise(function (resolve, reject) {
+      var settled = false;
+      var timer = null;
+      request.finish = function (started) {
+        if (settled) return;
+        settled = true;
+        if (timer) clearTimeout(timer);
+        if (started) resolve();
+        else reject(new TypeError('Fullscreen was not started'));
+      };
+      /* 系统不回事件（手势被拒、解码器忙）时按失败处理，站点可以自己提示。 */
+      timer = setTimeout(function () { request.finish(false); }, 1500);
+    });
+    pendingFullscreenRequests.push(request);
+    try {
+      video.webkitEnterFullscreen();
+    } catch (error) {
+      settleFullscreenRequests(video, false);
+    }
+    return promise;
+  }
+
   function reportPlayerFullscreen(active) {
     var on = !!active;
     if (playerFullscreenOn === on) return;
@@ -478,6 +523,7 @@
   }
 
   function currentFullscreenElement() {
+    if (nativeVideoFullscreen) return nativeVideoFullscreen;
     if (document.fullscreenElement) return document.fullscreenElement;
     if (document.webkitFullscreenElement) return document.webkitFullscreenElement;
     return null;
@@ -485,9 +531,13 @@
 
   /* 站点播放器走标准 Fullscreen API：进 / 出都会派发 fullscreenchange。 */
   document.addEventListener('fullscreenchange', function () {
+    /* 我们自己补发的事件只是给站点看的：退出时页面可能还残留 document.fullscreenElement，
+       不能再拿它判断一次「进全屏」，否则原生方向会被重新切成横屏。 */
+    if (reportingSynthesizedChange) return;
     reportPlayerFullscreen(!!currentFullscreenElement());
   }, true);
   document.addEventListener('webkitfullscreenchange', function () {
+    if (reportingSynthesizedChange) return;
     reportPlayerFullscreen(!!currentFullscreenElement());
   }, true);
 
@@ -495,19 +545,25 @@
      否则站点可能把沉浸态样式或退出按钮留在页面上。只补事件，不动 DOM、不改样式。 */
   function notifyNativeFullscreenEnded() {
     if (typeof document.dispatchEvent !== 'function') return;
+    reportingSynthesizedChange = true;
     try {
       if (typeof window.Event === 'function') {
         document.dispatchEvent(new window.Event('fullscreenchange'));
         document.dispatchEvent(new window.Event('webkitfullscreenchange'));
       }
     } catch (error) { /* 站点没有事件构造器时忽略：退出本身已经完成 */ }
+    finally { reportingSynthesizedChange = false; }
   }
 
   /* <video> 直接调 webkitEnterFullscreen 时只派发这两个事件，而且不冒泡，只能在 document 上捕获。 */
-  document.addEventListener('webkitbeginfullscreen', function () {
+  document.addEventListener('webkitbeginfullscreen', function (event) {
+    nativeVideoFullscreen = event && event.target && event.target.tagName === 'VIDEO' ? event.target : null;
+    if (nativeVideoFullscreen) settleFullscreenRequests(nativeVideoFullscreen, true);
     reportPlayerFullscreen(true);
   }, true);
-  document.addEventListener('webkitendfullscreen', function () {
+  document.addEventListener('webkitendfullscreen', function (event) {
+    settleFullscreenRequests(event && event.target ? event.target : null, false);
+    nativeVideoFullscreen = null;
     reportPlayerFullscreen(false);
     notifyNativeFullscreenEnded();
   }, true);
@@ -536,22 +592,55 @@
     for (var index = 0; index < names.length; index++) {
       (function (name) {
         var original = proto[name];
-        if (typeof original !== 'function') return;
+        /* 老系统（iOS 15.0–15.3）上根本没有这个方法，也一并补出来：
+           否则站点一检测到「没有全屏 API」，就干脆不显示全屏按钮，改道根本没机会执行。
+           补的方法对没有视频的元素返回被拒绝的 Promise，和浏览器不支持时表现一致。 */
         proto[name] = function () {
           var video = nativeVideoInside(this);
-          if (video && typeof video.webkitEnterFullscreen === 'function') {
+          if (video) {
+            /* 有视频就只走系统原生视频全屏，这条路上绝不回退到会黑屏的容器元素全屏。 */
+            if (typeof video.webkitEnterFullscreen !== 'function') {
+              return Promise.reject(new TypeError('Fullscreen is not supported'));
+            }
+            return startNativeVideoFullscreen(video);
+          }
+          if (typeof original === 'function') return original.apply(this, arguments);
+          return Promise.reject(new TypeError('Fullscreen is not supported'));
+        };
+      }(names[index]));
+    }
+  }
+
+  /* 站点通常先看 document.fullscreenEnabled 才决定显不显示全屏按钮，退出时调 document.exitFullscreen。
+     iOS 15.0–15.3 这两个能力都不存在，但系统原生视频全屏本来就能用：补上最小的状态，
+     让全屏按钮出现、退出时能关掉系统播放器。只补状态和方法，不动页面样式。 */
+  function exposeNativeFullscreenState() {
+    try {
+      Object.defineProperty(document, 'fullscreenEnabled', {
+        configurable: true,
+        get: function () { return true; }
+      });
+    } catch (error) { /* document 不允许改写时保持 WebKit 原值 */ }
+    var names = ['exitFullscreen', 'webkitExitFullscreen'];
+    for (var index = 0; index < names.length; index++) {
+      (function (name) {
+        var original = document[name];
+        document[name] = function () {
+          if (nativeVideoFullscreen && typeof nativeVideoFullscreen.webkitExitFullscreen === 'function') {
             try {
-              video.webkitEnterFullscreen();
+              nativeVideoFullscreen.webkitExitFullscreen();
               return Promise.resolve();
             } catch (error) { /* 交给下面的原实现 */ }
           }
-          return original.apply(this, arguments);
+          if (typeof original === 'function') return original.apply(document, arguments);
+          return Promise.reject(new TypeError('No fullscreen element'));
         };
       }(names[index]));
     }
   }
 
   routeFullscreenToNativeVideo();
+  exposeNativeFullscreenState();
 
   var settingsSheet = null;
 

@@ -872,14 +872,30 @@ testToolbarDownloadButtonReplacesTheDanmakuSlot → missing-button
 - **修复（build 23）**：注入层在页面脚本之前把 Element.prototype.requestFullscreen /
   webkitRequestFullscreen 包一层：请求的元素（或它内部的 video）有视频时，改成调
   video.webkitEnterFullscreen()，由系统原生视频播放器接管 —— 画面正常、自带 Done 和下滑退出；
-  不搬动视频节点、不写全屏 CSS、不做旋转、不重布局。非视频元素仍走原来的实现。
+  不搬动视频节点、不写全屏 CSS、不做旋转、不重布局。
+  - 返回的 Promise 按 Fullscreen 契约兑现：等 webkitbeginfullscreen 才算成功；调用抛错或 1.5 秒内
+    系统没回事件就拒绝，不会假装进了全屏（站点自己能提示）。
+  - 有视频的元素只走原生播放器这条路，**失败也不回退**到会黑屏的容器元素全屏。
+  - iOS 15.0–15.3 的 WKWebView 没有 Element 全屏 API（isElementFullscreenEnabled 从 15.4 才有），
+    注入层会补出 requestFullscreen / webkitRequestFullscreen 和 document.fullscreenEnabled，
+    让站点的全屏按钮照常出现并改道到原生视频全屏；document.exitFullscreen 也转成原生退出。
+    video.webkitEnterFullscreen 本身不受这个开关管：WebKit 源码 HTMLVideoElement.idl 里
+    webkitEnterFullscreen / webkitExitFullscreen 没有 EnabledBySetting 门控。
+  - 退出后补发的 fullscreenchange / webkitfullscreenchange 只发给站点；补发期间注入层不再根据
+    残留的 document.fullscreenElement 判断「进全屏」，避免原生方向又横过去。
+  - 只注入主 frame（forMainFrameOnly: true）。站点的 video、剧集网格、下载按钮都在主文档里
+    （注入层的下载/选集功能在真机上一直有效，跨域 iframe 里读不到这些节点），没有为猜想的
+    iframe 场景加逻辑。
   原来「进 / 出全屏 → 原生锁横屏 / 回竖屏」的两态方向处理保持不动；退出后页面没有重建，
   详情页位置和播放进度都保持原样。
 - **测试名**（Node）：
   a site fullscreen request on the player uses the native video player, not the black element fullscreen、
   a native video fullscreen also reports enter and exit exactly once、
+  a native video fullscreen only resolves after the system reports it started、
+  a native video fullscreen failure rejects and never falls back to the black element fullscreen、
+  leaving the native player keeps portrait even if the page still reports a fullscreen element、
+  iOS 15.0-15.3 without the element fullscreen API still reaches the native video player、
   the injected layer reports site fullscreen state without touching the page
 - **修复版本**：0.1.19（build 23）
 - **验证边界**：**真机**：容器全屏确实走原生视频全屏、横屏铺满、退出回原位续播；
-  iOS 15.0–15.3 没有 isElementFullscreenEnabled，这条改道在这些系统上不生效（站点按钮可能没反应），
-  需要按真机系统版本复核。
+  Node 用例只证明注入层的行为，iOS 15.0–15.3 的按钮与全屏仍要在对应系统版本的真机上复核。

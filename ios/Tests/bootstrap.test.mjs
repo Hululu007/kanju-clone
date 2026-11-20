@@ -99,7 +99,7 @@ function node(tag = 'div') {
 /* 夹具默认把「默认用第三方播放器」关掉（seed 成 '0'）：按钮/菜单类用例关心的是菜单本身，
    每次都先点两下很啰嗦。新用例要验「默认就是第三方播放器」时传 externalPlayerDefault: true，
    此时不写这条偏好，和真机上第一次安装的默认值一致。 */
-function fixture({ origin = 'https://zhuiju.dpdns.org', storageThrows = false, landscape = false, keyword = '', search = '?id=fixture', episodes = [], playRejects = false, maxRate = 0, bridge = true, signedIn = false, noSelectedEpisode = false, homePage = false, externalPlayerDefault = false, newDownloadUI = false, seed = {} } = {}) {
+function fixture({ origin = 'https://zhuiju.dpdns.org', storageThrows = false, landscape = false, keyword = '', search = '?id=fixture', episodes = [], playRejects = false, maxRate = 0, bridge = true, signedIn = false, noSelectedEpisode = false, homePage = false, externalPlayerDefault = false, newDownloadUI = false, noElementFullscreen = false, seed = {} } = {}) {
   const shared = [];
   const listeners = {};
   const replies = [];
@@ -118,7 +118,8 @@ function fixture({ origin = 'https://zhuiju.dpdns.org', storageThrows = false, l
     removeAttribute(name) { video.removed.push(name); delete video.attributes[name]; },
     pause() { video.paused = true; },
     play() { video.started = (video.started || 0) + 1; video.paused = false; return Promise.resolve(); },
-    webkitEnterFullscreen() { video.nativeFullscreen = (video.nativeFullscreen || 0) + 1; } };
+    webkitEnterFullscreen() { video.nativeFullscreen = (video.nativeFullscreen || 0) + 1; },
+    webkitExitFullscreen() { video.nativeExit = (video.nativeExit || 0) + 1; } };
   /* 系统可能把倍速夹回去：maxRate 模拟 iOS 只允许到 2× */
   Object.defineProperty(video, 'playbackRate', {
     get() { return videoRate; },
@@ -421,7 +422,8 @@ function fixture({ origin = 'https://zhuiju.dpdns.org', storageThrows = false, l
   /* 站点的全屏按钮走标准 Fullscreen API：给 Element.prototype 一份可观察的原实现，
      验证注入层把它改道到原生视频全屏，而不是真去进会黑屏的容器全屏。 */
   let elementFullscreenCalls = 0;
-  const elementProto = {
+  /* noElementFullscreen 模拟 iOS 15.0–15.3 的 WKWebView：连 Element 全屏 API 都没有。 */
+  const elementProto = noElementFullscreen ? {} : {
     requestFullscreen() { elementFullscreenCalls += 1; return Promise.resolve(); },
     webkitRequestFullscreen() { elementFullscreenCalls += 1; return Promise.resolve(); },
   };
@@ -628,15 +630,19 @@ test('a native video fullscreen also reports enter and exit exactly once', () =>
     'video.webkitEnterFullscreen 这条路也要让原生横屏后再回竖屏');
 });
 
-test('a site fullscreen request on the player uses the native video player, not the black element fullscreen', () => {
+test('a site fullscreen request on the player uses the native video player, not the black element fullscreen', async () => {
   const state = fixture({ episodes: [0] }); state.ready();
   Object.setPrototypeOf(state.player, state.elementProto);
-  state.player.requestFullscreen();
+  const entered = state.player.requestFullscreen();
+  state.emit('webkitbeginfullscreen', { target: state.video });
+  await entered;
   assert.equal(state.video.nativeFullscreen, 1, '容器全屏要改走系统原生视频全屏');
   assert.equal(state.elementFullscreenCalls, 0, '不能再进入会丢画面、退不出的容器元素全屏');
 
   Object.setPrototypeOf(state.video, state.elementProto);
-  state.video.requestFullscreen();
+  const again = state.video.requestFullscreen();
+  state.emit('webkitbeginfullscreen', { target: state.video });
+  await again;
   assert.equal(state.video.nativeFullscreen, 2, 'video 自己的全屏请求也走原生');
 
   const other = node('div');
@@ -650,6 +656,67 @@ test('a site fullscreen request on the player uses the native video player, not 
     '原生全屏退出后要补一次退出事件，站点才能收起沉浸态');
 });
 
+test('a native video fullscreen only resolves after the system reports it started', async () => {
+  const state = fixture({ episodes: [0] }); state.ready();
+  Object.setPrototypeOf(state.player, state.elementProto);
+  let outcome = 'pending';
+  const entered = state.player.requestFullscreen().then(() => { outcome = 'resolved'; }, () => { outcome = 'rejected'; });
+  assert.equal(outcome, 'pending', '系统还没回事件前不能先报成功');
+  state.emit('webkitbeginfullscreen', { target: state.video });
+  await entered;
+  assert.equal(outcome, 'resolved');
+});
+
+test('a native video fullscreen failure rejects and never falls back to the black element fullscreen', async () => {
+  const state = fixture({ episodes: [0] }); state.ready();
+  Object.setPrototypeOf(state.player, state.elementProto);
+  state.video.webkitEnterFullscreen = () => { throw new Error('gesture rejected'); };
+  const failed = await state.player.requestFullscreen().then(() => 'resolved', () => 'rejected');
+  assert.equal(failed, 'rejected', '调用失败要按 requestFullscreen 的契约拒绝');
+  assert.equal(state.elementFullscreenCalls, 0, '失败也不能退回会黑屏的容器元素全屏');
+
+  const silent = fixture({ episodes: [0] }); silent.ready();
+  Object.setPrototypeOf(silent.player, silent.elementProto);
+  silent.video.webkitEnterFullscreen = () => {};
+  const timedOut = await silent.player.requestFullscreen().then(() => 'resolved', () => 'rejected');
+  assert.equal(timedOut, 'rejected', '系统一直不回事件时按失败处理，不能假装成功');
+});
+
+test('leaving the native player keeps portrait even if the page still reports a fullscreen element', () => {
+  const state = fixture({ episodes: [0] }); state.ready();
+  state.emit('webkitbeginfullscreen', { target: state.video });
+  /* 退出后页面可能残留旧值：补发的事件不能把它当成「又进全屏」再横过去 */
+  state.document.fullscreenElement = state.player;
+  state.emit('webkitendfullscreen', { target: state.video });
+  const events = state.messages.filter((message) => message.action === 'playerFullscreen');
+  assert.deepEqual(events.map((message) => message.on), [true, false], '退出只能报一次 false');
+  assert.deepEqual(state.document.dispatchLog, ['fullscreenchange', 'webkitfullscreenchange'],
+    '站点仍要收到退出事件');
+});
+
+test('iOS 15.0-15.3 without the element fullscreen API still reaches the native video player', async () => {
+  const state = fixture({ episodes: [0], noElementFullscreen: true });
+  state.ready();
+  assert.equal(state.document.fullscreenEnabled, true,
+    '站点先看 document.fullscreenEnabled 才显示全屏按钮，老系统上也要为真');
+  assert.equal(typeof state.elementProto.requestFullscreen, 'function',
+    '老系统没有全屏方法时，注入层要补出来，否则站点连按钮都不显示');
+
+  Object.setPrototypeOf(state.player, state.elementProto);
+  const entered = state.player.requestFullscreen();
+  state.emit('webkitbeginfullscreen', { target: state.video });
+  assert.equal(await entered.then(() => 'resolved', () => 'rejected'), 'resolved');
+  assert.equal(state.video.nativeFullscreen, 1, '补出来的方法照样改走系统原生视频全屏');
+
+  const other = node('div');
+  Object.setPrototypeOf(other, state.elementProto);
+  const rejected = await other.requestFullscreen().then(() => 'resolved', () => 'rejected');
+  assert.equal(rejected, 'rejected', '没有视频的元素不能假装进了全屏');
+
+  state.emit('webkitbeginfullscreen', { target: state.video });
+  await state.document.exitFullscreen();
+  assert.equal(state.video.nativeExit, 1, '站点调 document.exitFullscreen 时要能退出系统原生全屏');
+});
 test('the home top bar carries no app settings gear and settings stay in the menu', () => {
   const state = fixture({ homePage: true }); state.ready();
   const style = state.head.children.find((child) => child.id === 'iosShellStyle');
