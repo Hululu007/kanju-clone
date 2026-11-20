@@ -1329,6 +1329,34 @@ test('the download library is listed in my downloads with covers, episodes and t
   assert.match(movie.querySelector('.ips-meta').textContent, /已下载 1 集/, '总集数未知时不许编一个分母');
   assert.equal(movie.parentNode.querySelector('.ip-eptitle').textContent, '正片');
 });
+test('a finished episode offers the system player hand-off, a running one does not', () => {
+  const state = fixture({ homePage: true, newDownloadUI: true, seed: { 'kj-ios-downloads': JSON.stringify(librarySeed) } });
+  state.ready();
+  state.click(state.document.getElementById('iosDlListBtn'));
+  const entries = state.document.querySelectorAll('[data-ios-act="open-in-player"]');
+  assert.equal(entries.length, 3, '每集已下载的都要有自己的外部播放入口');
+  const ext = entries[0];
+  assert.equal(ext.textContent, '外部播放');
+  assert.equal(ext.getAttribute('data-dl-path'), '/tmp/a19.mp4', '入口要带这集真实的本地文件路径');
+  state.click(ext);
+  assert.equal(state.messages.at(-1).action, 'openInOtherPlayer');
+  assert.equal(state.messages.at(-1).path, '/tmp/a19.mp4');
+
+  const running = fixture({ episodes: [0], newDownloadUI: true });
+  running.ready();
+  running.window.__zhuijuDownloads('snapshot', [
+    { id: 'task-b', showId: 'fixture', epKey: '0', epLabel: '第1集', title: '测试剧', status: 'running', received: 10, total: 100 },
+  ]);
+  running.click(running.document.getElementById('iosDlListBtn'));
+  assert.equal(running.document.querySelectorAll('[data-ios-act="open-in-player"]').length, 0,
+    '下载中 / 没下完的集不能出现外部播放入口');
+});
+
+test('the native open-in result is shown as a toast', () => {
+  const state = fixture({ episodes: [0] }); state.ready();
+  state.window.__zhuijuPlayerNotice('没有找到能打开这个视频的播放器');
+  assert.match(state.toastText(), /没有找到能打开这个视频的播放器/);
+});
 
 test('the download library stays out of the way when nothing was downloaded', () => {
   const state = fixture({ homePage: true, newDownloadUI: true });

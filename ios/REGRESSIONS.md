@@ -899,3 +899,22 @@ testToolbarDownloadButtonReplacesTheDanmakuSlot → missing-button
 - **修复版本**：0.1.19（build 23）
 - **验证边界**：**真机**：容器全屏确实走原生视频全屏、横屏铺满、退出回原位续播；
   Node 用例只证明注入层的行为，iOS 15.0–15.3 的按钮与全屏仍要在对应系统版本的真机上复核。
+
+## REG-025 已下载的集交给其他播放器离线播放（build 23）
+
+- **需求（Ken 2026-11-20 授权）**：已下载完成的一集能点「外部播放」，用 iOS「打开方式」菜单交给
+  已安装的播放器（VLC / Infuse / nPlayer / SenPlayer 等），播的是本地文件、完全离线；
+  不跳在线地址、不做后台 HTTP 服务、不在 App 内换播放内核。
+- **入口**：「我的下载」里某部剧的某一集（已完成）行内「外部播放」；下载中 / 未完成的集没有 path，
+  不显示这个入口。点整行仍然是 App 内 AVPlayer 播放，两条路并存。
+- **原生**：WebViewController.presentOpenInMenu 用 UIDocumentInteractionController：
+  路径必须在 App 的 Documents 内、文件必须存在、按扩展名给 UTI（mp4/m4v/mov → public.mpeg-4 / public.movie），
+  iPad 用屏幕中间的小矩形做 popover 锚点；控制器由 documentInteraction 强引用，菜单关闭后释放。
+- **反馈**：文件不在 / 没有能接收的 App / 用户取消，都用网页 toast 说一句；
+  用户真的选了 App 就直接切走，不再多弹提示。
+- **测试名**（Node）：
+  a finished episode offers the system player hand-off, a running one does not、
+  the native open-in result is shown as a toast
+- **修复版本**：0.1.19（build 23）
+- **验证边界**：**真机**：系统菜单里实际出现哪些播放器、对方能否完整读取并离线播放、
+  iPad 锚点位置；Node 只能证明入口、传参和提示文案。

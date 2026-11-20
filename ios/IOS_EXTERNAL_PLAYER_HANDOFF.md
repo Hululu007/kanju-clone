@@ -1,4 +1,4 @@
-# 下载完成的视频交给外部播放器：可行性核实（build 23 前置，未实现）
+# 下载完成的视频交给外部播放器：可行性核实与实现记录（build 23）
 
 结论先说：在“不许出现系统分享/打开方式面板”这条约束不变的前提下，**没有任何公开、可靠的办法**
 能把 App 沙盒里的本地视频**自动**交给 VLC / Infuse / nPlayer / SenPlayer 这类外部播放器离线播放整集。
@@ -64,4 +64,7 @@
 - MediaDownloader.swift 只接受 https 直链的 MP4/M4V/MOV/MKV/TS，.m3u8 直接拒绝，
   下载完成落盘就是一个可播放的单文件（见 MediaDownloader.swift 第 13、146、157 行）。
   所以不存在“HLS 分片要不要合并”的问题，交出去就是一个完整文件。
-- 本文只做核实，没有改任何代码，也没有引入分享/打开方式入口。
+- 2026-11-20 Ken 同意出现一次系统「打开方式」菜单后，按第六节的最小方案实现了：
+  「我的下载」已完成集 → 行内「外部播放」→ UIDocumentInteractionController 的 Open-in 菜单。
+  入口代码在 AppBootstrap.js（data-ios-act="open-in-player"）和 WebViewController.presentOpenInMenu；
+  回归见 REG-025。仍然没有后台服务，没有在线地址，也没有 App 内换播放内核。

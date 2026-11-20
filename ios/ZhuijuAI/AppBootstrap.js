@@ -326,7 +326,8 @@
       '.ios-page .ip-show .ips-meta{font-size:11px;color:rgba(232,241,245,.62);margin-top:3px}',
       '.ios-page .ip-eprow{position:relative;overflow:hidden;border-radius:9px;margin-top:8px;background:rgba(255,255,255,.05)}',
       '.ios-page .ip-eprow .ip-epbody{display:flex;align-items:center;gap:10px;padding:11px 12px;transition:transform .16s ease;will-change:transform;touch-action:pan-y}',
-      '.ios-page .ip-eprow .ip-eptitle{flex:1 1 auto;font-size:13px;font-weight:600}',
+      '.ios-page .ip-eprow .ip-epext{flex:none;padding:4px 9px;border-radius:11px;background:rgba(76,141,255,.16);color:#8fb6ff;font-size:11px;font-weight:600}',
+      '.ios-page .ip-eprow .ip-eptitle{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px;font-weight:600}',
       '.ios-page .ip-eprow .ip-epsize{font-size:11px;color:rgba(232,241,245,.6)}',
       '.ios-page .ip-eprow .ip-epdel{position:absolute;right:0;top:0;bottom:0;width:82px;border:0;background:#e5484d;color:#fff;font-size:13px;font-weight:700}',
       /* 播放设置面板：从右侧滑出 */
@@ -1091,6 +1092,12 @@
     clearTimeout(announce.timer);
     announce.timer = setTimeout(function () { box.removeAttribute('data-show'); }, 2600);
   }
+
+  /* 原生「打开方式」面板的结果（缺文件 / 没有可用播放器 / 用户取消）回到网页，
+     用同一个 toast 说一句，不给站点页面塞任何节点。 */
+  window.__zhuijuPlayerNotice = function (message) {
+    announce(String(message || ""));
+  };
 
   function isPageUrl(url) {
     var page = String(window.location && window.location.href || '').split('#')[0].split('?')[0];
@@ -1885,6 +1892,19 @@
           title.className = 'ip-eptitle';
           title.textContent = ep.label || ('第' + ep.key + '集');
           body2.appendChild(title);
+          /* 已完成的一集：除了 App 内播放，还能交给系统「打开方式」里的其他播放器。
+             下载中 / 没下完的集没有 path，压根不出现这个入口。
+             用 span 而不是 button：body2 本身是 button，按钮不能套按钮。 */
+          if (ep.path) {
+            var ext = document.createElement('span');
+            ext.className = 'ip-epext';
+            ext.setAttribute('role', 'button');
+            ext.textContent = '外部播放';
+            ext.setAttribute('data-ios-act', 'open-in-player');
+            ext.setAttribute('data-dl-path', ep.path);
+            ext.setAttribute('aria-label', '用其他播放器打开 ' + (ep.label || ('第' + ep.key + '集')));
+            body2.appendChild(ext);
+          }
           var sizeNode = document.createElement('span');
           sizeNode.className = 'ip-epsize';
           sizeNode.textContent = ep.size ? megabyte(ep.size) : '';
@@ -1991,6 +2011,10 @@
     if (act === 'play-local') {
       var entry = target.closest('[data-dl-path]');
       if (entry) postNative({ action: 'playLocal', path: entry.getAttribute('data-dl-path') });
+    }
+    if (act === 'open-in-player') {
+      var external = target.closest('[data-dl-path]');
+      if (external) postNative({ action: 'openInOtherPlayer', path: external.getAttribute('data-dl-path') });
     }
     return true;
   }

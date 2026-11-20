@@ -1,9 +1,10 @@
 import AVKit
 import LinkPresentation
+import UniformTypeIdentifiers
 import UIKit
 import WebKit
 
-final class WebViewController: UIViewController {
+final class WebViewController: UIViewController, UIDocumentInteractionControllerDelegate {
     private enum Site {
         static let defaultHome = URL(string: "https://zhuiju.dpdns.org/")!
         static let host = "zhuiju.dpdns.org"
@@ -45,6 +46,8 @@ final class WebViewController: UIViewController {
         case openLocal
         /// 已下载列表点一集：用系统播放器离线播放本地文件。
         case playLocal
+        /// 已下载列表「用其他播放器打开」：把本地文件交给系统「打开方式」菜单。
+        case openInOtherPlayer
         /// 已下载列表左滑删除：删掉这一集在本地的那个文件（只删这一个）。
         case deleteLocal
         /// 站点播放器进入 / 退出全屏：只切屏幕方向（全屏横屏、退出竖屏），不碰页面几何。
@@ -108,6 +111,8 @@ final class WebViewController: UIViewController {
                 target?.presentLocalFile(path: body["path"] as? String, name: body["name"] as? String)
             case PlayerAction.playLocal.rawValue:
                 target?.presentLocalPlayback(path: body["path"] as? String)
+            case PlayerAction.openInOtherPlayer.rawValue:
+                target?.presentOpenInMenu(path: body["path"] as? String)
             case PlayerAction.deleteLocal.rawValue:
                 target?.deleteLocalFile(path: body["path"] as? String)
             case PlayerAction.playerFullscreen.rawValue:
@@ -127,6 +132,10 @@ final class WebViewController: UIViewController {
     private let downloader = MediaDownloader.shared
     private var lastFailedURL: URL?
     private var safeAreaConstraints: [NSLayoutConstraint] = []
+    /// 「打开方式」面板要一直有人持有，否则控制器提前释放，菜单会跟着消失。
+    private var documentInteraction: UIDocumentInteractionController?
+    /// 用户是在菜单里选了 App，还是把菜单关掉了：只有后者才算“取消”。
+    private var sendingToExternalPlayer = false
 
     /// 站点用它区分「App 内」和浏览器。版本号从包信息里取，别再手写 ——
     /// 0.1.2 到 0.1.5 每版都靠改这一行字符串，一忘就会和包版本对不上。
@@ -525,6 +534,73 @@ final class WebViewController: UIViewController {
         controller.modalPresentationStyle = .fullScreen
         let presenter = presentedViewController ?? self
         presenter.present(controller, animated: true) { player.play() }
+    }
+
+    /// 已完成的一集交给系统「打开方式」菜单（UIDocumentInteractionController）。
+    /// 系统会把本地文件复制进用户选中的播放器，不需要后台服务，也不给别的 App 传我们读不到的 file 地址。
+    /// 下载中 / 未完成的集网页侧不会给入口；这里再挡一次缺文件、路径越界和没有可接收 App 的情况。
+    fileprivate func presentOpenInMenu(path: String?) {
+        let raw = path?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !raw.isEmpty else {
+            notifyPlayerNotice("这一集还没有下载完成")
+            return
+        }
+        let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let fileURL = URL(fileURLWithPath: raw).standardizedFileURL
+        guard fileURL.path.hasPrefix(documents.standardizedFileURL.path) else {
+            notifyPlayerNotice("这个文件不在 App 的下载目录里")
+            return
+        }
+        guard FileManager.default.fileExists(atPath: fileURL.path) else {
+            notifyPlayerNotice("这一集的文件已经不在了，请重新下载")
+            return
+        }
+        /* 上一次的菜单没关干净：先收起来，避免同时挂两个控制器。 */
+        if let current = documentInteraction {
+            current.dismissMenu(animated: false)
+            documentInteraction = nil
+        }
+        sendingToExternalPlayer = false
+        let controller = UIDocumentInteractionController(url: fileURL)
+        /* 扩展名决定类型：mp4/m4v/mov 是 public.mpeg-4 / public.movie，
+           播放器 App 就是靠这个出现在「打开方式」里的。 */
+        controller.uti = UTType(filenameExtension: fileURL.pathExtension)?.identifier
+        controller.delegate = self
+        documentInteraction = controller
+        /* iPad 上这是 popover，必须给锚点；放屏幕中间的小矩形，iPhone 会忽略。 */
+        let anchor = CGRect(x: view.bounds.midX, y: view.bounds.midY, width: 1, height: 1)
+        let presented = controller.presentOpenInMenu(from: anchor, in: view, animated: true)
+        if !presented {
+            documentInteraction = nil
+            notifyPlayerNotice("没有找到能打开这个视频的播放器")
+        }
+    }
+
+    func documentInteractionController(
+        _ controller: UIDocumentInteractionController,
+        willBeginSendingToApplication bundleIdentifier: String?
+    ) {
+        sendingToExternalPlayer = true
+    }
+
+    func documentInteractionControllerDidDismissOpenInMenu(_ controller: UIDocumentInteractionController) {
+        let cancelled = !sendingToExternalPlayer
+        sendingToExternalPlayer = false
+        if documentInteraction === controller { documentInteraction = nil }
+        /* 选了 App 就直接切过去了，不用再弹提示；把菜单关掉才告诉用户「已取消」。 */
+        if cancelled { notifyPlayerNotice("已取消") }
+    }
+
+    /// 原生把「打开方式」的结果告诉网页：网页侧用同一个 toast 显示。
+    private func notifyPlayerNotice(_ message: String) {
+        guard let data = try? JSONSerialization.data(withJSONObject: [message]),
+              let text = String(data: data, encoding: .utf8) else { return }
+        /* [message] 序列化成 ["..."]，去掉两端方括号就是给 JS 的字符串字面量。 */
+        let quoted = String(text.dropFirst().dropLast())
+        let script = "window.__zhuijuPlayerNotice && window.__zhuijuPlayerNotice((quoted));"
+        DispatchQueue.main.async { [weak self] in
+            self?.webView.evaluateJavaScript(script, completionHandler: nil)
+        }
     }
 
     fileprivate func presentLocalFile(path: String?, name: String?) {
