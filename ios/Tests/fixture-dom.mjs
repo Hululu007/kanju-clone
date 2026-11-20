@@ -1,3 +1,23 @@
+/* 夹具节点带着 parentNode/children 双向引用和一长串方法。断言失败时 Node 默认会把
+   actual 整棵树展开成字符串；同一个节点既被 parentNode 引用、又在 children 里，
+   展开量随层数指数增长 —— 2026-11-20 的一条失败断言就是这样把 node 吃到 40GB。
+   所有夹具节点都用这一行摘要代替整棵树，失败的测试只报错，不再把机器撑死。 */
+export function describeFixtureNode(node) {
+  const tag = String((node && node.tagName) || 'node').toLowerCase();
+  const id = node && node.id ? '#' + node.id : '';
+  const classes = String((node && node.className) || '').split(/\s+/).filter(Boolean).map((name) => '.' + name).join('');
+  return '[fixture ' + tag + id + classes + ']';
+}
+
+/* 给一个夹具节点挂上 util.inspect 摘要（不可枚举，不参与 deepEqual）。 */
+export function attachFixtureInspect(node) {
+  Object.defineProperty(node, Symbol.for('nodejs.util.inspect.custom'), {
+    value: () => describeFixtureNode(node),
+    enumerable: false,
+  });
+  return node;
+}
+
 export function withDOM(element, createNode) {
   let text = '';
   const removeChildren = () => {

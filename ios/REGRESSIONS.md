@@ -1074,3 +1074,13 @@ testToolbarDownloadButtonReplacesTheDanmakuSlot → missing-button
   **编译门禁是 packaging-only 的 xcodebuild**，真正行为要等新包安装后**真机**验证（UA/Referer 是否过 CDN、
   取消后队列是否继续、重启后是否续下、失败格是否可重试）。3 部真实样本（谷雨 / 倾世锦鳞谷雨来 / 古玉劫后香）
   是数据库 + 源站探测证据，**不是**真机下载成功证据。
+
+## REG-030 一条失败的测试断言把 node 进程吃到 40GB（夹具 DOM 展开）
+
+- **现象**：跑 `Tests/downloadQueue.test.mjs` 的 `a failed episode never lets the show look complete...` 时，node 进程涨到 40GB，把电脑撑死，被 Hark 杀掉；`--max-old-space-size` 完全拦不住。
+- **根因（已复现，按版本对过）**：触发版本是 `kanju-build27` 工作树里**未提交的草稿 AppBootstrap**（补丁 `Temp/kanju-build27-draft-queue.patch`，blob `556d9d2`，后被改成 `c0a99fc`，两者都复现），不是任何已提交版本（4f1b14f / 4712d53 / 2f3297b 全部通过）。草稿把 failed/paused 也渲染进 `iosMineQueue`，测试断言 `assert.equal(queueNode, null, ...)` 必然失败；Node 的 assert 用 `customInspect:false, depth:1000` 展开 actual，而夹具节点的 `children` / `parentNode` 都可枚举且互相引用，共享子树被反复展开，报错字符串指数膨胀：只有 3 行队列就 **569,919 字符**，规模再大就是几十 GB。进程死于 `Committing semi space failed` / `Fatal process out of memory: Worklist::Segment::Create`。不是 App 代码的死循环。
+- **修复**：`Tests/fixture-dom.mjs` 新增夹具节点单行 inspect 摘要；`downloadQueue.test.mjs` / `bootstrap.test.mjs` 把每个夹具节点的 `children` / `parentNode` 改为不可枚举（读写行为不变），assert 展开时不再遍历整棵 DOM；新增一条回归钉住「报错必须是小段文本」。没有删测试、跳测试或放宽断言。
+- **测试名**：`a fixture node prints as one short line so a failed assertion cannot dump the whole DOM`（Node，`Tests/downloadQueue.test.mjs`）。
+- **修复版本**：0.1.19（build 27，本分支 2f3297b 之后）
+- **验证**：全部套 `python C:/Users/kenzh/hark_tasks/memcap.py 2048`：本分支 113/113 通过；同一条失败断言在草稿代码上修复前 OOM、修复后 52ms 内以普通 AssertionError 失败，内存降到 512MB 也不会 OOM。触发版本 hash、复现命令和完整证据见 `ios/DOWNLOAD_TEST_MEMORY_20261120.md`。
+- **验证边界**：这是 Node 夹具/测试基础设施问题，不涉及 Swift 编译或真机行为。

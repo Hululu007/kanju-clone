@@ -2,7 +2,8 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import vm from 'node:vm';
 import test from 'node:test';
-import { withDOM } from './fixture-dom.mjs';
+import { inspect } from 'node:util';
+import { attachFixtureInspect, withDOM } from './fixture-dom.mjs';
 
 /* 下载队列 / 选集批量下载的 Node 夹具回归（0.1.14，下载专题）。
    单独一个文件，不去动共享的 bootstrap.test.mjs：批量下载和原生队列由这条分支独占，
@@ -108,7 +109,13 @@ function node(tag = 'div') {
       });
     },
   };
-  return withDOM(element, node);
+  /* children / parentNode 不参与 util.inspect：断言失败时 Node 的 assert 用
+     `customInspect: false, depth: 1000` 展开 actual，同一个节点既在 parentNode 里又在
+     children 里，输出会指数膨胀（2026-11-20 一次失败的断言就这样吃掉 40GB）。
+     访问和修改都不受影响，只是打印不再带整棵 DOM。 */
+  Object.defineProperty(element, 'children', { value: element.children, writable: true, enumerable: false, configurable: true });
+  Object.defineProperty(element, 'parentNode', { value: element.parentNode, writable: true, enumerable: false, configurable: true });
+  return withDOM(attachFixtureInspect(element), node);
 }
 
 /* 夹具默认把「默认用第三方播放器」关掉（seed 成 '0'）：按钮/菜单类用例关心的是菜单本身，
@@ -632,6 +639,24 @@ test('a failed native delete puts the row back and clears the web tombstone', ()
   assert.match(state.toastText(), /删除本地文件失败/, '要把失败原因告诉用户');
   const tombstone = state.storage['kj-ios-deleted-episodes'] || '[]';
   assert.equal(tombstone.indexOf('fixture|0') < 0, true, '失败要撤掉网页墓碑，否则这一集再也进不来');
+});
+
+/* REG-030：一条失败的断言把夹具 DOM 整棵树展开成字符串，曾经把 node 吃到 40GB。
+   children / parentNode 不参与展开后，同一个失败断言只剩几 KB 文本。 */
+test('a fixture node prints as one short line so a failed assertion cannot dump the whole DOM', () => {
+  const state = fixture({ signedIn: true, episodes: [0, 1] });
+  state.ready();
+  state.click(state.document.getElementById('iosDlListBtn'));
+  const body = state.document.getElementById('iosMineBody');
+  const dump = inspect(body);
+  assert.match(dump, /^\[fixture /, `夹具节点要有一行摘要，实际：${dump.slice(0, 200)}`);
+  assert.ok(dump.length < 120, `夹具节点的摘要不能带上整棵树，实际 ${dump.length} 字符`);
+  assert.doesNotMatch(dump, /parentNode/, '摘要里不能出现 DOM 引用');
+  assert.throws(() => assert.equal(body, null), (error) => {
+    assert.equal(error && error.name, 'AssertionError', '失败的断言仍是 AssertionError');
+    assert.ok(String(error.message).length < 10000, `失败断言的报错必须是一小段，实际 ${String(error.message).length} 字符`);
+    return true;
+  });
 });
 
 test('a failed episode never lets the show look complete and an unknown length has no percent', () => {

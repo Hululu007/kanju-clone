@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import vm from 'node:vm';
 import test from 'node:test';
-import { withDOM } from './fixture-dom.mjs';
+import { attachFixtureInspect, withDOM } from './fixture-dom.mjs';
 
 const source = await readFile(new URL('../ZhuijuAI/AppBootstrap.js', import.meta.url), 'utf8');
 const settle = () => new Promise((resolve) => setTimeout(resolve, 10));
@@ -93,7 +93,13 @@ function node(tag = 'div') {
       return element.children.filter((child) => String(child.className || '').split(' ').includes(name));
     },
   };
-  return withDOM(element, node);
+  /* children / parentNode 不参与 util.inspect：断言失败时 Node 的 assert 用
+     `customInspect: false, depth: 1000` 展开 actual，同一个节点既在 parentNode 里又在
+     children 里，输出会指数膨胀（2026-11-20 一次失败的断言就这样吃掉 40GB）。
+     访问和修改都不受影响，只是打印不再带整棵 DOM。 */
+  Object.defineProperty(element, 'children', { value: element.children, writable: true, enumerable: false, configurable: true });
+  Object.defineProperty(element, 'parentNode', { value: element.parentNode, writable: true, enumerable: false, configurable: true });
+  return withDOM(attachFixtureInspect(element), node);
 }
 
 /* 夹具默认把「默认用第三方播放器」关掉（seed 成 '0'）：按钮/菜单类用例关心的是菜单本身，
