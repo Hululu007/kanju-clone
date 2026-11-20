@@ -108,6 +108,9 @@ final class WebViewController: UIViewController {
                 target?.presentLocalPlayback(path: body["path"] as? String)
             case PlayerAction.deleteLocal.rawValue:
                 target?.deleteLocalFile(path: body["path"] as? String)
+            default:
+                /* 网页可能先上新动作、App 还没跟上：不认识的 action 直接忽略，不能因此崩或卡住。 */
+                break
             }
         }
     }
