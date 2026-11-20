@@ -1026,3 +1026,40 @@ testToolbarDownloadButtonReplacesTheDanmakuSlot → missing-button
 - **测试名**：无（Ken 2026-11-19 的 HARK-SMALL-UI-EXEMPT：只改显示名的文案类改动不新增/不跑测试，编译通过即可出包）。
 - **修复版本**：0.1.19（build 26）
 - **验证边界**：Windows 本机没有 Xcode，`xcodebuild` 只在云端打包时跑；真机桌面名与「设置」里的 App 名需 Ken 装新包后核对。
+
+## REG-029 下载记录删不掉（build 27）【真机】
+
+- **现象**：我的下载里某些历史条目，左滑点「删除」后提示删除失败，条目一直留着；重装或换包（build 号变化）后更容易出现。
+  下载中 / 排队 / 失败的集在列表里根本没有删除入口，失败的集连行都不显示；失败的集还一直占着队列名额。
+- **根因（代码可证，非猜测）**：
+  - 记录里存的是**沙盒绝对路径** `/var/mobile/Containers/Data/Application/<UUID>/Documents/Downloads/x.mp4`
+    （网页 `recordDownloaded` 直接存 `payload.path`，原生 `complete(id:)` 也直接存 `payload["path"]`）。
+  - `MediaDownloader.removeDownloadedFile(at:)` 当时把这条绝对路径 `resolvingSymlinksInPath()` 后，
+    与**当前** `Documents/Downloads` 做 `pathComponents` 前缀比较；App 换一次容器，旧记录里的 `<UUID>` 就不再等于当前容器，
+    前缀必然不匹配，函数直接 `return false`（`refuse to delete file outside download directory`），
+    网页把失败原样显示回来 —— 于是这一行永远删不掉。
+  - 同一份绝对路径还喂给离线播放和「其他播放器打开」，换容器后同样失效（表现为「文件不在了」）。
+  - 删除入口只挂在已下载片库行（`.ip-eprow`）上：`data-dl-task` 的下载中/排队行没有删除键，
+    `queueTaskRows()` 也只收 `running/queued`，`failed` 行既不显示也无处清理。
+- **修复（build 27）**：
+  - 只持久化**相对路径** `Downloads/<文件名>`：网页 `relativeDownloadPath()`、原生 `MediaDownloader.relativePath(for:)`；
+    `downloadsFolder` 只写一处。`loadRecords()` 读到旧绝对路径就就地迁移成相对路径（只改写法，不动文件）。
+  - 新增唯一解析入口 `MediaDownloader.fileURL(forStoredPath:)`：只取最后一段文件名，拼到**当前** `Documents/Downloads`，
+    仍做「必须是下载目录直接子项」的边界检查（`..`、`.`、空串、目录一律拒绝）。
+    删除、App 内离线播放、外部播放器打开、删除后回填都走这一个入口。
+  - `removeDownloadedFile(at:)` 不再拿旧绝对路径去比较；文件本来就不存在视为**清理成功**并清记录；
+    真实权限/磁盘错误仍返回失败并把原因回给网页，不虚报释放空间。
+  - 下载中 / 排队 / 失败三种行都能左滑删：网页 `deleteQueuedTask()` 写墓碑后发 `deleteDownload`（`path` 为空表示没有文件要删）；
+    原生 `deleteEpisode` 先 `task.cancel()`、`HLSDownloader.discard(id:)`、清 `path`、写墓碑，再 `pump()` 释放并发名额；
+    取消回调 / 旧快照 / 晚到 done 都被墓碑挡住，不会复活记录。
+  - 删除正在 App 内播放的那一集：`WebViewController` 记住当前播放器和文件，先 `pause()` + 收起播放器，再删文件。
+  - 已下载列表仍然只有左滑删除一个入口，没有新增其它删除按钮；队列行的删除键沿用同一套左滑露出。
+- **改动文件**：`ios/ZhuijuAI/MediaDownloader.swift`、`ios/ZhuijuAI/WebViewController.swift`、
+  `ios/ZhuijuAI/AppBootstrap.js`、`ios/Tests/bootstrap.test.mjs`、`ios/Tests/downloadQueue.test.mjs`、`ios/Tests/nativeSource.test.mjs`。
+- **测试名（Node）**：a downloaded row saved with an old app-container path can still be deleted、a new download is stored as a relative path, never the absolute sandbox path、downloading, queued and failed rows can all be deleted and never come back、deleting a running row asks native for that task only and lets the queue move on、a stored path from an old app container still resolves inside the current downloads folder、download records only persist a relative path and rebuild the absolute one on use、deleting the episode that is playing offline stops the player before removing the file、deleting a running job cancels the task, drops its cache and frees the queue slot、a cancelled job callback never writes a deleted record back。
+- **本地验证**：`cd ios && node --test Tests/*.test.mjs` → **113/113 通过**（0 失败）。Windows 无 Xcode，Swift 未本地编译，
+  编译只在打包工作流里发生。
+- **验收边界**：以下都要**真机**（Ken 装新包后）核对：旧记录（换过容器的绝对路径）能删、删完文件真的不在了、
+  下载中/排队/失败左滑删后队列继续走、删正在播的那一集先停播、删除失败时条目留在列表里。
+  本轮未做云端测试、未跑模拟器/XCUITest/UI smoke/截图门禁（HARK-NO-CLOUD-TEST）。
+- **已知限制**：迁移按「文件名」归一，如果两条不同记录的文件名恰好相同，会指向同一个文件（现网文件名带剧名+集号，未发现撞名）。

@@ -311,7 +311,11 @@
       '.ios-page #iosDlListBtn{flex:1 1 auto;appearance:none;border:0;border-radius:10px;background:#16e09d;color:#04241a;font-size:14px;font-weight:800;padding:12px;min-height:46px}',
       '.ios-page .ip-sub{font-size:12px;color:rgba(232,241,245,.62);margin:2px 0 10px}',
       '.ios-page #iosMineQueue{display:flex;flex-direction:column;gap:8px;margin-bottom:12px}',
-      '.ios-page .ios-dl-task{padding:10px 12px;border-radius:10px;background:rgba(22,224,157,.12)}',
+      '.ios-page .ios-dl-task{position:relative;overflow:hidden;border-radius:10px;background:rgba(22,224,157,.12)}',
+      /* inner 要不透明（#0c2a26 = .12 绿叠在 #0b1116 上的实际颜色）：否则背后的红删除键
+         没左滑就一直透出来；和已下载行里那个原生 <button> 不透明背景的行为对齐。 */
+      '.ios-page .ios-dl-task-inner{padding:10px 12px;background:#0c2a26;transition:transform .16s ease;will-change:transform;touch-action:pan-y}',
+      '.ios-page .ios-dl-task .ip-epdel{position:absolute;right:0;top:0;bottom:0;width:82px;border:0;background:#e5484d;color:#fff;font-size:13px;font-weight:700}',
       '.ios-page .ios-dl-task-head{display:flex;align-items:center;gap:8px;font-size:13px;font-weight:700}',
       '.ios-page .ios-dl-task-title{flex:1 1 auto;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
       '.ios-page .ios-dl-task-state{flex:none;font-size:12px;font-weight:700;color:#16e09d}',
@@ -749,6 +753,18 @@
      （播放页地址的 ?id=），拿不到 id 时退回剧名，同一部剧不会碎成两条。 */
   var LIBRARY_STORE = 'kj-ios-downloads';
   var TOMBSTONE_STORE = 'kj-ios-deleted-episodes';
+  var DOWNLOADS_FOLDER = 'Downloads';
+
+  /* 记录里只存相对路径（`Downloads/文件名`）。沙盒容器的绝对路径会随重装/换包变化：
+     存绝对路径的旧记录在真机上删不掉（路径早就不存在），播放也会找不到文件。
+     老记录、原生回传的绝对路径、已经迁移过的相对路径，都归一到同一个写法。 */
+  function relativeDownloadPath(raw) {
+    var text = String(raw === undefined || raw === null ? '' : raw).trim();
+    if (!text) return '';
+    var name = String(text.split('/').pop() || '').trim();
+    if (!name || name === '.' || name === '..') return '';
+    return DOWNLOADS_FOLDER + '/' + name;
+  }
 
   function readLibrary() {
     var parsed = null;
@@ -768,7 +784,8 @@
           key: ep.key === undefined || ep.key === null ? '' : String(ep.key),
           label: String(ep.label || ''),
           name: String(ep.name || ''),
-          path: String(ep.path || ''),
+          /* 老版本存的沙盒绝对路径在这里就迁成相对路径：只改写法，不动文件。 */
+          path: relativeDownloadPath(ep.path),
           size: Number(ep.size) || 0,
           at: Number(ep.at) || 0,
         });
@@ -908,7 +925,7 @@
       id: String(payload && payload.id ? payload.id : libraryTaskId),
       label: String(info.epLabel || (payload && payload.ep) || ''),
       name: String((payload && payload.name) || ''),
-      path: savedPath,
+      path: relativeDownloadPath(savedPath),
       size: Number(payload && payload.size) || 0,
       at: Date.now(),
     };
@@ -981,9 +998,48 @@
     return true;
   }
 
+  /// 排队中 / 下载中 / 失败的那一行：先让原生取消底层任务（清临时文件、释放并发名额），
+  /// 再删掉网页这一行。和已下载的删除共用同一个原生动作，path 传空表示没有文件要删。
+  function deleteQueuedTask(taskId, showId, key) {
+    markDeletedEpisode(showId, key);
+    var removed = null;
+    var next = [];
+    for (var i = 0; i < queueTasks.length; i++) {
+      var task = queueTasks[i];
+      if (!task) continue;
+      var sameId = !!taskId && String(task.id) === String(taskId);
+      var sameEpisode = !sameId && !!showId && !!key
+        && String(task.showId || '') === String(showId) && String(task.epKey) === String(key);
+      if (sameId || sameEpisode) { removed = task; continue; }
+      next.push(task);
+    }
+    queueTasks = next;
+    saveQueue();
+    renderDownloadLibrary();
+    syncDownloadPage();
+    renderMinePageIfOpen();
+    postNative({
+      action: 'deleteDownload',
+      id: String((removed && removed.id) || taskId || ''),
+      showId: String(showId || (removed && removed.showId) || ''),
+      epKey: String(key || (removed && removed.epKey) || ''),
+      path: '',
+      name: ''
+    });
+    announce('正在取消这一集…');
+    return true;
+  }
+
   function deleteRowAt(node) {
     var cursor = node;
     while (cursor) {
+      if (cursor.getAttribute && cursor.getAttribute('data-dl-task') !== null) {
+        return deleteQueuedTask(
+          String(cursor.getAttribute('data-dl-task') || ''),
+          String(cursor.getAttribute('data-dl-show') || ''),
+          String(cursor.getAttribute('data-dl-key') || '')
+        );
+      }
       if (cursor.getAttribute && cursor.getAttribute('data-dl-key') !== null) {
         return deleteDownloaded(String(cursor.getAttribute('data-dl-show') || ''), String(cursor.getAttribute('data-dl-key')));
       }
@@ -1298,8 +1354,9 @@
   }
 
   /* 下载中的一集：剧名 + 第几集 + 进度条 + 百分比。 */
-  var QUEUE_RANK = { running: 0, queued: 1, paused: 2 };
-  var QUEUE_TEXT = { running: '下载中', queued: '排队中', paused: '已暂停' };
+  /* 失败的那一集也留在列表里：不占队列名额，但用户要能看到原因、收拾掉。 */
+  var QUEUE_RANK = { running: 0, queued: 1, paused: 2, failed: 3 };
+  var QUEUE_TEXT = { running: '下载中', queued: '排队中', paused: '已暂停', failed: '失败' };
 
   function batchShowOf(showId) {
     var list = readBatchShows();
@@ -1345,7 +1402,7 @@
       var task = queueTasks[i];
       if (!task || !task.id) continue;
       var status = String(task.status || '');
-      if (status !== 'running' && status !== 'queued') continue;
+      if (status !== 'running' && status !== 'queued' && status !== 'failed') continue;
       seen[String(task.id)] = true;
       rows.push(task);
     }
@@ -1368,7 +1425,8 @@
     return rows;
   }
 
-  /* 正在下载区：一集一行，实时刷新进度条和百分比；排队中的集也列出来。 */
+  /* 正在下载区：一集一行，实时刷新进度条和百分比；排队中和失败的集也列出来，
+     三种状态都能左滑删掉（和已下载那一行同一套交互，本页不另加删除入口）。 */
   function renderQueueRows(body) {
     var rows = queueTaskRows();
     if (!rows.length) return 0;
@@ -1386,6 +1444,10 @@
       var safeId = String(task.id).replace(/[^A-Za-z0-9_-]/g, function (ch) { return '_' + ch.charCodeAt(0).toString(16); });
       row.id = 'iosMineTask-' + (safeId || ('row' + i));
       row.setAttribute('data-dl-task', String(task.id));
+      row.setAttribute('data-dl-show', String(task.showId || ''));
+      row.setAttribute('data-dl-key', task.epKey === undefined || task.epKey === null ? '' : String(task.epKey));
+      var inner = document.createElement('div');
+      inner.className = 'ios-dl-task-inner';
       var head = document.createElement('div');
       head.className = 'ios-dl-task-head';
       var title = document.createElement('span');
@@ -1396,7 +1458,7 @@
       state.textContent = status === 'running' && total > 0 ? percent + '%' : (QUEUE_TEXT[status] || '下载中');
       head.appendChild(title);
       head.appendChild(state);
-      row.appendChild(head);
+      inner.appendChild(head);
       var progress = document.createElement('progress');
       progress.className = 'ios-dl-task-progress';
       progress.max = total || 1;
@@ -1404,22 +1466,33 @@
       else progress.removeAttribute('value');
       progress.hidden = status !== 'running';
       progress.setAttribute('aria-label', title.textContent + ' ' + state.textContent);
-      row.appendChild(progress);
+      inner.appendChild(progress);
       var meta = document.createElement('div');
       meta.className = 'ios-dl-task-meta';
       if (status === 'running') {
         meta.textContent = (total > 0 ? percent + '% · ' : '') + megabyte(received)
           + (total > 0 ? ' / ' + megabyte(total) : '');
+      } else if (status === 'failed') {
+        var reason = String(task.reason || task.error || '').trim();
+        meta.textContent = '失败' + (reason ? ' · ' + reason : '');
       } else {
         meta.textContent = QUEUE_TEXT[status] || '';
       }
-      row.appendChild(meta);
+      inner.appendChild(meta);
+      row.appendChild(inner);
+      var del = document.createElement('button');
+      del.className = 'ip-epdel';
+      del.type = 'button';
+      del.textContent = '删除';
+      del.setAttribute('data-dl-delete', '1');
+      del.setAttribute('aria-label', '删除 ' + title.textContent);
+      row.appendChild(del);
       box.appendChild(row);
     }
     body.appendChild(box);
     var note = document.createElement('div');
     note.className = 'ios-dl-queue-note';
-    note.textContent = '同时最多下载 2 集 · 共 ' + rows.length + ' 集在队列里';
+    note.textContent = '同时最多下载 2 集 · 共 ' + rows.length + ' 集在下载列表里';
     body.appendChild(note);
     return rows.length;
   }
@@ -1644,7 +1717,7 @@
         downloadState.name = String(payload.name || '');
         downloadState.show = doneMeta.title;
         downloadState.ep = doneMeta.epLabel;
-        downloadState.path = String(payload.path || '');
+        downloadState.path = relativeDownloadPath(payload.path || '');
         downloadState.busy = false;
         downloadState.percent = 100;
         downloadState.error = '';
@@ -1688,7 +1761,7 @@
       downloadState.percent = 100;
       downloadState.total = Number(payload.total) || downloadState.total || 0;
       downloadState.received = Number(payload.received) || downloadState.received || 0;
-      downloadState.path = payload.path || '';
+      downloadState.path = relativeDownloadPath(payload.path);
       syncDownloadPage();
       saveDownload(true);
       renderMinePageIfOpen();
@@ -2001,7 +2074,9 @@
     var downloading = renderQueueRows(body);
     /* 已下载：按剧分组，每部下面一行一集，左滑删除 */
     var shows = readLibrary().shows;
-    if (!shows.length && !downloading) {
+    /* 只有失败/排队那几行、还没有一集下完时，也要说明「还没有下载完成的剧集」：
+       列表里有没有正在排队/失败的集，不改变「已完成 0 集」这个事实。 */
+    if (!shows.length) {
       var empty = document.createElement('div');
       empty.className = 'ip-sub';
       empty.textContent = '还没有下载完成的剧集';
@@ -2092,7 +2167,9 @@
     function rowOf(node) {
       var cursor = node;
       while (cursor) {
-        if (cursor.className && String(cursor.className).split(' ').indexOf('ip-eprow') >= 0) return cursor;
+        if (!cursor.className) { cursor = cursor.parentNode; continue; }
+        var classes = String(cursor.className).split(' ');
+        if (classes.indexOf('ip-eprow') >= 0 || classes.indexOf('ios-dl-task') >= 0) return cursor;
         cursor = cursor.parentNode;
       }
       return null;

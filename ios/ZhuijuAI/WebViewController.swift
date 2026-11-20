@@ -526,10 +526,13 @@ final class WebViewController: UIViewController, UIDocumentInteractionController
     }
 
     fileprivate func presentLocalPlayback(path: String?) {
-        guard let path = path, !path.isEmpty else { return }
-        let fileURL = URL(fileURLWithPath: path)
+        guard let fileURL = MediaDownloader.fileURL(forStoredPath: path) else {
+            notifyPlayerNotice("这一集的文件已经不在了，请重新下载")
+            return
+        }
         guard FileManager.default.fileExists(atPath: fileURL.path) else {
-            NSLog("playLocal missing: %@", path)
+            NSLog("playLocal missing: %@", path ?? "")
+            notifyPlayerNotice("这一集的文件已经不在了，请重新下载")
             return
         }
         let player = AVPlayer(url: fileURL)
@@ -538,6 +541,9 @@ final class WebViewController: UIViewController, UIDocumentInteractionController
         controller.modalPresentationStyle = .fullScreen
         let presenter = presentedViewController ?? self
         presenter.present(controller, animated: true) { player.play() }
+        /* 记住当前在播哪个文件：删除这一集时先停播。 */
+        localPlayerController = controller
+        localPlayerFileURL = fileURL
         /* TS 分片合成出来的 .ts 文件系统播放器打不开：1.5 秒内没进入播放就收掉播放器，
            提示改用「用其他播放器打开」，不把用户丢在一个黑屏里。 */
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self, weak controller] in
@@ -586,11 +592,19 @@ final class WebViewController: UIViewController, UIDocumentInteractionController
     /// 网页左滑删除一集：先真删本地文件，删成功才取消任务、写墓碑、清记录。
     /// 文件删不掉（被占用、权限、路径越界）就原样保留记录，并把失败回给网页；
     /// 旧实现把文件挪进 .trash，看着删了其实还占空间，失败也当成功。
+    /// 当前 App 内离线播放的是哪个文件：删除同一集时要先停播再删文件。
+    private weak var localPlayerController: AVPlayerViewController?
+    private var localPlayerFileURL: URL?
+
     fileprivate func deleteDownloadedEpisode(_ body: [String: Any]) {
         let taskId = body["id"] as? String
         let showId = body["showId"] as? String ?? ""
         let epKey = body["epKey"] as? String ?? ""
         let fileURL = body["path"] as? String
+        /* 删的就是正在播的那一集：先停播，否则播放器还占着文件，删了也白删。 */
+        if let target = MediaDownloader.fileURL(forStoredPath: fileURL) {
+            stopLocalPlayback(of: target)
+        }
         guard downloader.removeDownloadedFile(at: fileURL) else {
             sendDeleteResult(ok: false, id: taskId, showId: showId, epKey: epKey,
                              reason: "删除本地文件失败，这一集还留在下载列表里",
@@ -601,6 +615,18 @@ final class WebViewController: UIViewController, UIDocumentInteractionController
         downloader.deleteEpisode(id: taskId, showId: showId, epKey: epKey)
         sendDownloadSnapshot()
         sendDeleteResult(ok: true, id: taskId, showId: showId, epKey: epKey, reason: "", record: nil)
+    }
+
+    /// 停掉正在播的这个离线文件：只处理同一个文件，别的播放页面不动。
+    private func stopLocalPlayback(of fileURL: URL) {
+        guard let controller = localPlayerController, let playing = localPlayerFileURL else { return }
+        guard playing.standardizedFileURL.path == fileURL.standardizedFileURL.path else { return }
+        controller.player?.pause()
+        if controller.presentingViewController != nil {
+            controller.dismiss(animated: false, completion: nil)
+        }
+        localPlayerController = nil
+        localPlayerFileURL = nil
     }
 
     /// 这一集在原生快照里的样子：删除失败时网页靠它把片库那一行放回列表。
@@ -648,8 +674,8 @@ final class WebViewController: UIViewController, UIDocumentInteractionController
             notifyPlayerNotice("这一集还没有下载完成")
             return
         }
-        let fileURL = URL(fileURLWithPath: raw).standardizedFileURL.resolvingSymlinksInPath()
-        guard isInDownloadDirectory(fileURL) else {
+        let fileURL = MediaDownloader.fileURL(forStoredPath: raw)
+        guard let fileURL = fileURL, isInDownloadDirectory(fileURL) else {
             notifyPlayerNotice("这个文件不在 App 的下载目录里")
             return
         }
@@ -713,8 +739,7 @@ final class WebViewController: UIViewController, UIDocumentInteractionController
     }
 
     fileprivate func presentLocalFile(path: String?, name: String?) {
-        guard let path = path, !path.isEmpty else { return }
-        let fileURL = URL(fileURLWithPath: path)
+        guard let fileURL = MediaDownloader.fileURL(forStoredPath: path) else { return }
         guard FileManager.default.fileExists(atPath: fileURL.path) else { return }
         let presenter = presentedViewController ?? self
         let controller = UIActivityViewController(activityItems: [fileURL], applicationActivities: nil)

@@ -571,7 +571,10 @@ test('a downloaded row can be deleted on its own, and only that file is asked to
   assert.equal(typeof message.id, 'string', '把原生任务 id 一起带过去');
   assert.equal(message.showId, 'fixture');
   assert.equal(message.epKey, '0');
-  assert.equal(message.path, '/tmp/a.mp4', '只删这一行对应的那个文件');
+  /* 记录里只存相对路径（build 27 起）：网页把 `Downloads/a.mp4` 交给原生，
+     原生只取文件名再拼到当前 Documents/Downloads，换过容器也删得掉。
+     旧断言的 `/tmp/a.mp4` 是「原样转发绝对路径」的旧行为，已随相对路径迁移作废。 */
+  assert.equal(message.path, 'Downloads/a.mp4', '只删这一行对应的那个文件，且只存相对路径');
 });
 
 test('old snapshots, late done events and app restarts never resurrect a deleted episode', () => {
@@ -645,7 +648,12 @@ test('a failed episode never lets the show look complete and an unknown length h
   ]);
   const queueNode = state.document.getElementById('iosMineQueue');
   const text = state.document.getElementById('iosMineBody').textContent;
-  assert.equal(queueNode, null, '失败或暂停任务不伪装成正在下载');
+  /* build 27 起失败的那一集要留在列表里（可以左滑删掉），但它的状态必须写「失败」，
+     不能伪装成「下载中」；暂停的那一集仍然不占列表。 */
+  assert.ok(queueNode, '失败任务要留在下载列表里才能删');
+  assert.equal(queueNode.querySelectorAll('.ios-dl-task').length, 1, '只剩失败那一行，暂停/已完成不进下载区');
+  assert.match(text, /失败/, text);
+  assert.doesNotMatch(text, /下载中/, '失败任务不能伪装成正在下载');
   assert.match(text, /还没有下载完成的剧集/, text);
   assert.ok(!/全部完成/.test(text), `有一集失败就不能说整部剧完成：${text}`);
   assert.doesNotMatch(text, /全部完成/, '失败任务不应显示全部完成');
