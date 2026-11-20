@@ -414,9 +414,12 @@ player.addEventListener('pointerdown', (event) => {
   if (!(target instanceof Element)) return
   if (target.closest('.pl-ctrl, .pl-pop, .pl-top, .pl-eps')) showControls()
 })
-// 鼠标在画面上移动只在控制栏已显示时续时；隐藏状态下要靠点击才出现。
-player.addEventListener('pointermove', () => {
-  if (player.dataset.controls === 'on') showControls()
+// 只有鼠标在控制栏 / 顶部工具条上移动才算「操作」并续时。
+// 在画面上随意划过不算操作，否则控制栏永远等不到自动隐藏。
+player.addEventListener('pointermove', (event) => {
+  if (player.dataset.controls !== 'on') return
+  if (!(event.target instanceof Element)) return
+  if (event.target.closest('.pl-ctrl, .pl-top')) showControls()
 })
 player.addEventListener('focusin', () => showControls())
 ppCtrl?.addEventListener('pointerenter', () => {
@@ -427,7 +430,12 @@ ppCtrl?.addEventListener('pointerleave', () => {
   barHover = false
   showControls()
 })
-ppCtrl?.addEventListener('focusout', () => showControls())
+// 焦点离开控制栏（例如用户改去点画面）时只续一次计时，不要强行把栏显示出来，
+// 否则「栏已隐藏、焦点还停在某个按钮上」时点画面会先显示再隐藏，等于点了没反应。
+ppCtrl?.addEventListener('focusout', (event) => {
+  if (event.relatedTarget && ppCtrl.contains(event.relatedTarget)) return
+  if (player.dataset.controls === 'on') scheduleHide()
+})
 video.addEventListener('play', () => {
   syncPlayButton()
   showControls()
@@ -496,11 +504,17 @@ const endSeek = (event) => {
   if (!dragging) return
   dragging = false
   player.classList.remove('seeking')
-  if (event?.clientX) seekTo(event.clientX)
+  // 只有正常抬手才按松手位置定位；pointercancel / 捕获被抢走时不要再动进度
+  if (event?.type === 'pointerup' && typeof event.clientX === 'number') seekTo(event.clientX)
   showControls()
 }
 seekBar.addEventListener('pointerup', endSeek)
 seekBar.addEventListener('pointercancel', endSeek)
+// 指针捕获被系统或其他元素抢走时同样要收尾，否则 dragging 会一直为 true，控制栏就再也不会自动隐藏
+seekBar.addEventListener('lostpointercapture', endSeek)
+window.addEventListener('blur', () => {
+  if (dragging) endSeek()
+})
 seekBar.addEventListener('keydown', (event) => {
   if (!video.duration) return
   if (event.key === 'ArrowRight') video.currentTime = Math.min(video.duration, video.currentTime + 5)
@@ -516,12 +530,22 @@ function togglePlay() {
 btnPlay.addEventListener('click', togglePlay)
 bigPlay.addEventListener('click', togglePlay)
 // 轻触 / 单击画面：切换控制栏显隐；双击仍是全屏。
-video.addEventListener('click', (event) => {
-  // 打开选集抽屉/面板时不抢点击
-  if (event.target !== video) return
+// 画面里还盖着弹幕层、状态条和留边空白，所以监听整个画面容器，只排除明确的交互控件。
+const picture = player.querySelector('.pl-picture')
+
+function isPictureChrome(target) {
+  if (!(target instanceof Element)) return true
+  return !!target.closest('button, a, input, textarea, select, .dm-input')
+}
+
+picture.addEventListener('click', (event) => {
+  if (isPictureChrome(event.target)) return
   toggleControls()
 })
-video.addEventListener('dblclick', () => toggleFullscreen())
+picture.addEventListener('dblclick', (event) => {
+  if (isPictureChrome(event.target)) return
+  toggleFullscreen()
+})
 
 btnVol.addEventListener('click', () => {
   const muted = video.muted || video.volume === 0
