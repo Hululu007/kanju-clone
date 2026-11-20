@@ -56,7 +56,7 @@ node --test ios/Tests/bootstrap.test.mjs ios/Tests/downloadQueue.test.mjs
 - 语法检查：通过
 - Node 回归：**67 条全过**（含新增的全屏方向、首页齿轮、逐集进度用例）
 - 日志：`C:\Users\kenzh\AppData\Local\Temp\ios-build22-node.log`
-- **Swift 没有在本机编译**：这台 Windows 没有 Xcode；Swift 改动只能在 macOS 的出包工作流里编译验证。
+- **Swift 本机没法编译**：这台 Windows 没有 Xcode。最终由打包工作流真正编译：第一次编译就发现 iOS 16 的旋转接口没包进系统版本判断（48b44bd 已修），之后编译和出包都通过。
 
 ## 五、真机要一条条确认的事（build 22）
 
@@ -72,7 +72,13 @@ node --test ios/Tests/bootstrap.test.mjs ios/Tests/downloadQueue.test.mjs
 
 ## 六、交付信息
 
-- 当前状态：修复提交在 `fix/ios-0.1.19-player-download`，**尚未合并 main、尚未出包**；
-  等审核通过后合并并只跑 `ios-ipa-only.yml`（只打包，不跑测试 job）。
-- 出包后这里补：commit、run id、IPA 路径、包内版本 / build、SHA256。
-- **真机未测**：上面第五节需要在手机上逐条走一遍，才算这版真的可用。
+- **已合并 main 并出包**：修复提交 48b44bd（含审核通过的 a1f6afa，外加一个打包时编译器指出的 iOS 16 API 可用性小修），已合进 origin/main；只跑了 ios-ipa-only.yml 的打包 job，没跑任何测试 job。
+- **打包 run**：44674342356（success），出包用的就是 48b44bd。
+- **IPA 文件**：C:\Users\kenzh\Desktop\ZhuijuAI-0.1.18-build22-unsigned.ipa
+  （文件名按 Ken 指定的 0.1.18 命名；包内实际版本是 0.1.19 / build 22，已从 IPA 里的 Info.plist 核对）。
+- **包内核对**：CFBundleIdentifier = org.dpdns.zhuiju.ios，CFBundleShortVersionString = 0.1.19，CFBundleVersion = 22，文件大小 4,401,143 字节。
+- **SHA256**：bb2c385f05628a5ff04220211622012cc0bf7ad56d791f511d629692e6180df5（与工作流产物校验文件一致）。
+- 校验日志：C:\Users\kenzh\AppData\Local\Temp\ios-build22-verify.log
+  本机 Node 校验日志：C:\Users\kenzh\AppData\Local\Temp\ios-build22-node.log
+- **真机未测**：上面第五节需要在手机上逐条走一遍才算这版真的可用；手机当前装的是 build 21，必须先装这个 build 22 新包再测，不能用 build 21 的实测结果代替。
+
