@@ -976,7 +976,8 @@
       path: path,
       name: String(removed[0].name || '')
     });
-    announce(path ? '已删除这一集和它的文件' : '已删除这一集（没有本地文件）');
+    /* 先等原生回「文件真的删掉了」再报成功：删失败时原生会把这一行放回列表。 */
+    announce('正在删除这一集…');
     return true;
   }
 
@@ -1706,7 +1707,30 @@
   };
 
   /* 原生队列快照：整部剧的进度、排队/暂停/失败状态都从这份快照来（重启后也一样） */
+  /* 原生删除结果：只有文件真删掉了才让那一行消失；删失败就撤掉网页墓碑、
+     把这一集放回片库并说明原因，不能装作删成功。 */
+  function handleDeleteResult(payload) {
+    if (!payload || typeof payload !== 'object') return false;
+    var showId = String(payload.showId || '');
+    var key = payload.epKey === undefined || payload.epKey === null ? '' : String(payload.epKey);
+    if (payload.ok) {
+      announce('已删除这一集和它的文件');
+      return true;
+    }
+    clearDeletedEpisode(showId, key);
+    if (payload.path) recordDownloaded(payload, metaFromDone(payload));
+    renderDownloadLibrary();
+    renderMinePageIfOpen();
+    syncDownloadPage();
+    announce(String(payload.reason || '删除失败，这一集还在下载列表里'));
+    return false;
+  }
+
   window.__zhuijuDownloads = function (kind, tasks) {
+    if (kind === 'deleteResult') {
+      handleDeleteResult(tasks);
+      return;
+    }
     if (kind !== 'snapshot' || !tasks || typeof tasks.length !== 'number') return;
     queueTasks = tasks.filter(function (task) {
       return task && !isDeletedEpisode(task.showId, task.epKey);

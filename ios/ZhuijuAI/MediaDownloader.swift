@@ -291,57 +291,70 @@ final class MediaDownloader: NSObject {
         Self.enqueue(requests)
     }
 
-    /// 左滑删除一集：取消任务、把原生记录标成墓碑（不再进快照）、通知网页刷新。
-    /// 真正的本地文件删除由 WebViewController.deleteLocalFile 按路径做，职责分开。
+    /// 左滑删除一集：取消任务、把这一集写进独立墓碑存储（不再进快照）、通知网页刷新。
+    /// 本地文件由调用方先用 removeDownloadedFile 删掉；文件删不掉就不该走到这里。
     func deleteEpisode(id: String?, showId: String, epKey: String) {
         Self.deleteEpisode(id: id, showId: showId, epKey: epKey)
     }
-    func moveDownloadedFileToTrash(at path: String?) {
-        guard let raw = path?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else { return }
-        let source = URL(fileURLWithPath: raw).standardizedFileURL
-        guard let directory = Self.directory() else { return }
-        let root = directory.standardizedFileURL
+
+    /// 真正删掉这一集的本地文件（不是挪进回收站，删了才真的释放空间）。
+    /// 只接受 Documents/Downloads 里的普通文件，而且只动这一个文件：
+    /// 路径越界、目标是目录、删除失败都返回 false，由调用方保留记录并告诉用户；
+    /// 文件本来就不在了也算成功，记录照样要删。
+    func removeDownloadedFile(at path: String?) -> Bool {
+        Self.removeDownloadedFile(at: path)
+    }
+
+    @discardableResult
+    static func removeDownloadedFile(at path: String?) -> Bool {
+        guard let raw = path?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else { return true }
+        let source = URL(fileURLWithPath: raw).standardizedFileURL.resolvingSymlinksInPath()
+        guard let directory = directory() else { return false }
+        let root = directory.standardizedFileURL.resolvingSymlinksInPath()
         let rootComponents = root.pathComponents
         let sourceComponents = source.pathComponents
-        guard sourceComponents.count > rootComponents.count,
-              Array(sourceComponents.prefix(rootComponents.count)) == rootComponents else { return }
-        var isDirectory: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: source.path, isDirectory: &isDirectory), !isDirectory.boolValue else { return }
-        do {
-            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-            let trash = root.appendingPathComponent(".trash", isDirectory: true)
-            try FileManager.default.createDirectory(at: trash, withIntermediateDirectories: true)
-            let name = source.lastPathComponent
-            let target = trash.appendingPathComponent(name)
-            if FileManager.default.fileExists(atPath: target.path) {
-                let formatter = DateFormatter()
-                formatter.dateFormat = "yyyyMMdd-HHmmss-SSS"
-                let stem = (name as NSString).deletingPathExtension
-                let ext = (name as NSString).pathExtension
-                let suffix = ext.isEmpty ? "" : "." + ext
-                let renamed = stem + "-" + formatter.string(from: Date()) + suffix
-                try FileManager.default.moveItem(at: source, to: trash.appendingPathComponent(renamed))
-            } else {
-                try FileManager.default.moveItem(at: source, to: target)
-            }
-        } catch {
-            NSLog("move downloaded file to trash failed: %@", String(describing: error))
+        /* 只认下载目录里的直接子项：同前缀的兄弟目录、下载目录本身一律不动。 */
+        guard sourceComponents.count == rootComponents.count + 1,
+              Array(sourceComponents.prefix(rootComponents.count)) == rootComponents else {
+            NSLog("refuse to delete file outside download directory: %@", raw)
+            return false
         }
+        let fileManager = FileManager.default
+        var isDirectory: ObjCBool = false
+        guard fileManager.fileExists(atPath: source.path, isDirectory: &isDirectory) else { return true }
+        guard !isDirectory.boolValue else {
+            NSLog("refuse to delete a directory: %@", raw)
+            return false
+        }
+        do {
+            try fileManager.removeItem(at: source)
+        } catch {
+            NSLog("delete downloaded file failed: %@", String(describing: error))
+            return false
+        }
+        /* 旧版本把删掉的文件挪进 .trash：同一个文件名的历史副本顺手清掉，别继续白占空间。 */
+        let legacyTrash = root.appendingPathComponent(".trash", isDirectory: true)
+            .appendingPathComponent(source.lastPathComponent)
+        if fileManager.fileExists(atPath: legacyTrash.path) {
+            try? fileManager.removeItem(at: legacyTrash)
+        }
+        return true
     }
 
     private static func deleteEpisode(id: String?, showId: String, epKey: String) {
         records = loadRecords()
         var changed = false
+        let deletedAt = Date().timeIntervalSince1970
+        /* 墓碑独立落库，不依赖这条记录还在不在：记录被 400 条上限裁掉，删除结论也不会丢。 */
+        rememberTombstone(showId: showId, epKey: epKey, at: deletedAt)
         for index in records.indices {
             let record = records[index]
             let sameId = !(id ?? "").isEmpty && record.id == id
             let sameEpisode = !showId.isEmpty && !epKey.isEmpty
                 && (record.showId ?? "") == showId && (record.epKey ?? "") == epKey
             guard sameId || sameEpisode else { continue }
-            records[index].deletedAt = Date().timeIntervalSince1970
-            if !epKey.isEmpty, let deletedAt = records[index].deletedAt {
-                UserDefaults.standard.set(deletedAt, forKey: tombstoneKey(showId: records[index].showId ?? "", epKey: records[index].epKey ?? ""))
-            }
+            records[index].deletedAt = deletedAt
+            rememberTombstone(showId: records[index].showId ?? "", epKey: records[index].epKey ?? "", at: deletedAt)
             records[index].status = "cancelled"
             records[index].reason = "已删除"
             records[index].path = ""
@@ -422,11 +435,12 @@ final class MediaDownloader: NSObject {
         var accepted: [String] = []
         let tombstones = deletedKeys()
         let requestedKeys = Set(requests.map { key(showId: $0.showId, epKey: $0.epKey) })
+        /* 已删掉的集：旧记录可以清掉（墓碑在独立存储里），但墓碑本身不能在这里删，
+           否则用户删过的历史随时会被下一条入队请求带回界面。 */
         for deadKey in tombstones where !requestedKeys.contains(deadKey) {
             let parts = deadKey.split(separator: "|", maxSplits: 1, omittingEmptySubsequences: false)
             if parts.count == 2 {
                 records.removeAll { (($0.showId ?? "") == String(parts[0])) && (($0.epKey ?? "") == String(parts[1])) }
-                UserDefaults.standard.removeObject(forKey: tombstoneKey(showId: String(parts[0]), epKey: String(parts[1])))
             }
         }
         var rejected: [(String, String, [String: String])] = []
@@ -442,7 +456,7 @@ final class MediaDownloader: NSObject {
             }
             let episodeKey = key(showId: showId, epKey: epKey)
             if tombstones.contains(episodeKey) {
-                UserDefaults.standard.removeObject(forKey: tombstoneKey(showId: showId, epKey: epKey))
+                forgetTombstone(showId: showId, epKey: epKey)
                 records.removeAll { (($0.showId ?? "") == showId) && (($0.epKey ?? "") == epKey) }
             }
             if let index = duplicateIndex(in: records, showId: showId, epKey: epKey) {
@@ -805,24 +819,96 @@ final class MediaDownloader: NSObject {
     }
 
     private static let tombstonePrefix = "kj-ios-download-deleted-"
+    /// 墓碑独立存储：一个键装下所有 showId|epKey，值是删除时间戳。
+    /// 只从下载记录里读墓碑是不够的：记录会被 persist 的 suffix(400) 裁掉，
+    /// 裁掉之后旧快照、晚到回调又能把已删的集写回来。墓碑单独落库就不受记录裁剪影响。
+    private static let tombstoneStoreKey = "kj-ios-download-tombstones-v1"
+    /// 有界清理：只保留最近 2000 条删除。正常用户远用不到，也不会把默认值存储撑爆。
+    private static let tombstoneLimit = 2000
+    private static var tombstoneCache: [String: Double] = [:]
+    private static var tombstonesLoaded = false
+
     private static func key(showId: String, epKey: String) -> String { showId + "|" + epKey }
-    private static func tombstoneKey(showId: String, epKey: String) -> String {
-        tombstonePrefix + showId + "|" + epKey
-    }
-    private static func deletedKeys() -> Set<String> {
-        let defaults = UserDefaults.standard
-        var result = Set<String>()
-        for record in loadRecords() {
-            guard let deletedAt = record.deletedAt, deletedAt > 0 else { continue }
-            let showId = record.showId ?? ""
-            let epKey = record.epKey ?? ""
-            result.insert(key(showId: showId, epKey: epKey))
-            defaults.set(deletedAt, forKey: tombstoneKey(showId: showId, epKey: epKey))
-        }
-        return result
+
+    private static func tombstones() -> [String: Double] {
+        if tombstonesLoaded { return tombstoneCache }
+        tombstoneCache = loadTombstones()
+        tombstonesLoaded = true
+        return tombstoneCache
     }
 
-    private static func isDeleted(_ record: Record) -> Bool { (record.deletedAt ?? 0) > 0 }
+    private static func loadTombstones() -> [String: Double] {
+        let defaults = UserDefaults.standard
+        var merged: [String: Double] = [:]
+        if let saved = defaults.dictionary(forKey: tombstoneStoreKey) {
+            for (marker, value) in saved {
+                if let number = value as? NSNumber, number.doubleValue > 0 {
+                    merged[marker] = number.doubleValue
+                }
+            }
+        }
+        /* build24 之前一个删除项一个键：读进来迁移到独立存储，迁完把老键清掉。 */
+        var legacyKeys: [String] = []
+        for key in defaults.dictionaryRepresentation().keys where key.hasPrefix(tombstonePrefix) {
+            if let number = defaults.object(forKey: key) as? NSNumber, number.doubleValue > 0 {
+                merged[String(key.dropFirst(tombstonePrefix.count))] = number.doubleValue
+            }
+            legacyKeys.append(key)
+        }
+        /* 老记录上的 deletedAt 也是一份删除证据：一起并进来，记录被裁掉也不丢。 */
+        for record in loadRecords() {
+            guard let removedAt = record.deletedAt, removedAt > 0 else { continue }
+            let showId = record.showId ?? ""
+            let epKey = record.epKey ?? ""
+            guard !showId.isEmpty, !epKey.isEmpty else { continue }
+            merged[key(showId: showId, epKey: epKey)] = max(merged[key(showId: showId, epKey: epKey)] ?? 0, removedAt)
+        }
+        saveTombstones(merged)
+        for key in legacyKeys { defaults.removeObject(forKey: key) }
+        return merged
+    }
+
+    /// 存墓碑：按删除时间保留最近的 tombstoneLimit 条，只有超出的老记录才会被丢掉。
+    private static func saveTombstones(_ tombstones: [String: Double]) {
+        let defaults = UserDefaults.standard
+        guard !tombstones.isEmpty else {
+            defaults.removeObject(forKey: tombstoneStoreKey)
+            return
+        }
+        var stored: [String: Double] = [:]
+        for (marker, stamp) in tombstones.sorted(by: { $0.value > $1.value }).prefix(tombstoneLimit) {
+            stored[marker] = stamp
+        }
+        defaults.set(stored, forKey: tombstoneStoreKey)
+    }
+
+    private static func rememberTombstone(showId: String, epKey: String, at stamp: Double) {
+        guard !showId.isEmpty, !epKey.isEmpty else { return }
+        var next = tombstones()
+        next[key(showId: showId, epKey: epKey)] = stamp
+        saveTombstones(next)
+        tombstoneCache = next
+        tombstonesLoaded = true
+    }
+
+    private static func forgetTombstone(showId: String, epKey: String) {
+        guard !showId.isEmpty, !epKey.isEmpty else { return }
+        var next = tombstones()
+        guard next.removeValue(forKey: key(showId: showId, epKey: epKey)) != nil else { return }
+        saveTombstones(next)
+        tombstoneCache = next
+        tombstonesLoaded = true
+    }
+
+    private static func deletedKeys() -> Set<String> { Set(tombstones().keys) }
+
+    private static func isDeleted(_ record: Record) -> Bool {
+        if (record.deletedAt ?? 0) > 0 { return true }
+        let showId = record.showId ?? ""
+        let epKey = record.epKey ?? ""
+        guard !showId.isEmpty, !epKey.isEmpty else { return false }
+        return tombstones()[key(showId: showId, epKey: epKey)] != nil
+    }
 
     private static func update(_ id: String, force: Bool = true, _ mutate: (inout Record) -> Void) {
         if !records.contains(where: { $0.id == id }) { records = loadRecords() }

@@ -596,6 +596,44 @@ test('old snapshots, late done events and app restarts never resurrect a deleted
   assert.ok(!state.storage['kj-ios-queue'], '网页不能再把旧队列快照当持久事实源');
 });
 
+/* 复审阻塞：删除要等原生确认文件真的删掉；删失败不能装作成功。 */
+test('a deleted row is only reported gone after the native confirms the file is removed', () => {
+  const state = fixture({ signedIn: true, episodes: [0, 1] });
+  state.ready();
+  state.window.__zhuijuDownload({ id: 'a', event: 'done', showId: 'fixture', epKey: '0', epLabel: '第1集', title: '测试剧', path: '/tmp/a.mp4', size: 10, name: 'a.mp4' });
+  state.click(state.document.getElementById('iosDlListBtn'));
+  const row = state.document.getElementById('iosMineBody').querySelectorAll('.ip-eprow')[0];
+  const button = childWithClass(row, 'ip-epdel');
+  button.setAttribute('data-dl-show', 'fixture');
+  button.setAttribute('data-dl-key', '0');
+  state.click(button);
+  assert.match(state.toastText(), /正在删除/, '点删除先说正在删，不能先报成功');
+  state.window.__zhuijuDownloads('deleteResult', { ok: true, id: 'a', showId: 'fixture', epKey: '0' });
+  assert.match(state.toastText(), /已删除/, '原生确认后才报删除成功');
+  assert.equal(state.document.getElementById('iosMineBody').querySelectorAll('.ip-eprow').length, 0);
+});
+
+test('a failed native delete puts the row back and clears the web tombstone', () => {
+  const state = fixture({ signedIn: true, episodes: [0, 1] });
+  state.ready();
+  state.window.__zhuijuDownload({ id: 'a', event: 'done', showId: 'fixture', epKey: '0', epLabel: '第1集', title: '测试剧', path: '/tmp/a.mp4', size: 10, name: 'a.mp4' });
+  state.click(state.document.getElementById('iosDlListBtn'));
+  const row = state.document.getElementById('iosMineBody').querySelectorAll('.ip-eprow')[0];
+  const button = childWithClass(row, 'ip-epdel');
+  button.setAttribute('data-dl-show', 'fixture');
+  button.setAttribute('data-dl-key', '0');
+  state.click(button);
+  state.window.__zhuijuDownloads('deleteResult', {
+    ok: false, id: 'a', showId: 'fixture', epKey: '0', path: '/tmp/a.mp4', name: 'a.mp4', size: 10,
+    title: '测试剧', epLabel: '第1集', reason: '删除本地文件失败，这一集还留在下载列表里'
+  });
+  const rows = state.document.getElementById('iosMineBody').querySelectorAll('.ip-eprow');
+  assert.equal(rows.length, 1, '文件没删掉，这一集必须留在列表里');
+  assert.match(state.toastText(), /删除本地文件失败/, '要把失败原因告诉用户');
+  const tombstone = state.storage['kj-ios-deleted-episodes'] || '[]';
+  assert.equal(tombstone.indexOf('fixture|0') < 0, true, '失败要撤掉网页墓碑，否则这一集再也进不来');
+});
+
 test('a failed episode never lets the show look complete and an unknown length has no percent', () => {
   const state = fixture({ signedIn: true, episodes: [0, 1] });
   state.ready();

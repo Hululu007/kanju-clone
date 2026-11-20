@@ -956,7 +956,8 @@ testToolbarDownloadButtonReplacesTheDanmakuSlot → missing-button
 - **修复（build24）**：
   - 原生记录成为唯一事实源：网页不再读写 `kj-ios-queue`，只接收原生 `__zhuijuDownloads('snapshot')`；启动时清掉旧缓存。
   - 点集先在内存里放一条 `queued` 乐观行，下载页/我的下载立刻显示排队；原生快照到达后按同一 `showId + epKey` 覆盖。
-  - 左滑删除发 `deleteDownload`：原生取消任务、写删除墓碑、移走 `Documents/Downloads` 里的真实文件、立即回传快照；网页同时写墓碑，过滤晚到进度和旧快照。删除后再次主动下载同一集可清墓碑，并用新的任务 id 建记录，旧回调不会污染新任务。
-- **测试名**（Node）：tapping one cell in the episode grid queues exactly that episode、the tapped episode appears immediately while its source is still being resolved、a downloaded row can be deleted on its own, and only that file is asked to be removed、old snapshots, late done events and app restarts never resurrect a deleted episode、native records are the single source and deleted rows never come back
+  - 左滑删除发 `deleteDownload`：原生先真删本地文件（`removeItem`，不再挪进 `.trash`），删成功才取消任务、写墓碑、清记录；文件删不掉就保留记录，回传 `deleteResult` 失败原因，网页撤掉自己的墓碑并把这一行放回列表；网页同步写墓碑，过滤晚到进度和旧快照。
+  - 墓碑改成**独立持久存储**（`kj-ios-download-tombstones-v1`，`showId|epKey -> 删除时间`）：之前只从 `kj-ios-download-tasks` 记录里读墓碑，记录被 `suffix(400)` 裁掉后屏障就没了。现在旧的“一删一键”墓碑会迁移并清掉，记录里的 `deletedAt` 也并进来；保留最近 2000 条（有界）。主动重下同一集时明确清掉对应墓碑，并用新任务 id 建记录；集合清理旧记录时不再顺手删墓碑。
+- **测试名**（Node）：tapping one cell in the episode grid queues exactly that episode、the tapped episode appears immediately while its source is still being resolved、a downloaded row can be deleted on its own, and only that file is asked to be removed、old snapshots, late done events and app restarts never resurrect a deleted episode、a deleted row is only reported gone after the native confirms the file is removed、a failed native delete puts the row back and clears the web tombstone、native records are the single source and deleted rows never come back、deleting an episode really removes the file and never pretends success、the tombstone store keeps blocking after the task records are trimmed
 - **修复版本**：0.1.19（build 24，待出包）
-- **验证边界**：本地 Node 85/85 通过；真机待 Ken 安装 build24 后验收。Windows 无 Xcode，Swift 未本地编译。
+- **验证边界**：本地 Node 89/89 通过（含上述两条删除路径与两条 Swift 源码守卫）；真机待 Ken 安装 build24 后验收。Windows 无 Xcode，Swift 未本地编译。

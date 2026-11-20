@@ -515,7 +515,9 @@ final class WebViewController: UIViewController, UIDocumentInteractionController
     /// 路径由下载器按真实下载目录边界校验。
     fileprivate func deleteLocalFile(path: String?) {
         guard let raw = path?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else { return }
-        downloader.moveDownloadedFileToTrash(at: raw)
+        if !downloader.removeDownloadedFile(at: raw) {
+            notifyPlayerNotice("删除本地文件失败，这一集还留着")
+        }
     }
 
     fileprivate func presentLocalPlayback(path: String?) {
@@ -567,12 +569,59 @@ final class WebViewController: UIViewController, UIDocumentInteractionController
         return derived
     }
 
+    /// 网页左滑删除一集：先真删本地文件，删成功才取消任务、写墓碑、清记录。
+    /// 文件删不掉（被占用、权限、路径越界）就原样保留记录，并把失败回给网页；
+    /// 旧实现把文件挪进 .trash，看着删了其实还占空间，失败也当成功。
     fileprivate func deleteDownloadedEpisode(_ body: [String: Any]) {
+        let taskId = body["id"] as? String
         let showId = body["showId"] as? String ?? ""
         let epKey = body["epKey"] as? String ?? ""
-        downloader.deleteEpisode(id: body["id"] as? String, showId: showId, epKey: epKey)
-        downloader.moveDownloadedFileToTrash(at: body["path"] as? String)
+        let fileURL = body["path"] as? String
+        guard downloader.removeDownloadedFile(at: fileURL) else {
+            sendDeleteResult(ok: false, id: taskId, showId: showId, epKey: epKey,
+                             reason: "删除本地文件失败，这一集还留在下载列表里",
+                             record: downloadRecord(id: taskId, showId: showId, epKey: epKey))
+            sendDownloadSnapshot()
+            return
+        }
+        downloader.deleteEpisode(id: taskId, showId: showId, epKey: epKey)
         sendDownloadSnapshot()
+        sendDeleteResult(ok: true, id: taskId, showId: showId, epKey: epKey, reason: "", record: nil)
+    }
+
+    /// 这一集在原生快照里的样子：删除失败时网页靠它把片库那一行放回列表。
+    private func downloadRecord(id: String?, showId: String, epKey: String) -> [String: Any]? {
+        return downloader.snapshotForPage().first { entry in
+            let sameId = !(id ?? "").isEmpty && (entry["id"] as? String) == id
+            let sameEpisode = !showId.isEmpty && !epKey.isEmpty
+                && (entry["showId"] as? String) == showId && (entry["epKey"] as? String) == epKey
+            return sameId || sameEpisode
+        }
+    }
+
+    /// 删除结果回给网页：成功才让那一行消失；失败时网页清掉自己的墓碑，把这一行放回去。
+    private func sendDeleteResult(ok: Bool, id: String?, showId: String, epKey: String, reason: String, record: [String: Any]?) {
+        var payload: [String: Any] = [
+            "ok": ok,
+            "id": id ?? "",
+            "showId": showId,
+            "epKey": epKey,
+            "reason": reason,
+        ]
+        if let record = record {
+            payload["path"] = record["path"] ?? ""
+            payload["name"] = record["name"] ?? ""
+            payload["size"] = record["size"] ?? 0
+            payload["title"] = record["title"] ?? ""
+            payload["epLabel"] = record["epLabel"] ?? ""
+        }
+        guard JSONSerialization.isValidJSONObject(payload),
+              let data = try? JSONSerialization.data(withJSONObject: payload),
+              let text = String(data: data, encoding: .utf8) else { return }
+        let script = "window.__zhuijuDownloads && window.__zhuijuDownloads(\"deleteResult\", " + text + ");"
+        DispatchQueue.main.async { [weak self] in
+            self?.webView.evaluateJavaScript(script, completionHandler: nil)
+        }
     }
 
     /// 已完成的一集交给系统「打开方式」菜单（UIDocumentInteractionController）。

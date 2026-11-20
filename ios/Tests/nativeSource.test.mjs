@@ -62,9 +62,63 @@ test('native records are the single source and deleted rows never come back', ()
   assert.ok(downloaderSource.includes('var deletedAt: Double?'), 'native record has deletion tombstone');
   assert.ok(downloaderSource.includes('records.filter { !Self.isDeleted($0) }.map'), 'snapshot filters deleted records');
   assert.ok(downloaderSource.includes('func deleteEpisode(id: String?'), 'native per-episode delete exists');
-  assert.ok(downloaderSource.includes('func moveDownloadedFileToTrash(at path: String?)'), 'delete also removes the file');
+  assert.ok(downloaderSource.includes('func removeDownloadedFile(at path: String?)'), 'delete really removes the file');
   assert.ok(downloaderSource.includes('rootComponents'), 'full path component check');
   assert.ok(source.includes('case "deleteDownload"'), 'web delete reaches native handler');
-  assert.ok(source.includes('at: body["path"] as? String'), 'native delete passes real file path');
+  assert.ok(source.includes('let fileURL = body["path"] as? String'), 'native delete passes real file path');
   assert.ok(source.includes('sendDownloadSnapshot()'), 'snapshot refreshed after delete');
+});
+
+/* 复审阻塞 1：删除必须真的删文件（不是挪进 .trash），删不掉要保留记录并回失败。 */
+test('deleting an episode really removes the file and never pretends success', () => {
+  const start = downloaderSource.indexOf('static func removeDownloadedFile(at path: String?)');
+  const end = downloaderSource.indexOf('private static func deleteEpisode(id: String?', start);
+  assert.ok(start > 0 && end > start, '找不到 removeDownloadedFile');
+  const section = downloaderSource.slice(start, end);
+  assert.match(section, /try fileManager\.removeItem\(at: source\)/, '要真的 removeItem，删了才释放空间');
+  assert.doesNotMatch(section, /\bmoveItem\(/, '删除不能变成移动到回收站');
+  assert.match(section, /resolvingSymlinksInPath\(\)/);
+  assert.match(section, /count == rootComponents\.count \+ 1/, '只认下载目录的直接子项');
+  assert.match(section, /!isDirectory\.boolValue/, '目录不删');
+  assert.match(section, /return false/, '删不掉要返回 false');
+
+  const handlerStart = source.indexOf('fileprivate func deleteDownloadedEpisode');
+  const handlerEnd = source.indexOf('private func downloadRecord', handlerStart);
+  assert.ok(handlerStart > 0 && handlerEnd > handlerStart, '找不到 deleteDownloadedEpisode');
+  const handler = source.slice(handlerStart, handlerEnd);
+  assert.match(handler, /guard downloader\.removeDownloadedFile\(at: fileURL\) else \{/, '先删文件');
+  assert.match(handler, /sendDeleteResult\(ok: false/, '删失败要回传失败');
+  assert.match(handler, /sendDeleteResult\(ok: true/, '删成功才回成功');
+  assert.ok(handler.indexOf('removeDownloadedFile') < handler.indexOf('deleteEpisode('), '删成功后才删记录');
+});
+
+/* 复审阻塞 2：墓碑要独立持久化，任务记录被 suffix(400) 裁掉后仍然挡得住旧快照。 */
+test('the tombstone store keeps blocking after the task records are trimmed', () => {
+  assert.match(downloaderSource, /private static let tombstoneStoreKey = "[^"]+"/, '墓碑单独一个存储键');
+  assert.match(
+    downloaderSource,
+    /for key in defaults\.dictionaryRepresentation\(\)\.keys where key\.hasPrefix\(tombstonePrefix\)/,
+    'build24 之前的一删一键墓碑要枚举出来迁移'
+  );
+  assert.match(downloaderSource, /private static func deletedKeys\(\) -> Set<String> \{ Set\(tombstones\(\)\.keys\) \}/);
+  assert.match(
+    downloaderSource,
+    /return tombstones\(\)\[key\(showId: showId, epKey: epKey\)\] != nil/,
+    '记录被裁掉也要按墓碑判定已删除'
+  );
+  assert.match(downloaderSource, /tombstoneLimit = 2000/, '墓碑要有界清理');
+
+  const persistStart = downloaderSource.indexOf('private static func persist(force: Bool)');
+  const persistEnd = downloaderSource.indexOf('private static let tombstonePrefix', persistStart);
+  assert.ok(persistStart > 0 && persistEnd > persistStart, '找不到 persist');
+  const persist = downloaderSource.slice(persistStart, persistEnd);
+  assert.match(persist, /suffix\(400\)/);
+  assert.doesNotMatch(persist, /tombstone/, '裁剪任务记录不能碰墓碑存储');
+
+  const cleanupStart = downloaderSource.indexOf('for deadKey in tombstones where !requestedKeys.contains(deadKey)');
+  const cleanupEnd = downloaderSource.indexOf('var rejected:', cleanupStart);
+  assert.ok(cleanupStart > 0 && cleanupEnd > cleanupStart, '找不到入队清理' );
+  const cleanup = downloaderSource.slice(cleanupStart, cleanupEnd);
+  assert.doesNotMatch(cleanup, /removeObject\(forKey: tombstoneKey/, '入队时不能顺手删墓碑');
+  assert.match(cleanup, /records\.removeAll/, '旧记录可以清掉，墓碑留着');
 });
