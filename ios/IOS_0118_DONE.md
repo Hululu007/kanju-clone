@@ -107,3 +107,18 @@
 **不是 Swift 行为测试**；本机仍没有 Swift 工具链，两个 Swift 文件没有本地编译；真机仍未测。
 
 **真机待办**：build25 出包并放到桌面后，等 Ken 安装确认，再由 Lead 派手机测试；测试前先核对 build 25。
+
+## 九、出包记录（build 25）
+
+- 审核：现有 reviewer 对本轮代码只读复审**通过**（被审 commit `d62c815`）。
+- 合并：`fix/ios-0.1.19-build25-hls` 合并/快进到 `main`，main 的代码提交就是 `d62c815`。
+- 打包：只运行 `.github/workflows/ios-ipa-only.yml`（packaging-only，**没有运行任何云端测试 job**）。
+  run id `44703640712`，工作流实际 checkout 的 SHA = `d62c815f2f33b59d097f4690c7ef3b60d8cd15f9`，结论 success。
+- 产物：桌面 `C:\Users\kenzh\Desktop\ZhuijuAI-0.1.18-build25-unsigned.ipa`（4,500,675 字节）
+  - 包内实际版本：`0.1.19` / build `25`，bundle id `org.dpdns.zhuiju.ios`，MinimumOSVersion 15.0
+  - zip 完整性 ok；桌面文件与工作流产物的 SHA256 完全一致
+  - SHA256：`dbd6cf4d9c986431cc63624dcc233bee257d3d10356dd4c5b819655544e0e381`
+- 本地：Node 测试 104/104 通过；Swift 由这次打包流程实际编译通过（本机仍然没有 Xcode）。
+- 推送 main 时旧的测试 workflow 被自动触发了一次（run 44703591595），已按规矩提交取消，没有删除/禁用任何 workflow 或自动化配置。
+- **真实线路仍未验证**：站点访问口令拿不到，两部不同来源剧集各下一集 + ffprobe 核对没有做，不编造数据。
+- **真机未测**：全屏/下载/离线播放都要等 Ken 装这个 build 25 之后再说。
