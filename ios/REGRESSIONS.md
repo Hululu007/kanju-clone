@@ -1010,3 +1010,19 @@ testToolbarDownloadButtonReplacesTheDanmakuSlot → missing-button
   fMP4/TS 合成、切后台续下、完成后播放。
   **已知限制**：纯 TS 合成出来的 `.ts` 系统播放器打不开（AVFoundation 不支持 MPEG-TS），App 内会提示改用「用其他播放器打开」；
   fMP4 合成的 `.mp4` 可以 App 内直接播。
+
+## REG-028 App 显示名与文案从「追剧AI」改为「阿噗影视」（build 26）
+
+- **现象**：手机桌面图标下的名字、系统里显示的 App 名仍是旧的「追剧AI」，与站上的「阿噗影视」不一致。
+- **根因**：`ios/ZhuijuAI/Info.plist` 的 `CFBundleDisplayName` 写死 `追剧AI`，`CFBundleName` 取自
+  `$(PRODUCT_NAME)`（`ZhuijuAI`）；H5 外壳 `ios-shell/ZhuijuH5` 的显示名与离线提示也还是旧名。
+- **修复（build 26）**：
+  - `ios/ZhuijuAI/Info.plist`：`CFBundleDisplayName` = `阿噗影视`，`CFBundleName` = `阿噗影视`（字面值，不再取 PRODUCT_NAME）。
+  - `ios-shell/ZhuijuH5/Info.plist`：显示名 `追剧AI H5` → `阿噗影视 H5`；`WebViewController.swift` 离线提示
+    `连不上 追剧AI` → `连不上 阿噗影视`。
+  - 不动 Bundle ID（`org.dpdns.zhuiju.ios` / `org.dpdns.zhuiju.h5`）、target/工程名（`ZhuijuAI`）、
+    `PRODUCT_NAME`（可执行文件与 `ZhuijuAI.app` 产物名）、包内类名与变量名、UA 里的 `ZhuijuAI/<版本>`（站点按该前缀识别 App）、
+    站点域名与接口。App 内网页部分的站名来自已上线的站点，站点已经是「阿噗影视」，注入层无需改。
+- **测试名**：无（Ken 2026-11-19 的 HARK-SMALL-UI-EXEMPT：只改显示名的文案类改动不新增/不跑测试，编译通过即可出包）。
+- **修复版本**：0.1.19（build 26）
+- **验证边界**：Windows 本机没有 Xcode，`xcodebuild` 只在云端打包时跑；真机桌面名与「设置」里的 App 名需 Ken 装新包后核对。
