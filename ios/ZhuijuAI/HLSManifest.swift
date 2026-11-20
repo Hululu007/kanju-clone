@@ -96,7 +96,7 @@ enum HLSParser {
         var pendingVariant: [String: String]?
         var currentKey: HLSKey?
         var pendingRange: (length: Int64, offset: Int64?)?
-        var rangeEnd: [String: Int64] = [:]
+        var rangeCursor: [String: Int64] = [:]
         var pendingDuration: Double?
         var mediaSequence = 0
         var mediaIndex = 0
@@ -155,9 +155,14 @@ enum HLSParser {
             guard let url = resolve(line, base: baseURL) else { continue }
             var byteRange: HLSByteRange?
             if let range = pendingRange {
-                let offset = range.offset ?? rangeEnd[line] ?? 0
-                byteRange = HLSByteRange(offset: offset, length: range.length)
-                rangeEnd[line] = offset + range.length
+                /* 省略偏移时接在「同一资源」上一段的结束位置。资源身份用解析后的完整地址（含 query），
+                   不能拿原始 URI 字符串当 key，否则 query 一变就会错误归零。 */
+                let resource = url.absoluteString
+                let offset = range.offset ?? rangeCursor[resource] ?? 0
+                if let end = HLSParser.rangeEnd(offset: offset, length: range.length) {
+                    byteRange = HLSByteRange(offset: offset, length: range.length)
+                    rangeCursor[resource] = end
+                }
                 pendingRange = nil
             }
             playlist.segments.append(HLSSegment(
@@ -249,12 +254,23 @@ enum HLSParser {
     }
 
     /// #EXT-X-BYTERANGE:长度[@偏移]
+    /// 长度必须大于 0；给了偏移就必须非负；长度加到偏移上不能溢出。
     static func parseByteRange(_ raw: String?) -> (length: Int64, offset: Int64?)? {
         guard let text = raw?.trimmingCharacters(in: .whitespaces), !text.isEmpty else { return nil }
         let parts = text.components(separatedBy: "@")
-        guard let length = Int64(parts[0]) else { return nil }
-        let offset = parts.count > 1 ? Int64(parts[1]) : nil
+        guard parts.count <= 2 else { return nil }
+        guard let length = Int64(parts[0].trimmingCharacters(in: .whitespaces)), length > 0 else { return nil }
+        guard parts.count == 2 else { return (length, nil) }
+        guard let offset = Int64(parts[1].trimmingCharacters(in: .whitespaces)), offset >= 0 else { return nil }
+        guard rangeEnd(offset: offset, length: length) != nil else { return nil }
         return (length, offset)
+    }
+
+    /// 一个 byte range 的结束位置（不包含）；溢出返回 nil，交给调用方当成不合法丢掉。
+    static func rangeEnd(offset: Int64, length: Int64) -> Int64? {
+        let (end, overflow) = offset.addingReportingOverflow(length)
+        guard !overflow, end >= 0 else { return nil }
+        return end
     }
 
     /// #EXT-X-KEY：METHOD=NONE 返回 nil（这一段不加密）。

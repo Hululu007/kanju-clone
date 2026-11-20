@@ -52,7 +52,7 @@
 ## 四、本地验证（本轮实际跑过的）
 
 - `node --check ios/ZhuijuAI/AppBootstrap.js`：通过（日志 `C:\Users\kenzh\AppData\Local\Temp\build25-logs\node-check.log`）
-- `node --test ios/Tests/*.test.mjs`：100/100 通过（日志 `C:\Users\kenzh\AppData\Local\Temp\build25-logs\node-test.log`）
+- `node --test ios/Tests/*.test.mjs`：104/104 通过（日志 `C:\Users\kenzh\AppData\Local\Temp\build25-logs\node-test.log`）
 - **Windows 本机没有 Xcode/Mac，也没有 Swift 工具链**：新增的两个 Swift 文件**没有本地编译**，
   只能靠 packaging-only 的 GitHub Actions 编译兜底；Node 用例只钉源码守卫和夹具结构，不等于 Swift 跑过。
 
@@ -84,5 +84,26 @@
 - B 全屏：本轮没改全屏状态机；只在本地播放里加了「打不开就收起并提示」。
 - C 首页无齿轮 / 仅网站播放器：本轮没改相关代码，原有 Node 断言仍全过。
 - D 账号组与菜单：本轮没改账号/设置菜单，也没有加回讨论、反馈、等级、P2P、内容偏好、我的用量、全部下载。
+
+## 八、复审打回的三处补强（第二轮，已修）
+
+第一轮审核在源码层面指出三处真问题，改法如下：
+
+1. **重试会抢跑 / 旧定时器失效**（`HLSDownloader.swift`）：以前分片失败后只是把它从「正在下」里拿掉，
+   1 秒后再统一 `pump`；这中间别的分片一下完就会把这片提前再拉起来，重试次数和并发都乱。
+   现在每个失败分片挂一张**专属重试票**：有票期间 `pump` 跳过它；只有这张票自己的定时器（票号仍然匹配）
+   才能摘票并继续；被新一轮重试、暂停或删除顶掉的旧票醒来会发现票号不对，什么都不做。
+   仍然是**初次 + 最多 3 次重试**；暂停/删除时把没到点的票一并清掉。
+2. **接管后台任务不看持久记录**（`HLSDownloader.swift`）：以前系统把上次的后台任务交回来就直接登记，
+   任务已经删掉、分片已经下完、或者用户已经暂停时，晚到的回调还可能写缓存、改进度。
+   现在先核对：任务还在、阶段是下分片、分片下标有效、这片还没下完、没被暂停；对不上就 `cancel()` 掉，
+   不进内存。完成回调也加了同样的守卫，删掉的任务不会因为晚回调复活。
+3. **BYTERANGE 没做合法性检查**（`HLSManifest.swift`）：以前长度 0、负偏移、溢出都能进来；
+   省略偏移时还用「原始 URI 字符串」记上一段的结束位置，query 一变就会错误归零。
+   现在长度必须大于 0、偏移必须非负、偏移 + 长度用 `addingReportingOverflow` 防溢出；
+   续算改成按**解析后的完整资源地址（含 query）**，换 query 就是另一份资源。
+
+**这轮的验证边界（不夸大）**：新增 4 条 Node 用例钉的是上面的源码契约和 BYTERANGE 夹具结构，
+**不是 Swift 行为测试**；本机仍没有 Swift 工具链，两个 Swift 文件没有本地编译；真机仍未测。
 
 **真机待办**：build25 出包并放到桌面后，等 Ken 安装确认，再由 Lead 派手机测试；测试前先核对 build 25。

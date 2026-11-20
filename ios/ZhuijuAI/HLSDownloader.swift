@@ -68,6 +68,9 @@ final class HLSDownloader: NSObject {
     private static var tasks: [Int: URLSessionDownloadTask] = [:]
     private static var taskKeys: [Int: String] = [:]
     private static var inFlight: Set<String> = []
+    /// 失败分片的专属重试票：有票的分片 pump 不许抢跑，票号对不上的旧定时器直接作废。
+    private static var retryScheduled: [String: Int] = [:]
+    private static var retryTicket = 0
     /// 用户暂停过的任务：重试定时器和 pump 都不能再把分片拉起来。
     private static var paused: Set<String> = []
     private static var planning: Set<String> = []
@@ -128,7 +131,20 @@ final class HLSDownloader: NSObject {
         backgroundCompletion = completion
         backgroundSession().getAllTasks { systemTasks in
             for task in systemTasks {
-                guard let key = task.taskDescription, splitKey(key) != nil else { continue }
+                guard let key = task.taskDescription, let split = splitKey(key) else {
+                    task.cancel()
+                    continue
+                }
+                /* 系统交回来的可能是一条已经删掉的任务，或者已经下完的分片：
+                   先跟持久记录核对，对不上就取消，绝不写缓存、绝不改进度。 */
+                guard let job = jobs[split.id],
+                      job.phase == "segments",
+                      split.index < job.segments.count,
+                      !job.segments[split.index].done,
+                      !paused.contains(split.id) else {
+                    task.cancel()
+                    continue
+                }
                 taskKeys[task.taskIdentifier] = key
                 inFlight.insert(key)
                 if let downloadTask = task as? URLSessionDownloadTask {
@@ -415,7 +431,8 @@ final class HLSDownloader: NSObject {
         for index in job.segments.indices {
             if slots <= 0 { break }
             let key = job.id + "#" + String(index)
-            if job.segments[index].done || inFlight.contains(key) { continue }
+            /* 有重试票的分片由它自己的定时器拉起，别的回调不能提前抢跑。 */
+            if job.segments[index].done || inFlight.contains(key) || retryScheduled[key] != nil { continue }
             slots -= 1
             startSegment(id: id, index: index)
         }
@@ -442,26 +459,39 @@ final class HLSDownloader: NSObject {
         tasks[task.taskIdentifier] = task
         taskKeys[task.taskIdentifier] = key
         inFlight.insert(key)
+        /* 这一片真的起来了，之前挂的票（含更早的定时器）全部作废。 */
+        retryScheduled.removeValue(forKey: key)
         update(id) { job in
             if index < job.segments.count { job.segments[index].attempts += 1 }
         }
         task.resume()
     }
 
+    /// 分片失败：给这一片挂一张专属重试票。
+    /// 有票期间 pump 不会抢跑；定时器要核对票号，被新一轮重试、暂停或删除顶掉的旧票不许动手。
     private static func retry(id: String, index: Int, reason: String) {
         ensureLoaded()
-        inFlight.remove(id + "#" + String(index))
-        guard let job = jobs[id], index < job.segments.count else { return }
+        let key = id + "#" + String(index)
+        inFlight.remove(key)
+        guard let job = jobs[id], index < job.segments.count, !job.segments[index].done else { return }
+        guard !paused.contains(id) else { return }
         let attempts = job.segments[index].attempts
         guard attempts <= maxSegmentRetries else {
             fail(id: id, reason: "分片下载失败（" + reason + "），已重试 " + String(maxSegmentRetries) + " 次")
             return
         }
-        let key = id + "#" + String(index)
+        retryTicket += 1
+        let ticket = retryTicket
+        retryScheduled[key] = ticket
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
             ensureLoaded()
-            guard !paused.contains(id) else { return }
-            guard let current = jobs[id], index < current.segments.count, !current.segments[index].done, !inFlight.contains(key) else { return }
+            guard retryScheduled[key] == ticket else { return }
+            retryScheduled.removeValue(forKey: key)
+            guard !paused.contains(id),
+                  let current = jobs[id],
+                  current.phase == "segments",
+                  index < current.segments.count,
+                  !current.segments[index].done else { return }
             pump(id: id)
         }
     }
@@ -469,12 +499,16 @@ final class HLSDownloader: NSObject {
     private static func finish(key: String, taskIdentifier: Int, location: URL?, response: URLResponse?, error: Error?) {
         ensureLoaded()
         inFlight.remove(key)
+        retryScheduled.removeValue(forKey: key)
         tasks.removeValue(forKey: taskIdentifier)
         taskKeys.removeValue(forKey: taskIdentifier)
         guard let split = splitKey(key) else { return }
         let id = split.id
         let index = split.index
         guard let job = jobs[id], index < job.segments.count else { return }
+        /* 删掉的任务、暂停的任务、已经下完的片：晚到的回调直接丢弃，
+           不能复活任务，也不能再写缓存/进度。 */
+        guard !paused.contains(id), !job.segments[index].done else { return }
         let nsError = error.map { $0 as NSError }
         if let nsError = nsError, nsError.domain == NSURLErrorDomain, nsError.code == NSURLErrorCancelled {
             /* 用户暂停/删除/换页：不算分片失败，也不消耗重试次数。 */
@@ -663,11 +697,16 @@ final class HLSDownloader: NSObject {
     }
 
     private static func cancelTasks(id: String) {
-        for (identifier, key) in Array(taskKeys) where key.hasPrefix(id + "#") {
+        let prefix = id + "#"
+        for (identifier, key) in Array(taskKeys) where key.hasPrefix(prefix) {
             tasks[identifier]?.cancel()
             tasks.removeValue(forKey: identifier)
             taskKeys.removeValue(forKey: identifier)
             inFlight.remove(key)
+        }
+        /* 暂停/删除时把还没到点的重试票一并作废，旧定时器醒来会发现票号对不上。 */
+        for key in Array(retryScheduled.keys) where key.hasPrefix(prefix) {
+            retryScheduled.removeValue(forKey: key)
         }
     }
 

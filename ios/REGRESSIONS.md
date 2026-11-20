@@ -983,17 +983,30 @@ testToolbarDownloadButtonReplacesTheDanmakuSlot → missing-button
   - 中断恢复：任务状态、分片清单、已下分片（缓存目录）都持久化；暂停只停任务、删除才清缓存；
     重启后接着下，不从 0 重来；用户暂停/删除造成的取消不算分片失败，也不消耗重试次数。
   - DRM：SAMPLE-AES 等非 AES-128 线路明确失败并给出原因。
+  - **复审补强（第一轮审核打回的三处，同一轮修完）**：
+    - 分片失败改成挂一张「专属重试票」：有票期间 `pump` 不再抢跑；定时器要核对票号
+      （`retryScheduled[key] == ticket`）才允许动手，被新一轮重试、暂停或删除顶掉的旧票直接作废；
+      仍然是初次 + 最多 3 次重试；暂停/删除时把还没到点的票一并清掉。
+    - 接管系统交回的后台任务前先核对持久记录（任务还在、阶段是 segments、分片下标有效、该片还没下完、没被暂停），
+      对不上的直接 `cancel()`，不进内存；晚到的完成回调如果任务已删/已暂停/该片已完成就直接丢弃，
+      不写缓存、不改进度，删掉的任务不会因为晚回调复活。
+    - `EXT-X-BYTERANGE`：长度必须大于 0、给了偏移就必须非负、偏移 + 长度用 `addingReportingOverflow` 防溢出；
+      省略偏移时按「解析后的完整资源地址（含 query）」续算上一段结束位置，不再拿原始 URI 字符串当 key。
 - **测试名**（Node）：HLS 主清单：按带宽挑最高的一路，带宽相同看分辨率、HLS 相对地址和查询串：分片不带 query 时继承清单自己的 query、
   HLS 加密与初始化段：只认 AES-128，IV 缺省按媒体序号补、HLS 下载器：分片走后台会话，并发 4、每片重试 3 次、
   HLS 分片进度：按已完成的分片折算，长剧集不会提前跳到 100%、HLS 合成：解密用 CommonCrypto，按分片顺序写进下载目录、
   HLS 边界：DRM 线路明确拒绝，暂停/删除/重启都不从头再下、整文件下载不再拒绝 HLS，并且接到分片下载器、
   网页侧把 HLS 线路交给原生，并带上 Referer、AppDelegate 接住 HLS 那条后台会话、
   夹具清单结构自检：主清单三类码率、AES-128、EXT-X-MAP、纯 TS、
-  download sends HLS playlists to native as hls and still refuses blob streams
+  download sends HLS playlists to native as hls and still refuses blob streams、
+  HLS 重试票：失败分片只由自己的定时器拉起，pump 不抢跑、旧票作废、
+  HLS 接管后台任务与晚到回调：先核对持久记录，删掉/完成/暂停的分片一律丢弃、
+  HLS BYTERANGE 契约：长度>0、偏移非负、加法防溢出、按完整资源地址续算、
+  BYTERANGE 夹具：同一资源省略偏移接着数，换 query 当成另一份资源
 - **修复版本**：0.1.19（build 25）
 - **验证边界**：**真实线路未验证**。站点 `/` 与 `/api/play` 需要访问口令，手上没有凭据，
   「两部不同来源的剧各下一集 + ffprobe 核对」这一条没有做，也不拿回环源冒充。Windows 本机没有 Xcode，
-  新增的 Swift 文件没有本地编译；Node 用例只钉源码守卫与夹具结构。**真机**待办：真实 HLS 的清单解析、AES 解密、
+  新增的 Swift 文件没有本地编译；Node 用例（本轮 104/104）只钉源码守卫与夹具结构，不是 Swift 行为测试。**真机**待办：真实 HLS 的清单解析、AES 解密、
   fMP4/TS 合成、切后台续下、完成后播放。
   **已知限制**：纯 TS 合成出来的 `.ts` 系统播放器打不开（AVFoundation 不支持 MPEG-TS），App 内会提示改用「用其他播放器打开」；
   fMP4 合成的 `.mp4` 可以 App 内直接播。

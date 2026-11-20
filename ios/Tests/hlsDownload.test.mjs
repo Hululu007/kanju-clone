@@ -133,3 +133,50 @@ test('夹具清单结构自检：主清单三类码率、AES-128、EXT-X-MAP、�
   assert.equal(ts.split('#EXTINF:').length - 1, 3);
   assert.ok(!ts.includes('#EXT-X-KEY:'), '纯 TS 夹具不加密');
 });
+test('HLS 重试票：失败分片只由自己的定时器拉起，pump 不抢跑、旧票作废', () => {
+  assert.ok(downloader.includes('private static var retryScheduled: [String: Int] = [:]'));
+  assert.ok(downloader.includes('private static var retryTicket = 0'));
+  const pump = section(downloader, 'private static func pump', 'private static func startSegment');
+  assert.ok(pump.includes('retryScheduled[key] != nil'), '有重试票的分片，pump 必须跳过');
+  const retry = section(downloader, 'private static func retry', 'private static func finish');
+  assert.ok(retry.includes('retryScheduled[key] = ticket'), '重试要先挂票');
+  assert.ok(retry.includes('guard retryScheduled[key] == ticket else { return }'), '票号对不上的旧定时器不能动手');
+  assert.ok(retry.includes('retryScheduled.removeValue(forKey: key)'), '到点先摘票再拉起');
+  assert.ok(retry.includes('guard attempts <= maxSegmentRetries'), '仍然最多初次 + 3 次重试');
+  const start = section(downloader, 'private static func startSegment', 'private static func retry');
+  assert.ok(start.includes('retryScheduled.removeValue(forKey: key)'), '分片真起来了要把旧票作废');
+  const cancel = section(downloader, 'private static func cancelTasks', '// MARK: - 小工具');
+  assert.ok(cancel.includes('retryScheduled.removeValue(forKey: key)'), '暂停/删除要让还没到点的重试票失效');
+});
+
+test('HLS 接管后台任务与晚到回调：先核对持久记录，删掉/完成/暂停的分片一律丢弃', () => {
+  const adopt = section(downloader, 'static func adoptBackgroundEvents', '// MARK: - 会话');
+  assert.ok(adopt.includes('job.phase == "segments"'));
+  assert.ok(adopt.includes('split.index < job.segments.count'));
+  assert.ok(adopt.includes('!job.segments[split.index].done'));
+  assert.ok(adopt.includes('!paused.contains(split.id)'));
+  assert.ok(adopt.includes('task.cancel()'), '核对不上的系统任务要取消');
+  const finish = section(downloader, 'private static func finish', '/// 进度按');
+  assert.ok(finish.includes('guard !paused.contains(id), !job.segments[index].done else { return }'), '晚到回调不能给已完成/已停用的分片写缓存或进度');
+});
+
+test('HLS BYTERANGE 契约：长度>0、偏移非负、加法防溢出、按完整资源地址续算', () => {
+  const body = section(parser, 'static func parseByteRange', 'static func parseKey');
+  assert.ok(body.includes('length > 0'), '长度必须大于 0');
+  assert.ok(body.includes('offset >= 0'), '偏移必须非负');
+  assert.ok(body.includes('parts.count <= 2'));
+  const parse = section(parser, 'static func parse(', '/// 属性串');
+  assert.ok(parse.includes('let resource = url.absoluteString'), '续算 key 用解析后的完整资源地址');
+  assert.ok(parse.includes('rangeCursor[resource]'), '游标按资源身份存');
+  assert.ok(!parse.includes('rangeEnd[line]'), '不能拿原始 URI 字符串当 key');
+  const helper = section(parser, 'static func rangeEnd', 'static func parseKey');
+  assert.ok(helper.includes('addingReportingOverflow'), '偏移 + 长度要防溢出');
+});
+
+test('BYTERANGE 夹具：同一资源省略偏移接着数，换 query 当成另一份资源', async () => {
+  const raw = await readFile(new URL('./Fixtures/hls/media-byterange.m3u8', import.meta.url), 'utf8');
+  assert.equal(raw.split('#EXT-X-BYTERANGE:2048').length - 1, 2, '一条写明偏移、一条省略偏移');
+  assert.equal(raw.split('media.ts?token=abc').length - 1, 2, '同一资源连续两段');
+  assert.ok(raw.includes('media.ts?token=xyz'), '要有一条换 query 的分片');
+  assert.ok(raw.includes('#EXT-X-ENDLIST'));
+});
