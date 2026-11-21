@@ -1227,3 +1227,32 @@ testToolbarDownloadButtonReplacesTheDanmakuSlot → missing-button
   一一配对，**不再设任何超时兜底**（上一版的 14 秒硬上限已删除）。若系统始终不调 `urlSessionDidFinishEvents`，
   回调会一直挂着，最终由系统终止 App —— 这是 iOS 已定义的边界；App 内部没有办法更早、更安全地自证
   「事件已送完」，不做超出平台契约的承诺。
+
+## REG-033 原生「我的下载」：断网也能按剧看全库、离线播放、长按分享单集（build 29）
+
+- **需求（Ken）**：设置面板最上方要一个**原生**离线「我的下载」入口；飞行模式下不加载远端网页也能按剧看全库、
+  离线播放，并把已完成的单个文件分享给其他 App；一级按剧分组（集数 + 占用）、二级按集；只左滑删除，
+  一级删整剧、二级删单集；下载中的集置顶并显示进度。
+- **改动文件**：
+  - `ios/ZhuijuAI/DownloadLibraryViewController.swift`（新增）：一级按剧列表 + 二级集列表 + 长按分享 + 左滑删除 + 底部真实占用/剩余空间；
+  - `ios/ZhuijuAI/WebViewController.swift`：新增 `myDownloads` 原生动作、`presentDownloadLibrary()`、断网页的离线入口按钮，
+    并在转发下载事件的同时广播 `downloadLibraryDidChange`（`eventSink` 仍归网页独占，没有第二个静态回调）；
+  - `ios/ZhuijuAI/AppBootstrap.js`：设置面板**最上方**新增「下载 → 我的下载」一行，点击关闭面板后交给原生；
+  - `ios/project.yml`、`.github/workflows/ios-ipa-only.yml`：build 28→29 与出包断言同步。
+- **数据源**：只有一份 —— `MediaDownloader.snapshotForPage()`。没有第二份持久化，也没改下载文件命名 / 目录 / 后台引擎。
+  快照没有封面与总集数，所以界面用占位封面、集数只按真实已完成的集算；占用按磁盘枚举（记录里的 `size` 只是字段），
+  剩余空间取系统 `volumeAvailableCapacityForImportantUsage`。
+- **删除语义**：复用 `removeDownloadedFile(at:)`（安全路径解析、只删下载目录直接子项、目录与越界一律拒绝、
+  文件本来不在算成功）与 `deleteEpisode(id:showId:epKey:)`（取消任务、丢 HLS 缓存、写墓碑、pump）。
+  顺序是「停同文件播放 → 删文件成功 → 删记录」；文件删不掉时记录保留并弹提示。整剧删除按集循环，
+  部分失败只保留失败的那几集并如实告知删掉了几集，不假装整剧原子删除。
+- **分享语义**：只分享磁盘上这一个已完成文件（解析后必须落在 `Documents/Downloads` 直接子项、是普通文件、
+  扩展名属于 mp4/m4v/mov/mkv/ts）；iPad 有 popover 锚点；缺文件 / 格式不支持 / 删除失败都用原生 alert 明确反馈。
+  不复用旧的 `UIDocumentInteractionController`（那是旧「打开方式」入口），也不复用 `presentLocalFile`（它缺严格校验）。
+- **验证（本条为功能交付，Ken 指定免新增/运行测试）**：
+  - 本地 Node 源码守卫与夹具：`python C:\Users\kenzh\hark_tasks\memcap.py 2048 node --test ios/Tests/*.test.mjs Tests/*.test.mjs`
+    → **139/139 通过**，未触发 memcap；旧测试未删、未跳、未改断言。
+  - Swift 在 Windows 上编不了，编译由 packaging-only 工作流（`ios-ipa-only.yml`，Release、无签名）验证。
+  - **真机待验收**（装 build 29 后核对）：①飞行模式下从报错页进「我的下载」能按剧看到全库；②点已完成集能离线播放；
+    ③长按「分享本地文件」把这个文件分享到其他 App，iPad 位置正确；④一级左滑删整剧、二级左滑删单集都能真删掉文件，
+    队列继续走、被删的集不复活；⑤底部占用与系统设置里的 App 占用基本一致。

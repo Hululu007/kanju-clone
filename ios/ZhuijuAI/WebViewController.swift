@@ -52,6 +52,8 @@ final class WebViewController: UIViewController, UIDocumentInteractionController
         case deleteLocal
         /// 站点播放器进入 / 退出全屏：只切屏幕方向（全屏横屏、退出竖屏），不碰页面几何。
         case playerFullscreen
+        /// 设置面板最上方「我的下载」：打开原生离线片库（不加载网页也能用）。
+        case myDownloads
     }
 
     /// 系统分享面板里的链接项：声明成标准 URL（`public.url`）并带上链接元数据，
@@ -117,6 +119,8 @@ final class WebViewController: UIViewController, UIDocumentInteractionController
                 target?.deleteDownloadedEpisode(body)
             case PlayerAction.deleteLocal.rawValue:
                 target?.deleteLocalFile(path: body["path"] as? String)
+            case PlayerAction.myDownloads.rawValue:
+                target?.presentDownloadLibrary()
             case PlayerAction.playerFullscreen.rawValue:
                 target?.setPlayerFullscreen(body["on"] as? Bool ?? false)
             default:
@@ -130,6 +134,8 @@ final class WebViewController: UIViewController, UIDocumentInteractionController
     private let errorContainer = UIView()
     private let errorLabel = UILabel()
     private let retryButton = UIButton(type: .system)
+    /// 断网/页面加载失败时的离线入口：不用等网页，直接进原生片库。
+    private let offlineLibraryButton = UIButton(type: .system)
     private var progressObservation: NSKeyValueObservation?
     private let downloader = MediaDownloader.shared
     private var lastFailedURL: URL?
@@ -224,6 +230,10 @@ final class WebViewController: UIViewController, UIDocumentInteractionController
                 if let name = event["event"] as? String, name != "progress" { finished = true }
             }
             if finished { self.sendDownloadSnapshot() }
+            /* 原生片库和网页用的是同一批事件：这里只广播，不抢 eventSink。 */
+            DispatchQueue.main.async {
+                NotificationCenter.default.post(name: .downloadLibraryDidChange, object: nil)
+            }
         }
         /* 从后台回来时把后台会话的最新进度/终态补到网页上：
            切出去下载时网页是挂起的，收不到 delegate 回调。 */
@@ -634,6 +644,29 @@ final class WebViewController: UIViewController, UIDocumentInteractionController
         sendDeleteResult(ok: true, id: taskId, showId: showId, epKey: epKey, reason: "", record: nil)
     }
 
+    /// 原生「我的下载」：设置面板最上方的入口和断网页的入口都走这里。
+    /// 片库不读网页状态，飞行模式下也能按剧看全库、离线播放、分享单集。
+    fileprivate func presentDownloadLibrary() {
+        let library = DownloadLibraryViewController(downloader: downloader)
+        /* 播放和停播仍交给本类：它已经管着离线播放器的生命周期（同一集删之前先停播）。 */
+        library.onPlay = { [weak self] path in
+            self?.presentLocalPlayback(path: path)
+        }
+        library.onStopPlayback = { [weak self] path in
+            self?.stopLibraryPlayback(path: path)
+        }
+        let navigation = UINavigationController(rootViewController: library)
+        navigation.modalPresentationStyle = .fullScreen
+        navigation.overrideUserInterfaceStyle = .dark
+        (presentedViewController ?? self).present(navigation, animated: true)
+    }
+
+    /// 片库删文件前停播：只处理路径真的指向同一个文件的情况。
+    fileprivate func stopLibraryPlayback(path: String?) {
+        guard let fileURL = MediaDownloader.fileURL(forStoredPath: path) else { return }
+        stopLocalPlayback(of: fileURL)
+    }
+
     /// 停掉正在播的这个离线文件：只处理同一个文件，别的播放页面不动。
     private func stopLocalPlayback(of fileURL: URL) {
         guard let controller = localPlayerController, let playing = localPlayerFileURL else { return }
@@ -795,8 +828,14 @@ final class WebViewController: UIViewController, UIDocumentInteractionController
         retryButton.addTarget(self, action: #selector(retry), for: .touchUpInside)
         retryButton.translatesAutoresizingMaskIntoConstraints = false
 
+        offlineLibraryButton.setTitle("我的下载（离线可用）", for: .normal)
+        offlineLibraryButton.titleLabel?.font = .preferredFont(forTextStyle: .subheadline)
+        offlineLibraryButton.addTarget(self, action: #selector(openOfflineLibrary), for: .touchUpInside)
+        offlineLibraryButton.translatesAutoresizingMaskIntoConstraints = false
+
         errorContainer.addSubview(errorLabel)
         errorContainer.addSubview(retryButton)
+        errorContainer.addSubview(offlineLibraryButton)
         view.addSubview(errorContainer)
         NSLayoutConstraint.activate([
             errorContainer.leadingAnchor.constraint(equalTo: view.leadingAnchor),
@@ -809,6 +848,8 @@ final class WebViewController: UIViewController, UIDocumentInteractionController
             errorLabel.trailingAnchor.constraint(lessThanOrEqualTo: errorContainer.trailingAnchor, constant: -32),
             retryButton.centerXAnchor.constraint(equalTo: errorContainer.centerXAnchor),
             retryButton.topAnchor.constraint(equalTo: errorLabel.bottomAnchor, constant: 20),
+            offlineLibraryButton.centerXAnchor.constraint(equalTo: errorContainer.centerXAnchor),
+            offlineLibraryButton.topAnchor.constraint(equalTo: retryButton.bottomAnchor, constant: 12),
         ])
     }
 
@@ -830,6 +871,11 @@ final class WebViewController: UIViewController, UIDocumentInteractionController
         let url = lastFailedURL ?? webView.url ?? Site.home
         errorContainer.isHidden = true
         webView.load(URLRequest(url: url))
+    }
+
+    /// 页面加载不出来（飞行模式）时也能进「我的下载」：这条入口完全走原生。
+    @objc private func openOfflineLibrary() {
+        presentDownloadLibrary()
     }
 
     private func showError(_ error: Error) {
