@@ -652,6 +652,8 @@ final class MediaDownloader: NSObject {
                 }
                 guard let http = http else { return }
                 if http.statusCode == 404 || http.statusCode == 410 {
+                    /* 已删光的剧不再记「无图」：那条名单是按剧记的，留着会影响以后重新下载同一部剧时的补图。 */
+                    guard hasLiveRecord(showId: showId, title: title) else { return }
                     markCoverMissing(showId: showId, title: title)
                     return
                 }
