@@ -493,7 +493,10 @@ final class MediaDownloader: NSObject {
         guard !name.isEmpty, name != ".", name != ".." else { return nil }
         guard let directory = coverDirectory() else { return nil }
         let root = directory.standardizedFileURL.resolvingSymlinksInPath()
-        let target = directory.appendingPathComponent(name).standardizedFileURL.resolvingSymlinksInPath()
+        /* 只解析「目录」这一段：容器路径本身可能是符号链接（/var → /private/var）。
+           文件名这一段**不解析**：解析了就等于顺着一根链接走——`cover-A.img` 指向 `cover-B.img` 时
+           目标会变成 B，删 A 就是删 B、写 A 就是覆盖 B。 */
+        let target = root.appendingPathComponent(name).standardizedFileURL
         let rootComponents = root.pathComponents
         let targetComponents = target.pathComponents
         guard targetComponents.count == rootComponents.count + 1,
@@ -502,7 +505,7 @@ final class MediaDownloader: NSObject {
             return nil
         }
         /* 层级对还不够：目标若是目录（或符号链接解出来的目录），后面 removeItem 会把整棵子树删掉。
-           第一次落盘时文件还不存在是正常的，所以「不存在」放行，「存在但不是普通文件」拒绝。 */
+           第一次落盘时文件还不存在是正常的，所以「不存在」放行，其余（目录、别名、特殊类型）一律拒绝。 */
         guard isRegularFileOrMissing(target) else {
             NSLog("refuse non-regular cover target: %@", raw ?? "")
             return nil
@@ -510,9 +513,14 @@ final class MediaDownloader: NSObject {
         return target
     }
 
-    /// 封面目录里只认普通文件。目录、别名、其它特殊类型一律不认；目标不存在按「尚未落盘」放行。
+    /// 封面目录里只认普通文件。目录、别名（符号链接）、其它特殊类型一律不认；目标不存在按「尚未落盘」放行。
+    /// 关键：先认链接再判类型。`attributesOfItem` 在某些路径上会跟随链接，所以先用
+    /// `destinationOfSymbolicLink` 认一下——它只对链接本体成功，悬空链接也算，不会漏。
     private static func isRegularFileOrMissing(_ url: URL) -> Bool {
         let manager = FileManager.default
+        if (try? manager.destinationOfSymbolicLink(atPath: url.path)) != nil {
+            return false
+        }
         var isDirectory: ObjCBool = false
         guard manager.fileExists(atPath: url.path, isDirectory: &isDirectory) else { return true }
         guard !isDirectory.boolValue else { return false }

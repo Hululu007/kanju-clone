@@ -102,6 +102,9 @@ final class OfflinePlayerViewController: UIViewController {
     private var hideTimer: Timer?
     private var saveTimer: Timer?
     private var isFullscreen = false
+    /// 每次全屏状态改变都 +1。延时解锁只在「自己那一代还是当前代」时才生效，
+    /// 免得上一次退出排的队把新一次全屏（或新一次退出的锁）提前解开。
+    private var fullscreenGeneration = 0
     private var isScrubbing = false
     private var didSeekForResume = false
     private var videoMode: VideoMode = .fit
@@ -179,23 +182,31 @@ final class OfflinePlayerViewController: UIViewController {
     /// 非全屏时只做一件事：设备真的回到竖屏了才放开自动旋转，
     /// 否则手还横着会立刻又被判成「横拿」再进一次全屏。
     @objc private func deviceOrientationChanged() {
-        let orientation = UIDevice.current.orientation
-        let portrait = orientation == .portrait || orientation == .portraitUpsideDown
+        let portrait = isDevicePortrait
         if isFullscreen {
             guard portrait else { return }
             /* 标 explicit：让外层按「主动退出全屏」处理（先锁竖屏、再请求竖屏几何），
-               否则全屏横屏掩码下界面会停在「非全屏但仍是横屏」的中间态。 */
+               否则全屏横屏掩码下界面会停在「非全屏但仍是横屏」的中间态。
+               解锁由 setFullscreen 统一安排，这里不再单独补一次。 */
             setFullscreen(false, explicit: true)
-            /* 设备本来就是竖持，不会再有一次方向变更来触发解锁；
-               等旋转落定后补一次，把自动旋转还回去，否则以后横拿不会再进全屏。 */
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-                guard let self = self, !self.isFullscreen else { return }
-                self.owner?.unlockOfflineRotation()
-            }
             return
         }
         guard WebViewController.offlineRotationLocked, portrait else { return }
         owner?.unlockOfflineRotation()
+    }
+
+    /// 设备是不是真的竖持。姿态未知（平放、未开始上报）时退回界面几何判断：
+    /// 界面已经是竖的就不会立刻又被判成横拿，此时放开自动旋转是安全的。
+    private var isDevicePortrait: Bool {
+        switch UIDevice.current.orientation {
+        case .portrait, .portraitUpsideDown:
+            return true
+        case .landscapeLeft, .landscapeRight:
+            return false
+        default:
+            let size = view.bounds.size
+            return size.height >= size.width
+        }
     }
 
     // MARK: - 布局
@@ -723,6 +734,7 @@ final class OfflinePlayerViewController: UIViewController {
     private func setFullscreen(_ on: Bool, explicit: Bool = false) {
         guard isFullscreen != on else { return }
         isFullscreen = on
+        fullscreenGeneration += 1
         let symbol = on ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right"
         let configuration = UIImage.SymbolConfiguration(pointSize: 16, weight: .semibold)
         fullscreenButton.setImage(UIImage(systemName: symbol, withConfiguration: configuration), for: .normal)
@@ -731,6 +743,22 @@ final class OfflinePlayerViewController: UIViewController {
         onFullscreenChange?(on, explicit)
         setControlsHidden(false)
         startTimers()
+        if !on && explicit { scheduleRotationUnlock() }
+    }
+
+    /// 主动退出全屏（按钮、返回键、姿态通知都走 setFullscreen）：外层会把界面锁成竖屏，
+    /// 而设备本来就竖持时系统不会再发一次方向变更，只靠方向通知解锁就会永远解不开——
+    /// 之后再横拿也不会自动进全屏。所以退出这一处统一补一次解锁，并看一眼当前姿态。
+    private func scheduleRotationUnlock() {
+        let generation = fullscreenGeneration
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            guard let self = self else { return }
+            /* 这半秒里又进出过全屏，这次回调就作废，别去解别人上的锁。 */
+            guard self.fullscreenGeneration == generation, !self.isFullscreen else { return }
+            /* 手还横着就不解：解开会立刻又被判成「横拿」弹回全屏。 */
+            guard self.isDevicePortrait else { return }
+            self.owner?.unlockOfflineRotation()
+        }
     }
 
     /// 旋转由系统发起（系统未锁方向、手机横拿）：横过来就当全屏，转回竖屏就退出全屏。
