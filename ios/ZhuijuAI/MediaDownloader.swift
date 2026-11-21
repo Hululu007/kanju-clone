@@ -369,6 +369,29 @@ final class MediaDownloader: NSObject {
         Self.enqueue(requests)
     }
 
+    /// 删一集时要用的**当前**落盘路径：确认框打开的那几秒里下载可能刚好完成，
+    /// 界面手里的快照路径已经过时（还是空串），拿它去删等于什么都没删。
+    /// 找不到记录时返回空串（没什么可删的）。
+    func currentStoredPath(id: String?, showId: String, epKey: String) -> String {
+        Self.currentStoredPath(id: id, showId: showId, epKey: epKey)
+    }
+
+    private static func currentStoredPath(id: String?, showId: String, epKey: String) -> String {
+        let wantedId = (id ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let list = loadRecords()
+        var hit: Record?
+        if !wantedId.isEmpty {
+            /* 同 id 只会有一条，但后写的更可信。 */
+            for record in list where record.id == wantedId { hit = record }
+        }
+        if hit == nil && !showId.isEmpty && !epKey.isEmpty {
+            for record in list where (record.showId ?? "") == showId && (record.epKey ?? "") == epKey {
+                hit = record
+            }
+        }
+        return (hit?.path ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     /// 左滑删除一集：取消任务、把这一集写进独立墓碑存储（不再进快照）、通知网页刷新。
     /// 本地文件由调用方先用 removeDownloadedFile 删掉；文件删不掉就不该走到这里。
     func deleteEpisode(id: String?, showId: String, epKey: String) {
@@ -983,9 +1006,23 @@ final class MediaDownloader: NSObject {
         let now = Date().timeIntervalSince1970
         if !force && now - lastPersistAt < 1 { return }
         lastPersistAt = now
-        /* 队列里可能有整部剧的集数：保留最近 400 条，够长又不会把 UserDefaults 撑爆。
-           真正的长期下载史在网页侧的片库里。 */
-        let trimmed = Array(records.suffix(400))
+        /* 已经下完、文件还在的记录一律留着：它们就是「我的下载」片库本身，
+           按条数裁掉就成了「下载完成了却看不到」。
+           其余记录（失败 / 取消 / 还没有落盘路径的中间态）只留最近 400 条，
+           够长又不会把 UserDefaults 撑爆。 */
+        var done: [Record] = []
+        var others: [Record] = []
+        for record in records {
+            if record.status == "done" && !record.path.isEmpty {
+                done.append(record)
+            } else {
+                others.append(record)
+            }
+        }
+        /* 极端兜底：2000 条已完成记录已远超正常用量，最旧的裁掉，别把默认值存储撑爆。
+           真正的上限是磁盘——文件被删或不见了，记录也就不该再留着。 */
+        if done.count > 2000 { done = Array(done.suffix(2000)) }
+        let trimmed = done + Array(others.suffix(400))
         if let data = try? JSONEncoder().encode(trimmed) {
             UserDefaults.standard.set(data, forKey: tasksKey)
         }
@@ -1121,7 +1158,11 @@ final class MediaDownloader: NSObject {
     // MARK: - 收尾
 
     private static func complete(id: String, payload: [String: Any]) {
-        if let current = record(id), Self.isDeleted(current) { return }
+        if let current = record(id), Self.isDeleted(current) {
+            /* 用户删这一集的时候它刚好下完：记录已经被墓碑作废，刚落盘的文件不能留成孤儿。 */
+            Self.removeDownloadedFile(at: Self.relativePath(for: payload["path"] as? String))
+            return
+        }
         update(id) { record in
             record.status = "done"
             /* 只存相对路径：真机换一次容器，旧绝对路径就不存在了（删除会永远失败）。 */

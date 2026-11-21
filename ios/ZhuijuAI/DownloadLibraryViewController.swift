@@ -65,6 +65,9 @@ struct DownloadLibraryItem {
 
     var isDone: Bool { status == "done" }
 
+    /// 磁盘上这一集的扩展名（还没落盘时是空串），用来判断 App 内能不能真的播。
+    var storedExtension: String { (path as NSString).pathExtension.lowercased() }
+
     /// 还在队列里（正在传 / 等空位 / 暂停）：这些排在已完成的前面。
     var isActive: Bool { status == "running" || status == "queued" || status == "paused" }
 
@@ -462,10 +465,18 @@ final class DownloadLibraryViewController: UITableViewController {
     /// 文件删不掉就返回 false，记录原样保留。
     @discardableResult
     private func deleteItem(_ item: DownloadLibraryItem) -> Bool {
-        if !item.path.isEmpty {
-            onStopPlayback?(item.path)
+        /* 确认框开着的那几秒里这一集可能刚好下完：路径按**最新记录**重取，
+           不用确认前的旧快照（旧快照里的空路径会被当成「文件已删」）。 */
+        let livePath = downloader.currentStoredPath(
+            id: item.id.isEmpty ? nil : item.id,
+            showId: item.showId,
+            epKey: item.epKey
+        )
+        let stopPath = livePath.isEmpty ? item.path : livePath
+        if !stopPath.isEmpty {
+            onStopPlayback?(stopPath)
         }
-        guard downloader.removeDownloadedFile(at: item.path) else { return false }
+        guard downloader.removeDownloadedFile(at: livePath) else { return false }
         downloader.deleteEpisode(
             id: item.id.isEmpty ? nil : item.id,
             showId: item.showId,
@@ -605,7 +616,7 @@ final class DownloadEpisodesViewController: UITableViewController {
         tableView.deselectRow(at: indexPath, animated: true)
         let item = items[indexPath.row]
         guard item.isDone else { return }
-        play(item)
+        play(item, at: indexPath)
     }
 
     /// 长按：已完成的集给出「播放」和「分享本地文件」两个动作。
@@ -619,13 +630,22 @@ final class DownloadEpisodesViewController: UITableViewController {
         guard item.isDone else { return nil }
         return UIContextMenuConfiguration(identifier: nil, previewProvider: nil) { [weak self] _ in
             guard let self = self else { return nil }
-            let play = UIAction(title: "播放", image: UIImage(systemName: "play.circle")) { _ in
-                self.play(item)
+            /* App 内播不了的容器（.ts / .mkv）长按第一项直接走「用其他应用打开」，不把用户带去黑屏。 */
+            let playable = Self.inAppPlayableExtensions.contains(item.storedExtension)
+            let primary = UIAction(
+                title: playable ? "播放" : "用其他应用打开",
+                image: UIImage(systemName: playable ? "play.circle" : "arrow.up.forward.app")
+            ) { _ in
+                if playable {
+                    self.play(item, at: indexPath)
+                } else {
+                    self.share(item, at: indexPath)
+                }
             }
             let share = UIAction(title: "分享本地文件", image: UIImage(systemName: "square.and.arrow.up")) { _ in
                 self.share(item, at: indexPath)
             }
-            return UIMenu(title: item.episodeTitle, children: [play, share])
+            return UIMenu(title: item.episodeTitle, children: [primary, share])
         }
     }
 
@@ -653,9 +673,18 @@ final class DownloadEpisodesViewController: UITableViewController {
 
     // MARK: - 动作
 
-    private func play(_ item: DownloadLibraryItem) {
+    /// App 内播放器真的能播起来的容器。
+    /// 分片合成的 .ts 和 .mkv 系统播放器打不开（打开就是黑屏 or 直接失败），这两类直接交给其他 App。
+    static let inAppPlayableExtensions: Set<String> = ["mp4", "m4v", "mov"]
+
+    private func play(_ item: DownloadLibraryItem, at indexPath: IndexPath? = nil) {
         guard let fileURL = resolvedFileURL(for: item) else {
             alert("这一集的文件已经不在了，请重新下载")
+            return
+        }
+        let path = livePath(for: item)
+        guard Self.inAppPlayableExtensions.contains(fileURL.pathExtension.lowercased()) else {
+            offerExternalOpen(for: fileURL, at: indexPath)
             return
         }
         guard let onPlay = onPlay else {
@@ -666,7 +695,7 @@ final class DownloadEpisodesViewController: UITableViewController {
             present(controller, animated: true) { player.play() }
             return
         }
-        onPlay(item.path)
+        onPlay(path)
     }
 
     private func share(_ item: DownloadLibraryItem, at indexPath: IndexPath) {
@@ -679,10 +708,31 @@ final class DownloadEpisodesViewController: UITableViewController {
             alert("这个格式不能分享，请用 App 内播放")
             return
         }
+        presentActivity(for: fileURL, at: indexPath)
+    }
+
+    /// App 内播不了的容器：说清楚原因，再交给系统「用其他应用打开」。
+    private func offerExternalOpen(for fileURL: URL, at indexPath: IndexPath?) {
+        let ext = fileURL.pathExtension.lowercased()
+        let detail = ext.isEmpty ? "这一集的容器格式 App 自带播放器打不开。" : "这一集是 ." + ext + " 容器，App 自带播放器打不开。"
+        let controller = UIAlertController(
+            title: "App 内播不了这个格式",
+            message: detail + "可以用「用其他应用打开」交给系统里的播放器。",
+            preferredStyle: .alert
+        )
+        controller.addAction(UIAlertAction(title: "取消", style: .cancel))
+        controller.addAction(UIAlertAction(title: "用其他应用打开", style: .default) { [weak self] _ in
+            self?.presentActivity(for: fileURL, at: indexPath)
+        })
+        present(controller, animated: true)
+    }
+
+    /// 系统的分享 / 打开方式面板；iPad 上有 popover 锚点，不会崩。
+    private func presentActivity(for fileURL: URL, at indexPath: IndexPath?) {
         let controller = UIActivityViewController(activityItems: [fileURL], applicationActivities: nil)
         if let popover = controller.popoverPresentationController {
             popover.sourceView = tableView
-            if let cell = tableView.cellForRow(at: indexPath) {
+            if let indexPath = indexPath, let cell = tableView.cellForRow(at: indexPath) {
                 popover.sourceRect = cell.frame
             } else {
                 popover.sourceRect = CGRect(
@@ -694,10 +744,12 @@ final class DownloadEpisodesViewController: UITableViewController {
     }
 
     private func delete(_ item: DownloadLibraryItem) {
-        if !item.path.isEmpty {
-            onStopPlayback?(item.path)
+        /* 确认框开着的那几秒里这一集可能刚好下完：路径按最新记录重取。 */
+        let livePath = livePath(for: item)
+        if !livePath.isEmpty {
+            onStopPlayback?(livePath)
         }
-        guard downloader.removeDownloadedFile(at: item.path) else {
+        guard downloader.removeDownloadedFile(at: livePath) else {
             alert("删除本地文件失败，这一集还留着")
             return
         }
@@ -710,10 +762,20 @@ final class DownloadEpisodesViewController: UITableViewController {
         if items.isEmpty { navigationController?.popViewController(animated: true) }
     }
 
-    /// 只认三种东西同时成立：记录已完成、路径解析落在下载目录、磁盘上真的是普通文件。
+    /// 记录里的路径可能已经过时（确认框 / 快照都可能是几秒前的）：播放、分享、删除前都按最新记录取一次。
+    private func livePath(for item: DownloadLibraryItem) -> String {
+        let current = downloader.currentStoredPath(
+            id: item.id.isEmpty ? nil : item.id,
+            showId: item.showId,
+            epKey: item.epKey
+        )
+        return current.isEmpty ? item.path : current
+    }
+
+    /// 只认三种东西同时成立：路径解析落在下载目录、磁盘上真的是普通文件、不是目录。
     private func resolvedFileURL(for item: DownloadLibraryItem) -> URL? {
-        guard item.isDone, !item.path.isEmpty,
-              let fileURL = MediaDownloader.fileURL(forStoredPath: item.path) else { return nil }
+        let path = livePath(for: item)
+        guard !path.isEmpty, let fileURL = MediaDownloader.fileURL(forStoredPath: path) else { return nil }
         guard let directory = MediaDownloader.directory() else { return nil }
         let root = directory.standardizedFileURL.resolvingSymlinksInPath()
         let target = fileURL.standardizedFileURL.resolvingSymlinksInPath()
