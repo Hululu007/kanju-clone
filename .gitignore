@@ -5,3 +5,6 @@ dist/
 __pycache__/
 *.pyc
 logs/
+cloud/web/.wrangler/
+worker/api/.wrangler/
+.testtmp/

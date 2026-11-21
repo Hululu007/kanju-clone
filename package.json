@@ -8,8 +8,11 @@
     "build": "vite build",
     "preview": "vite preview",
     "crawl": "node server/kanju-crawl.mjs",
+    "audit": "node server/kanju-audit.mjs",
+    "backfill:desc": "node server/backfill-desc.mjs",
     "export": "node server/kanju-export.mjs",
     "proxy": "node server/proxy.mjs",
+    "site": "node server/static.mjs",
     "deploy": "bash scripts/deploy.sh",
     "resolve": "node server/kanju-resolve.mjs"
   },

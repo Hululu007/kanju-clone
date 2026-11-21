@@ -1,0 +1,35 @@
+# zhuiju-web —— kanju-clone 前端静态站点 + 密码门
+#
+# 构建（仓库根目录，不设 DEPLOY_SUBDIR => base = "/"）：
+#   VITE_PROXY_BASE=https://zhuiju.dpdns.org npx vite build
+# 部署（本目录）：
+#   npx wrangler deploy
+#
+# secrets（不要写进本文件）：
+#   SITE_PASSWORD  访问密码
+#   COOKIE_SECRET  HMAC 签名密钥
+name = "zhuiju-web"
+main = "src/index.js"
+compatibility_date = "2026-11-01"
+workers_dev = true
+
+[assets]
+directory = "../../dist"
+binding = "ASSETS"
+# 所有请求先过 Worker 做鉴权，再决定放行静态资源 / 转发 API
+run_worker_first = true
+# 多页站点：/playlists/ 这类目录请求回落到目录下的 index.html
+html_handling = "auto-trailing-slash"
+# 未命中的路径返回 404，避免 SPA 式回落
+not_found_handling = "404-page"
+
+# 静态资源由本 Worker 托管，接口走 service binding 直连 API Worker
+# （不经过公网，也不需要在 Zone 上加 /api/* Route）
+[[services]]
+binding = "API"
+service = "kanju-api"
+
+# 登录失败计数（同 IP 连续错 10 次锁 15 分钟）
+[[kv_namespaces]]
+binding = "RL"
+id = "a723ccfd247a4e1795ace9a3ccfa8959"

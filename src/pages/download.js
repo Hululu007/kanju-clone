@@ -82,7 +82,7 @@ const CARDS = [
       ['monitor', 'Android 6+'],
       ['download', 'APK'],
     ],
-    cta: '下载看剧AI-TV',
+    cta: '下载阿噗影视-TV',
     body: `<div class="dl-body"><p>适用于 安卓系统的电视或盒子，推荐使用野草助手安装。打开TV后点击网页或者app 输入配对码成功登录一次后即可使用。</p></div>`,
   },
   {
@@ -102,10 +102,10 @@ const CARDS = [
 ]
 
 const body = `<section class="page-body p-dl-body"><div class="wrap page p-download">
-  <section class="dl-section" aria-label="看剧AI应用下载">
+  <section class="dl-section" aria-label="阿噗影视应用下载">
     <div class="dl-hero">
-      <p class="dl-kicker"><span class="sec-ico">${icon('download', 14)}</span>看剧AI</p>
-      <h1 class="dl-main-title">看剧AI应用下载</h1>
+      <p class="dl-kicker"><span class="sec-ico">${icon('download', 14)}</span>阿噗影视</p>
+      <h1 class="dl-main-title">阿噗影视应用下载</h1>
     </div>
     <div class="dl-grid">
       ${CARDS.map(

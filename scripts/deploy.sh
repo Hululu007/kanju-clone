@@ -9,9 +9,9 @@ NAME="${REPO%%/*}"
 
 cd "$(dirname "$0")/.."
 
-SUB_PATH="/${REPO##*/}/"
-echo "==> 构建（base=$SUB_PATH）"
-BASE_PATH="$SUB_PATH" npx vite build
+SUBDIR="${REPO##*/}"
+echo "==> 构建（base=/$SUBDIR/）"
+DEPLOY_SUBDIR="$SUBDIR" npx vite build
 
 echo "==> 发布 dist/ 到 gh-pages"
 TMP="$(mktemp -d)"
@@ -22,6 +22,8 @@ cd "$TMP"
 git init -q
 git config user.name "$NAME"
 git config user.email "$NAME@users.noreply.github.com"
+git config core.autocrlf false
+git config core.safecrlf false
 git checkout -q -b gh-pages
 git add -A
 git commit -q -m "deploy: $(date '+%Y-%m-%d %H:%M:%S')"

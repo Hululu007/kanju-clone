@@ -1,0 +1,8 @@
+name = "kanju-probe"
+main = "src/probe.js"
+compatibility_date = "2025-06-01"
+workers_dev = true
+
+# 可行性探测：不绑定 D1，只验证 Cloudflare 出口能否解析到可播 m3u8
+# 部署： npx wrangler deploy -c wrangler.probe.toml
+# 密钥： npx wrangler secret put KANJU_SECRET -c wrangler.probe.toml

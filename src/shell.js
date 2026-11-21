@@ -1,5 +1,12 @@
 import { icon } from './icons.js'
 import { u } from './base.js'
+import {
+  fetchUserProgress,
+  getCachedUser,
+  loginAccount,
+  logoutAccount,
+  registerAccount,
+} from './auth.js'
 
 const NAV = [
   { label: '首页', href: u('/') },
@@ -27,6 +34,9 @@ const AVATAR_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="96" height="9
 <rect width="96" height="96" fill="url(#f)"/>
 </svg>`
 
+const esc = (value) =>
+  String(value ?? '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char])
+
 export function avatarHTML(cls = 'avatar') {
   return `<img class="${cls}" src="data:image/svg+xml;charset=utf-8,${encodeURIComponent(
     AVATAR_SVG
@@ -34,15 +44,28 @@ export function avatarHTML(cls = 'avatar') {
 }
 
 export function sidebarInner(active = 'history') {
+  const user = getCachedUser()
   return `
   <div class="sb-profile">
     ${avatarHTML()}
     <div class="sb-id">
-      <p class="sb-name">朝露旅行者3394</p>
-      <p class="sb-sub">本设备使用中 · 游客账号</p>
+      <p class="sb-name">${user ? esc(user.username) : '游客账号'}</p>
+      <p class="sb-sub">${user ? '已登录 · 观看记录跨设备同步' : '本设备使用中 · 游客账号'}</p>
     </div>
-    <button class="icon-btn" type="button" data-action="theme" aria-label="切换主题" title="切换主题">${icon('moon', 16)}</button>
     <button class="icon-btn" type="button" data-action="settings" aria-label="设置" title="设置">${icon('settings', 16)}</button>
+  </div>
+
+  <div class="theme-switch" role="group" aria-label="主题" data-theme-switch>
+    ${[
+      ['dark', 'moon', '深色', '深色主题'],
+      ['light', 'sun', '白色', '白色主题'],
+      ['auto', 'monitor', '自动', '跟随系统'],
+    ]
+      .map(([value, ico, label, title]) => {
+        const on = (document.documentElement.dataset.themeMode || 'dark') === value
+        return `<button type="button" data-theme-set="${value}" title="${title}" class="${on ? 'on' : ''}" aria-pressed="${on}">${icon(ico, 14)}<span>${label}</span></button>`
+      })
+      .join('')}
   </div>
 
   <section class="acct">
@@ -50,7 +73,7 @@ export function sidebarInner(active = 'history') {
       <span class="acct-coin" aria-hidden="true">
         <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"><path d="M12 3l4 4-4 4-4-4z"/><path d="M8 7h8"/><path d="M12 11v10"/><path d="M9 21h6"/></svg>
       </span>
-      <p class="acct-name">游客账号</p>
+      <p class="acct-name">${user ? esc(user.username) : '游客账号'}</p>
       <span class="bar"><i style="width:0%"></i></span>
       <span class="acct-pct">0%</span>
       <button class="acct-help" type="button" data-action="notice" aria-label="账号说明">?</button>
@@ -63,7 +86,7 @@ export function sidebarInner(active = 'history') {
 
   <p class="sb-warning">
     <span class="warn-ico">${icon('info', 14)}</span>
-    <span>游客账号数据会因为浏览器和域名变更造成丢失，请及时注册账号。</span>
+    <span>${user ? '观看记录和断点进度已绑定到账号，换设备登录即可继续观看。' : '游客数据会因为浏览器和域名变更造成丢失，请及时注册账号。'}</span>
   </p>
 
   <div class="sb-quick">
@@ -99,8 +122,8 @@ export function sidebarInner(active = 'history') {
   </div>
 
   <div class="sb-bottom">
-    <button class="btn-login" type="button" data-action="login">
-      ${icon('login', 16)}<span>登录账号</span>
+    <button class="btn-login" type="button" data-action="${user ? 'logout' : 'login'}">
+      ${icon('login', 16)}<span>${user ? '退出登录' : '登录账号'}</span>
     </button>
   </div>
   `
@@ -161,13 +184,19 @@ export function mobileTop() {
       <span class="brand-mark">
         <svg viewBox="0 0 32 32" width="30" height="30" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round"><rect x="4" y="10" width="24" height="17" rx="5"/><path d="M10 5.5 16 10l6-4.5"/><path d="M14.5 16.5 20 19.5l-5.5 3z" fill="currentColor" stroke="none"/></svg>
       </span>
-      <span class="brand-text">看剧AI<small>KANJU.AI</small></span>
+      <span class="brand-text">阿噗影视</span>
     </a>
-    <span class="tb-right"></span>
+    <span class="tb-right">
+      <button class="tb-btn tb-theme" type="button" data-theme-cycle aria-label="切换主题" title="切换主题">
+        <span class="tt-dark">${icon('moon', 18)}</span>
+        <span class="tt-light">${icon('sun', 18)}</span>
+      </button>
+      <button class="tb-btn tb-settings" type="button" data-action="settings" aria-label="设置" title="设置">${icon('settings', 18)}</button>
+    </span>
   </header>`
 }
 
-export function pageHead({ title, nav = null, back = null, big = false }) {
+export function pageHead({ title, subtitle = '', nav = null, back = null, big = false }) {
   return `<header class="page-head${big ? ' big' : ''}">
     <div class="ph-left">
       ${
@@ -178,8 +207,13 @@ export function pageHead({ title, nav = null, back = null, big = false }) {
           : ''
       }
     </div>
-    <h1 class="ph-title">${title}</h1>
+    <h1 class="ph-title">${title}${subtitle ? '<span class="ph-subtitle">' + esc(subtitle) + '</span>' : ''}</h1>
     <div class="ph-right">
+      <button class="ph-menu ph-theme" type="button" data-theme-cycle aria-label="切换主题" title="切换主题">
+        <span class="tt-dark">${icon('moon', 18)}</span>
+        <span class="tt-light">${icon('sun', 18)}</span>
+      </button>
+      <button class="ph-menu ph-settings" type="button" data-action="settings" aria-label="设置" title="设置">${icon('settings', 18)}</button>
       <button class="ph-menu" type="button" data-action="drawer" aria-label="打开菜单">
         <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
       </button>
@@ -202,13 +236,28 @@ export function shell({ body, active = 'home', sidebarActive = 'history', head =
     <div class="modal" role="dialog" aria-modal="true" aria-label="登录">
       <button class="modal-x" type="button" data-action="modal-close" aria-label="关闭">${icon('close', 18)}</button>
       <div class="modal-mark">${icon('tv', 26)}</div>
-      <h2>登录看剧AI</h2>
-      <p>登录后可同步播放记录、片单与下载任务</p>
-      <label class="modal-field"><span>手机号</span><input type="tel" placeholder="请输入手机号" data-focus /></label>
-      <label class="modal-field"><span>验证码</span><input type="text" placeholder="6 位验证码" /><button type="button" class="modal-code" data-action="code">获取验证码</button></label>
-      <button class="modal-submit" type="button" data-action="modal-ok">登录 / 注册</button>
-      <p class="modal-hint">未注册的手机号将自动创建账号</p>
+      <h2>登录阿噗影视</h2>
+      <p>登录后可跨设备同步观看记录与断点进度</p>
+      <div class="modal-tabs" role="tablist" aria-label="账号操作">
+        <button type="button" class="modal-tab on" data-auth-mode="login" role="tab" aria-selected="true">登录</button>
+        <button type="button" class="modal-tab" data-auth-mode="register" role="tab" aria-selected="false">注册</button>
+      </div>
+      <label class="modal-field"><span>账号</span><input id="authUsername" type="text" placeholder="3-24 位账号" maxlength="24" autocomplete="username" data-focus /></label>
+      <label class="modal-field"><span>密码</span><input id="authPassword" type="password" placeholder="至少 8 位" maxlength="128" autocomplete="current-password" /></label>
+      <label class="modal-field" id="authConfirmField" hidden><span>确认</span><input id="authConfirm" type="password" placeholder="再次输入密码" maxlength="128" autocomplete="new-password" /></label>
+      <p class="modal-error" id="authError" role="alert"></p>
+      <button class="modal-submit" type="button" data-action="auth-submit" id="authSubmit">登录</button>
+      <p class="modal-hint">账号支持中文、字母、数字、下划线和短横线</p>
     </div>
+  </div>
+  <div class="notice-wrap" id="noticeWrap" aria-hidden="true">
+    <section class="notice-modal" role="dialog" aria-modal="true" aria-labelledby="noticeTitle">
+      <button class="notice-close" type="button" data-action="notice-close" aria-label="关闭">×</button>
+      <span class="notice-kicker">阿噗影视 · 站内通知</span>
+      <h2 id="noticeTitle">欢迎来到阿噗影视</h2>
+      <p>片库与播放线路持续更新。遇到无法播放的影片，可切换线路或稍后再试；登录后观看记录和断点进度会跨设备同步。</p>
+      <button class="notice-confirm" type="button" data-action="notice-close">我知道了</button>
+    </section>
   </div>
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
   `
@@ -304,7 +353,7 @@ const shortBadge = (b) => b.replace(/更新至第(\d+)集/, '更新至$1集')
 export function posterCard(show, { badge, heat } = {}) {
   const text = shortBadge(badge || show.badge)
   return `<article class="pcard">
-    <a class="pcard-link" href="${u('/player/')}?id=${show.id}">
+    <a class="pcard-link" href="${u('/player/')}?id=${show.id}&v=live">
       ${posterArt(show)}
       <span class="p-badge${/(抢鲜|特别)/.test(badge || show.badge) ? ' gold' : ''}">${text}</span>
       <span class="p-heat">${heat || show.heat}</span>
@@ -323,7 +372,7 @@ export function compactCard(show) {
       <h4>${show.title}</h4>
       <p>${show.badge}</p>
     </span>
-    <a class="ccard-hit" href="${u('/player/')}?id=${show.id}" aria-label="${show.title}"></a>
+    <a class="ccard-hit" href="${u('/player/')}?id=${show.id}&v=live" aria-label="${show.title}"></a>
   </article>`
 }
 
@@ -341,6 +390,8 @@ export function showToast(msg) {
 export function openModal() {
   const w = document.getElementById('modalWrap')
   if (!w) return
+  setAuthMode(w.dataset.authMode || 'login')
+  setAuthError('')
   w.classList.add('on')
   w.setAttribute('aria-hidden', 'false')
   setTimeout(() => w.querySelector('[data-focus]')?.focus(), 60)
@@ -351,6 +402,101 @@ export function closeModal() {
   if (!w) return
   w.classList.remove('on')
   w.setAttribute('aria-hidden', 'true')
+  const password = document.getElementById('authPassword')
+  const confirm = document.getElementById('authConfirm')
+  if (password) password.value = ''
+  if (confirm) confirm.value = ''
+  setAuthError('')
+}
+
+function setAuthError(message) {
+  const el = document.getElementById('authError')
+  if (el) el.textContent = message || ''
+}
+
+function setAuthMode(mode = 'login') {
+  const w = document.getElementById('modalWrap')
+  if (!w) return
+  const next = mode === 'register' ? 'register' : 'login'
+  w.dataset.authMode = next
+  w.querySelectorAll('[data-auth-mode]').forEach((button) => {
+    const active = button.dataset.authMode === next
+    button.classList.toggle('on', active)
+    button.setAttribute('aria-selected', String(active))
+  })
+  const confirmField = document.getElementById('authConfirmField')
+  const password = document.getElementById('authPassword')
+  const submit = document.getElementById('authSubmit')
+  if (confirmField) confirmField.hidden = next !== 'register'
+  if (password) password.autocomplete = next === 'register' ? 'new-password' : 'current-password'
+  if (submit) submit.textContent = next === 'register' ? '创建账号' : '登录'
+  setAuthError('')
+}
+
+async function submitAuth() {
+  const w = document.getElementById('modalWrap')
+  if (!w) return
+  const mode = w.dataset.authMode === 'register' ? 'register' : 'login'
+  const username = document.getElementById('authUsername')?.value.trim() || ''
+  const password = document.getElementById('authPassword')?.value || ''
+  const confirm = document.getElementById('authConfirm')?.value || ''
+  const submit = document.getElementById('authSubmit')
+  if (!username) return setAuthError('请输入账号')
+  if (password.length < 8) return setAuthError('密码至少 8 位')
+  if (mode === 'register' && password !== confirm) return setAuthError('两次输入的密码不一致')
+  if (submit) {
+    submit.disabled = true
+    submit.textContent = mode === 'register' ? '创建中…' : '登录中…'
+  }
+  setAuthError('')
+  try {
+    const user = mode === 'register' ? await registerAccount(username, password) : await loginAccount(username, password)
+    closeModal()
+    refreshAccountUI()
+    showToast(mode === 'register' ? `账号 ${user.username} 已创建，进度同步已开启` : `欢迎回来，${user.username}`)
+  } catch (error) {
+    setAuthError(error.message || '操作失败，请稍后再试')
+  } finally {
+    if (submit) {
+      submit.disabled = false
+      submit.textContent = mode === 'register' ? '创建账号' : '登录'
+    }
+  }
+}
+
+export async function refreshAccountUI() {
+  const user = getCachedUser()
+  document.querySelectorAll('.sb-name').forEach((el) => {
+    el.textContent = user ? user.username : '游客账号'
+  })
+  document.querySelectorAll('.sb-sub').forEach((el) => {
+    el.textContent = user ? '已登录 · 观看记录跨设备同步' : '本设备使用中 · 游客账号'
+  })
+  /* 成长卡片以前是写死的「游客账号」，登录后侧栏上下一半写用户名一半写游客，
+     看着像账号状态坏了。名字统一走同一个来源。 */
+  document.querySelectorAll('.acct-name').forEach((el) => {
+    el.textContent = user ? user.username : '游客账号'
+  })
+  document.querySelectorAll('.sb-warning span:last-child').forEach((el) => {
+    el.textContent = user
+      ? '观看记录和断点进度已绑定到账号，换设备登录即可继续观看。'
+      : '游客数据会因为浏览器和域名变更造成丢失，请及时注册账号。'
+  })
+  document.querySelectorAll('.btn-login').forEach((button) => {
+    button.dataset.action = user ? 'logout' : 'login'
+    button.innerHTML = `${icon('login', 16)}<span>${user ? '退出登录' : '登录账号'}</span>`
+  })
+  let historyCount = 0
+  try {
+    historyCount = JSON.parse(localStorage.getItem('kj-history') || '[]').length
+  } catch {}
+  if (user) {
+    const items = await fetchUserProgress('', 200).catch(() => null)
+    if (items) historyCount = items.length
+  }
+  document.querySelectorAll('[data-seg="history"] span').forEach((element) => {
+    element.textContent = `历史 ${historyCount}`
+  })
 }
 
 function setDrawer(open) {
@@ -364,19 +510,23 @@ function setDrawer(open) {
 
 export function bindShell() {
   document.addEventListener('click', (e) => {
+    const pick = e.target.closest('[data-theme-set]')
+    if (pick) {
+      applyTheme(pick.dataset.themeSet, { toast: true })
+      return
+    }
+    const cycle = e.target.closest('[data-theme-cycle]')
+    if (cycle) {
+      const cur = document.documentElement.dataset.themeMode || 'dark'
+      applyTheme(THEME_MODES[(THEME_MODES.indexOf(cur) + 1) % THEME_MODES.length], { toast: true })
+    }
+  })
+  document.addEventListener('click', async (e) => {
     const el = e.target.closest('[data-action]')
     if (!el) return
     const a = el.dataset.action
     if (a === 'drawer') setDrawer(true)
     if (a === 'drawer-close') setDrawer(false)
-    if (a === 'theme') {
-      const light = document.documentElement.dataset.theme !== 'light'
-      document.documentElement.dataset.theme = light ? 'light' : 'dark'
-      try {
-        localStorage.setItem('kj-theme', light ? 'light' : 'dark')
-      } catch {}
-      showToast(light ? '已切换到浅色主题' : '已切换到深色主题')
-    }
     if (a === 'share') {
       const url = location.origin
       if (navigator.clipboard) navigator.clipboard.writeText(url).catch(() => {})
@@ -386,18 +536,52 @@ export function bindShell() {
       document.getElementById('qrModal')?.classList.add('on')
       showToast('扫一扫：请用手机相机对准二维码')
     }
-    if (a === 'notice') showToast('暂无新通知')
-    if (a === 'settings') showToast('设置面板即将上线')
+    if (a === 'notice') {
+      const notice = document.getElementById('noticeWrap')
+      if (notice) {
+        notice.classList.add('on')
+        notice.setAttribute('aria-hidden', 'false')
+      } else showToast('暂无新通知')
+    }
+    if (a === 'notice-close') {
+      const notice = document.getElementById('noticeWrap')
+      notice?.classList.remove('on')
+      notice?.setAttribute('aria-hidden', 'true')
+      try { localStorage.setItem('kj-notice-seen', '1') } catch {}
+    }
+    if (a === 'settings') {
+      // 懒加载：设置面板本身又要用 shell 的弹窗/主题函数，静态互相 import 会成环
+      import('./settings-panel.js').then((m) => m.toggleSettings()).catch(() => showToast('设置面板加载失败'))
+    }
     if (a === 'login') openModal()
-    if (a === 'modal-close' || a === 'modal-ok') closeModal()
-    if (a === 'code') showToast('验证码已发送（演示环境不会真的发送）')
+    if (a === 'logout') {
+      await logoutAccount()
+      refreshAccountUI()
+      showToast('已退出登录')
+    }
+    if (a === 'modal-close') closeModal()
+    if (a === 'auth-submit') await submitAuth()
+  })
+  document.addEventListener('click', (e) => {
+    const tab = e.target.closest('[data-auth-mode]')
+    if (tab) setAuthMode(tab.dataset.authMode)
   })
   document.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && e.target.closest('#modalWrap') && e.target.matches('input')) {
+      e.preventDefault()
+      void submitAuth()
+      return
+    }
     if (e.key === 'Escape') {
       closeModal()
+      const notice = document.getElementById('noticeWrap')
+      notice?.classList.remove('on')
+      notice?.setAttribute('aria-hidden', 'true')
       setDrawer(false)
     }
   })
+  document.addEventListener('kj-auth-changed', refreshAccountUI)
+  refreshAccountUI()
   const w = document.getElementById('modalWrap')
   w?.addEventListener('click', (e) => {
     if (e.target === w) closeModal()
@@ -421,9 +605,63 @@ export function bindShell() {
   })
 }
 
-export function initTheme() {
+const THEME_MODES = ['dark', 'light', 'auto']
+const THEME_LABEL = { dark: '深色主题', light: '白色主题', auto: '跟随系统' }
+
+function prefersLight() {
+  return typeof matchMedia === 'function' && matchMedia('(prefers-color-scheme: light)').matches
+}
+
+function resolveThemeMode(mode) {
+  return mode === 'auto' ? (prefersLight() ? 'light' : 'dark') : mode
+}
+
+export function themeMode() {
   try {
-    const t = localStorage.getItem('kj-theme')
-    if (t) document.documentElement.dataset.theme = t
+    const saved = localStorage.getItem('kj-theme-mode')
+    if (THEME_MODES.includes(saved)) return saved
+    const legacy = localStorage.getItem('kj-theme')
+    if (legacy === 'light' || legacy === 'dark') return legacy
   } catch {}
+  return 'dark'
+}
+
+export function applyTheme(mode = 'dark', { persist = true, toast = false } = {}) {
+  const html = document.documentElement
+  const safeMode = THEME_MODES.includes(mode) ? mode : 'dark'
+  const resolved = resolveThemeMode(safeMode)
+  html.dataset.theme = resolved
+  html.dataset.themeMode = safeMode
+  if (persist) {
+    try {
+      localStorage.setItem('kj-theme-mode', safeMode)
+      localStorage.setItem('kj-theme', resolved)
+    } catch {}
+  }
+  document.querySelectorAll('[data-theme-set]').forEach((btn) => {
+    const on = btn.dataset.themeSet === safeMode
+    btn.classList.toggle('on', on)
+    btn.setAttribute('aria-pressed', String(on))
+  })
+  const meta = document.querySelector('meta[name="theme-color"]')
+  if (meta) meta.setAttribute('content', resolved === 'light' ? '#ffffff' : '#0b1f2b')
+  if (toast) showToast(`已切换到${THEME_LABEL[safeMode]}`)
+  return resolved
+}
+
+export function initTheme() {
+  let param = ''
+  try {
+    param = new URLSearchParams(location.search).get('theme') || ''
+  } catch {}
+  const mode = THEME_MODES.includes(param) ? param : themeMode()
+  applyTheme(mode, { persist: THEME_MODES.includes(param) })
+  if (typeof matchMedia === 'function') {
+    const mq = matchMedia('(prefers-color-scheme: light)')
+    const onChange = () => {
+      if (document.documentElement.dataset.themeMode === 'auto') applyTheme('auto', { persist: false })
+    }
+    if (mq.addEventListener) mq.addEventListener('change', onChange)
+    else if (mq.addListener) mq.addListener(onChange)
+  }
 }

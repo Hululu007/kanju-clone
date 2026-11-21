@@ -123,39 +123,44 @@ export function categoryItems(cat, day, limit = 4) {
   return Array.from({ length: Math.min(limit, pool.length) }, (_, i) => pool[(off + i) % pool.length])
 }
 
-// 优先能直接播的片子排前面（原站会员片在后面）
-const playFirst = (list) => [...list].sort((a, b) => {
-  const pa = a.availability?.playable ? 1 : 0
-  const pb = b.availability?.playable ? 1 : 0
-  if (pa !== pb) return pb - pa
-  return (b.heatValue || 0) - (a.heatValue || 0)
-})
-
-export const playableShows = shows.filter((s) => s.availability?.playable)
-
-// 四个分类轮流取，避免某一类占满首页
-function mix(perCat = 4) {
-  const picked = []
-  const buckets = CAT_KEYS.map((c) => playFirst(byCat(c)).slice(0, perCat))
-  for (let i = 0; i < perCat; i++) for (const b of buckets) if (b[i]) picked.push(b[i])
-  return picked
-}
-
+const hottestFirst = (a, b) => (b.heatValue || 0) - (a.heatValue || 0)
 const newestFirst = (a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt))
-
+const byArea = (area) => shows.filter((s) => s.cat === 'tv' && s.area === area)
+const byKinds = (...cats) => shows.filter((s) => cats.includes(s.cat))
+const byMovieGenre = (pattern) => shows.filter((s) => s.cat === 'movie' && s.genres.some((genre) => pattern.test(genre)))
+const byAnimeSeries = () => shows.filter((s) =>
+  s.cat === 'anime' &&
+  s.episodeCount >= 12 &&
+  !s.genres.some((genre) => /电影|有声动漫/.test(genre))
+)
 export const ROWS = [
-  { id: 'hot', title: '大家都在看', sub: '按站内热度排序的一批，先看这些不容易踩雷', items: mix(4), pool: 'all' },
-  { id: 'free', title: '打开就能播', sub: '这些片子的线路公开可取，点开直接看', items: playableShows.slice(0, 10), pool: 'all' },
-  { id: 'tv', title: '热播电视剧', sub: '一集一集慢慢追', items: [...byCat('tv')].sort(newestFirst).slice(0, 10), pool: 'tv' },
-  { id: 'movie', title: '电影放映厅', sub: '两个小时看完一个故事', items: byCat('movie').slice(0, 10), pool: 'movie' },
-  { id: 'anime', title: '动漫新番', sub: '一次更新一集，跟得上节奏', items: [...byCat('anime')].sort(newestFirst).slice(0, 10), pool: 'anime' },
-  { id: 'variety', title: '综艺现场', sub: '轻松的、下饭的都在这里', items: [...byCat('variety')].sort(newestFirst).slice(0, 10), pool: 'variety' },
+  { id: 'hot', title: '大家都在看', sub: '站内热度持续攀升的热门影视', items: [...shows].sort(hottestFirst).slice(0, 10), pool: 'all' },
+  { id: 'kr', title: '韩剧在追', sub: '韩国热播剧集', items: byArea('韩国').sort(hottestFirst).slice(0, 10), pool: 'kr' },
+  { id: 'jp', title: '日剧上新', sub: '日本新剧与热门剧集', items: byArea('日本').sort(newestFirst).slice(0, 10), pool: 'jp' },
+  { id: 'us', title: '美剧续看', sub: '美国剧集持续更新', items: byArea('美国').sort(newestFirst).slice(0, 10), pool: 'us' },
+  { id: 'cn', title: '国产新剧', sub: '国产剧集近期上新', items: byArea('中国大陆').sort(newestFirst).slice(0, 10), pool: 'cn' },
+  { id: 'movie-high', title: '高分电影', sub: '口碑与播放热度兼顾的电影', items: byKinds('movie').sort((a, b) => (b.playbackCount || 0) - (a.playbackCount || 0)).slice(0, 10), pool: 'movie-high' },
+  { id: 'movie-hot', title: '电影热播', sub: '正在热播的电影', items: byKinds('movie').sort(hottestFirst).slice(0, 10), pool: 'movie-hot' },
+  { id: 'theater', title: '院线热映', sub: '院线与近期上映影片', items: byMovieGenre(/院线|上映/).sort(newestFirst).slice(0, 10), pool: 'theater' },
+  { id: 'anime-series', title: '动画连载', sub: '持续更新的动画剧集', items: byAnimeSeries().sort(hottestFirst).slice(0, 10), pool: 'anime-series' },
 ].filter((r) => r.items.length)
 
-export const allByPool = (pool) => (pool === 'all' ? shows : byCat(pool))
+export const allByPool = (pool) => {
+  if (pool === 'all') return shows
+  if (pool === 'kr') return byArea('韩国')
+  if (pool === 'jp') return byArea('日本')
+  if (pool === 'us') return byArea('美国')
+  if (pool === 'cn') return byArea('中国大陆')
+  if (pool === 'movie-high') return byKinds('movie').sort((a, b) => (b.playbackCount || 0) - (a.playbackCount || 0))
+  if (pool === 'movie-hot') return byKinds('movie').sort(hottestFirst)
+  if (pool === 'theater') return byMovieGenre(/院线|上映/)
+  if (pool === 'anime-series') return byAnimeSeries()
+  return byCat(pool)
+}
 
 export function findShow(id) {
-  return shows.find((s) => s.id === id) || shows[0]
+  // 找不到就返回 undefined：播放页会回源到后端，避免静默显示成第一部片
+  return shows.find((s) => s.id === id)
 }
 
 export function episodesFor(show) {
