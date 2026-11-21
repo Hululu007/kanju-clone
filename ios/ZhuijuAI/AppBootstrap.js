@@ -1081,7 +1081,9 @@
     card.appendChild(head);
     var content = document.createElement('div');
     content.id = 'iosSettingsBody';
-    content.innerHTML = '<section class="ios-set-group"><h3><span aria-hidden="true">♙</span>账号</h3><div class="ios-set-card">'
+    content.innerHTML = '<section class="ios-set-group"><h3><span aria-hidden="true">↓</span>下载</h3><div class="ios-set-card">'
+      + '<button class="ios-set-row" data-ios-act="open-native-library"><span><b>我的下载</b><small>原生列表 · 断网也能看、离线播放和分享</small></span><span>›</span></button></div></section>'
+      + '<section class="ios-set-group"><h3><span aria-hidden="true">♙</span>账号</h3><div class="ios-set-card">'
       + '<button class="ios-set-row" data-setting-action="profile"><span><b>个人资料</b><small id="iosSettingAccount">即将上线</small></span><span>›</span></button>'
       + '<button class="ios-set-row" data-setting-action="security"><span><b>账号安全</b><small>修改密码 · 即将上线</small></span><span>›</span></button></div></section>'
       + '<section class="ios-set-group"><h3><span aria-hidden="true">◐</span>外观</h3><div class="ios-set-card"><div class="ios-set-row"><b>界面主题</b>'
@@ -2254,6 +2256,11 @@
       if (mine.__iosReturnToDownloads) openDownloadPage();
     }
     if (act === 'mine-edit') announce('左滑任意一集即可删除');
+    if (act === 'open-native-library') {
+      /* 原生片库不依赖当前网页：先关掉面板再交给原生，回来时不会盖着一个空面板。 */
+      closeSettingsSheet();
+      postNative({ action: 'myDownloads' });
+    }
     if (act === 'play-local') {
       var entry = target.closest('[data-dl-path]');
       if (entry) postNative({ action: 'playLocal', path: entry.getAttribute('data-dl-path') });
