@@ -1200,9 +1200,9 @@ final class MediaDownloader: NSObject {
     /// 不把远端地址当成「本地封面」传给界面。
     private static func snapshot() -> [[String: Any]] {
         records = loadRecords()
-        return records.filter { !Self.isDeleted($0) }.map { record in
+        return records.filter { !Self.isDeleted($0) }.map { record -> [String: Any] in
             let showId = record.showId ?? ""
-            [
+            return [
                 "id": record.id,
                 "showId": showId,
                 "epKey": record.epKey ?? "",
