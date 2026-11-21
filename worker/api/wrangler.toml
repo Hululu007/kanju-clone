@@ -1,0 +1,13 @@
+name = "kanju-api"
+main = "src/index.js"
+compatibility_date = "2026-11-01"
+workers_dev = true
+
+[[d1_databases]]
+binding = "DB"
+database_name = "kanju-db"
+database_id = "41dca879-dd13-416f-acf0-3ca6e8feb9a1"
+
+[triggers]
+# Cloudflare Cron 使用 UTC；18:00 UTC = 北京时间次日 02:00
+crons = ["0 18 * * *"]
