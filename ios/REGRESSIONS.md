@@ -1393,7 +1393,11 @@ testToolbarDownloadButtonReplacesTheDanmakuSlot → missing-button
   - `isRegularFileOrMissing`（`:519`）先认链接再判类型：用 `destinationOfSymbolicLink`（`:521`）认链接本体
     （悬空链接也算），命中即拒绝；再走「存在且是普通文件」。目录、别名、特殊类型一律拒绝。
   - 悬空链接因此也被挡住：旧实现把它当「路径没变、只是还没落盘」放行，写入会顺着链接在封面目录外建文件。
-- **回归测试**：`ios/Tests/coverPathGuard.test.mjs`（node，真实临时目录 + 真符号链接；Windows 普通权限建不了链接时，需要链接的 5 条标注「跳过（系统不允许建链接）」并打印原因，断言本身不改，在 macOS 上全部执行）
+- **回归测试**：`ios/Tests/coverPathGuard.test.mjs`（node，真实临时目录 + 真符号链接，共 9 条，其中需要建链接的 5 条）
+  - 跑法：在具备链接权限的环境里执行——本仓库用 WSL Ubuntu + Linux 版 node20，
+    `node --test ios/Tests/` 时 151 条全过、0 fail、0 skipped（跑在 2GB cgroup 里）。
+  - 系统不允许建链接时（Windows 普通权限、未开开发者模式 → EPERM）这 5 条**直接失败并说明原因**，
+    不使用 `t.skip`：安全用例「没执行」不能当成「通过」。
   - `旧版缺陷：A 封面链接到 B 封面时，删 A 真的会删掉 B`
   - `新版：同样的链接被拒绝，删除与写入都碰不到 B 封面`
   - `悬空链接：旧版当「还没落盘」放行、写入会跑到目录外，新版拒绝`
