@@ -1,6 +1,7 @@
 // kanju-api —— Cloudflare Worker 版片源服务（D1）
 import { syncOnce } from './sync.js'
 import { syncHomeFeed, syncHotRanks } from './feed-sync.js'
+import { inspectHlsResource } from './playback-probe.js'
 // 契约与本地 server/proxy.mjs 一致：/api/health /api/list /api/show /api/lines /api/play /api/audit /api/progress
 const SITE = 'https://kanju32.com'
 const BUILD = 'dianyingtiantang-v2026.11.12.3-worker-flag-fix-46f791897b69-web'
@@ -12,6 +13,14 @@ const priorityOf = (p) => {
   return i < 0 ? 90 : i
 }
 const isOfficial = (p) => /^(official|bytevod|bytedance)/i.test(String(p || ''))
+const qualityRank = (label = '') => {
+  const text = String(label)
+  const match = text.match(/(\d{3,4})\s*[pP]?/)
+  if (match) return Number(match[1])
+  if (/4K|UHD/i.test(text)) return 2160
+  if (/高清|HD/i.test(text)) return 720
+  return 0
+}
 
 const CORS = {
   'access-control-allow-origin': '*',
@@ -178,6 +187,11 @@ function lineOptions(rv) {
 
 function orderLines(lines, stats = new Map()) {
   return [...lines].sort((a, b) => {
+    const rankA = qualityRank(a.label)
+    const rankB = qualityRank(b.label)
+    const exact1080A = rankA === 1080
+    const exact1080B = rankB === 1080
+    if (exact1080A !== exact1080B) return exact1080A ? -1 : 1
     const sa = stats.get(a.provider)
     const sb = stats.get(b.provider)
     const scoreA = sa ? Number(sa.successes || 0) / Math.max(1, Number(sa.successes || 0) + Number(sa.failures || 0)) : null
@@ -206,59 +220,18 @@ function sniff(buf, contentType = '') {
   return 'unknown'
 }
 
-async function inspectHls(url, depth = 0) {
-  if (depth > 3) return { ok: false, kind: 'hls', error: 'variant_depth_exceeded' }
-  let res
-  try {
-    res = await fetch(url, { headers: { 'user-agent': UA, accept: '*/*' }, redirect: 'follow', signal: AbortSignal.timeout(5000) })
-  } catch (e) {
-    return { ok: false, kind: 'hls', error: 'fetch_failed' }
-  }
-  if (!res.ok) return { ok: false, kind: 'hls', status: res.status, error: `http_${res.status}` }
-  const text = await res.text()
-  if (!text.includes('#EXTM3U')) {
-    return { ok: false, kind: /<html/i.test(text) ? 'page' : 'unknown', error: 'not_m3u8' }
-  }
-  if (/#EXT-X-STREAM-INF/i.test(text)) {
-    const rows = text.split('\n').map((l) => l.trim())
-    const variants = []
-    for (let i = 0; i < rows.length; i++) {
-      if (!rows[i].startsWith('#EXT-X-STREAM-INF')) continue
-      const next = rows.slice(i + 1).find((line) => line && !line.startsWith('#'))
-      if (!next) continue
-      const height = Number(rows[i].match(/RESOLUTION=\d+x(\d+)/i)?.[1] || 0)
-      variants.push({ url: new URL(next, res.url || url).href, height })
-    }
-    variants.sort((a, b) => (b.height >= 1080) - (a.height >= 1080) || b.height - a.height)
-    for (const variant of variants) {
-      const result = await inspectHls(variant.url, depth + 1)
-      if (result.ok) return { ...result, variantHeight: variant.height }
-    }
-    return { ok: false, kind: 'hls', error: 'no_playable_variant' }
-  }
-  const segs = text.split('\n').map((l) => l.trim()).filter((l) => l && !l.startsWith('#'))
-  const durs = [...text.matchAll(/#EXTINF:([0-9.]+)/g)].map((m) => Number(m[1]))
-  const duration = durs.reduce((a, b) => a + b, 0)
-  if (!segs.length) return { ok: false, kind: 'hls', error: 'empty_playlist', segments: 0, duration: 0 }
-  const first = new URL(segs[0], res.url || url).href
-  let contentFingerprint = null
-  try {
-    const sr = await fetch(first, { headers: { 'user-agent': UA, range: 'bytes=0-65535' }, redirect: 'follow', signal: AbortSignal.timeout(5000) })
-    if (!sr.ok) return { ok: false, kind: 'hls', error: `first_segment_http_${sr.status}` }
-    const buf = await sr.arrayBuffer()
-    if (!buf.byteLength) return { ok: false, kind: 'hls', error: 'first_segment_empty' }
-    if (buf.byteLength > 1024) contentFingerprint = await sha(new Uint8Array(buf))
-  } catch {
-    return { ok: false, kind: 'hls', error: 'first_segment_unavailable' }
-  }
+async function inspectHls(url) {
+  const result = await inspectHlsResource(url, {
+    fetchImpl: (resource, options) => fetch(resource, { ...options, headers: { ...options.headers, 'user-agent': UA } }),
+    timeoutMs: 5000,
+  })
+  if (!result.ok) return result
+  const first = result.firstSegment
+  const contentFingerprint = result.firstBytes.byteLength > 1024 ? await sha(new Uint8Array(result.firstBytes)) : null
   return {
-    ok: true,
-    kind: 'hls',
-    variantHeight: 0,
-    segments: segs.length,
-    duration,
+    ...result,
     first,
-    fingerprint: contentFingerprint || (await sha(`${first.split('?')[0]}|${segs.length}|${Math.round(duration)}`)),
+    fingerprint: contentFingerprint || (await sha(`${first.split('?')[0]}|${result.segments}|${Math.round(result.duration)}`)),
   }
 }
 
@@ -1115,12 +1088,14 @@ export default {
         })
       }
 
-      if (u.pathname === '/api/line-result' && request.method === 'POST') {
+      if (u.pathname === '/api/line-result') {
+        if (request.method !== 'POST') return json({ error: '只支持 POST' }, 405)
         const origin = request.headers.get('origin') || ''
         if (origin !== 'https://zhuiju.dpdns.org') return json({ error: '来源不允许' }, 403)
         const body = await request.json().catch(() => ({}))
         const provider = String(body.provider || '').slice(0, 80)
         if (!provider || !/^[a-zA-Z0-9_-]+$/.test(provider)) return json({ error: '线路参数无效' }, 400)
+        if (typeof body.ok !== 'boolean') return json({ error: '结果参数无效' }, 400)
         const showId = String(body.showId || '').slice(0, 120)
         if (!/^[a-zA-Z0-9_-]+$/.test(showId)) return json({ error: '作品参数无效' }, 400)
         await dbRun(env,
