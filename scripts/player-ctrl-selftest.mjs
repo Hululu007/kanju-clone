@@ -211,13 +211,17 @@ for (const [x, y, t] of geo.hit) {
 }
 rec('R2 画面各处单击切换播放状态', dmResults.every((r) => /paused→playing|playing→paused/.test(r)), dmResults.join(' | '))
 
-// R3：画面内连续移动鼠标不续显示计时
+// R3：移动仍在继续、已超过隐藏时长时，控制栏应早已隐藏。
 if ((await state()).paused) await evaluate(`document.getElementById('video').play()`)
 await park(); await ensureShown()
-for (let i = 0; i < 14; i++) { await mouse('mouseMoved', tapPt.x + (i % 5) * 22 - 44, tapPt.y + (i % 3) * 12 - 12); await sleep(240) }
-await sleep(3200)
-s = await state()
-rec('R3 只在画面上划动不续时（3.4s 后仍隐藏）', s.controls === 'off', `controls=${s.controls}`)
+for (let i = 0; i < 15; i++) {
+  await mouse('mouseMoved', tapPt.x + (i % 5) * 22 - 44, tapPt.y + (i % 3) * 12 - 12)
+  await sleep(300)
+  if (i === 11) {
+    s = await state()
+    rec('R3 连续移动期间超过自动隐藏期限后控制栏已隐藏', s.controls === 'off', `controls=${s.controls} moves=${i + 1}`)
+  }
+}
 
 // R4：鼠标停在控制栏上保持显示，离开后 3s 隐藏
 await park(); await ensureShown()

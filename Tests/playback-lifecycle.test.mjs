@@ -49,6 +49,15 @@ test('an HLS init segment must be accessible before selecting its media playlist
   assert.equal(result.ok, false)
 })
 
-test('a remembered provider cannot make a known bad line win or abort automatic selection', () => {
-  assert.doesNotMatch(readFileSync(new URL('../worker/api/src/index.js', import.meta.url), 'utf8'), /if \(preferred && health\.get\(preferred\)\?\.verdict === 'dup'\)/)
+test('automatic recovery requires strict selected-line resolution and refuses stale or failed provider results', () => {
+  assert.match(player, /strict: true, signal: controller\.signal/)
+  assert.match(player, /result\.provider !== candidate\.provider \|\| !requestedProviders\.has\(result\.provider\)/)
+  assert.match(player, /generation !== playGeneration \|\| !playbackWanted/)
+})
+
+test('playback result reports require an attempt id and are sent at most once', () => {
+  const runtime = readFileSync(new URL('../src/runtime.js', import.meta.url), 'utf8')
+  assert.match(runtime, /!showId \|\| !provider \|\| !attemptId/)
+  assert.match(runtime, /authorization: `Bearer \$\{token\}`/)
+  assert.match(player, /if \(!playbackAttemptResultSent\)[\s\S]{0,90}playbackAttemptResultSent = true/)
 })

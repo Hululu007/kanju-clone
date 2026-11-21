@@ -757,8 +757,10 @@ async function sendDm() {
   const text = dmText.value.trim()
   if (!text) return
   const t = video.currentTime || 0
-  const ok = await sendDanmaku(show.id, currentEpIdx(), t, text)
-  if (!ok) {
+  const episode = currentEpIdx()
+  const generation = playGeneration
+  const ok = await sendDanmaku(show.id, episode, t, text)
+  if (!ok || generation !== playGeneration || episode !== currentEpIdx()) {
     return
   }
   dmText.value = ''
@@ -1250,6 +1252,8 @@ let stallTimer = null
 let nextTarget = null
 let nextCancelledFor = null
 const failedProviders = new Set()
+let playbackAttemptResultSent = false
+let activeAttemptId = ''
 const MAX_AUTO_ALTERNATIVES = 4
 const nextCue = document.getElementById('nextCue')
 const nextCueText = document.getElementById('nextCueText')
@@ -1318,6 +1322,7 @@ async function switchToNextLine(generation = playGeneration) {
   switchingGeneration = generation
   const oldTime = video.currentTime || 0
   const wasPlaying = playbackWanted
+  const requestedProviders = new Set(candidates.map((option) => option.provider))
   const epIdx = currentEpIdx()
   const ordered = rankPlayableLines(candidates, { preferred: lastSuccessfulProvider, targetQuality: actualQuality || 1080 })
   try {
@@ -1325,20 +1330,20 @@ async function switchToNextLine(generation = playGeneration) {
       if (generation !== playGeneration || !playbackWanted) return
       const controller = new AbortController()
       playRequest = controller
-      const result = await resolvePlay(show.id, currentEpIdx(), candidate.provider, { quality: actualQuality, signal: controller.signal }).catch(() => null)
+      const result = await resolvePlay(show.id, currentEpIdx(), candidate.provider, { quality: actualQuality, strict: true, signal: controller.signal }).catch(() => null)
       if (playRequest === controller) playRequest = null
       if (generation !== playGeneration || !playbackWanted) return
-      if (!result?.url || result.error) {
+      if (!result?.url || result.error || result.provider !== candidate.provider || !requestedProviders.has(result.provider)) {
         failedProviders.add(candidate.provider)
         continue
       }
-      currentProvider = result.provider || candidate.provider
+      currentProvider = candidate.provider
       const switched = await new Promise((resolve) => {
         let metadataReady = false
         let started = false
         let settled = false
         const onMetadata = () => {
-          if (generation !== playGeneration) return finish(false)
+          if (generation !== playGeneration || !playbackWanted) return finish(false)
           metadataReady = true
           video.currentTime = Math.min(oldTime, Math.max(0, (video.duration || oldTime + 1) - 1))
           applyRate()
@@ -1356,11 +1361,20 @@ async function switchToNextLine(generation = playGeneration) {
           resolve(ok && (started || !wasPlaying && metadataReady))
         }
         const onError = () => finish(false)
-        const timeout = setTimeout(() => finish(false), 8_000)
+        const timeout = setTimeout(() => {
+          finish(false)
+          if (generation === playGeneration && playbackWanted && !playbackAttemptResultSent) {
+            failedProviders.add(candidate.provider)
+            playbackAttemptResultSent = true
+            void reportPlaybackResult(show.id, candidate.provider, false, activeAttemptId)
+          }
+        }, 8_000)
         video.addEventListener('playing', onPlaying, { once: true })
         video.addEventListener('error', onError, { once: true })
         video.addEventListener('loadedmetadata', onMetadata, { once: true })
-        currentProvider = result.provider || candidate.provider
+        currentProvider = candidate.provider
+        activeAttemptId = result.attemptId || ''
+        playbackAttemptResultSent = false
         attach(result.url, result.kind, () => finish(false), () => {
           if (generation !== playGeneration) return finish(false)
           if (video.readyState >= 1) onMetadata()
@@ -1369,11 +1383,17 @@ async function switchToNextLine(generation = playGeneration) {
       if (generation !== playGeneration) return
       if (!switched) {
         failedProviders.add(candidate.provider)
-        void reportPlaybackResult(show.id, candidate.provider, false)
+        if (playbackWanted && !playbackAttemptResultSent) {
+          playbackAttemptResultSent = true
+          void reportPlaybackResult(show.id, candidate.provider, false, activeAttemptId)
+        }
         continue
       }
       mediaStarted = true
-      void reportPlaybackResult(show.id, currentProvider, true)
+      if (!playbackAttemptResultSent) {
+        playbackAttemptResultSent = true
+        void reportPlaybackResult(show.id, currentProvider, true, activeAttemptId)
+      }
       lastSuccessfulProvider = currentProvider
       actualQuality = Number(result.quality || 0)
       try { localStorage.setItem(`kj-line:${show.id}`, currentProvider) } catch {}
@@ -1412,6 +1432,8 @@ async function play(idx, autoplay = true, requestedLine = '', { fromEpisode = nu
   const requestSignal = playRequest.signal
   pending = true
   playbackWanted = autoplay
+  playbackAttemptResultSent = false
+  activeAttemptId = ''
   switchingAutomatically = false
   switchingGeneration = null
   attach('')
@@ -1470,6 +1492,7 @@ async function play(idx, autoplay = true, requestedLine = '', { fromEpisode = nu
   }
   activeEpisode = Number(ep.idx)
   if (fresh?.provider) currentProvider = fresh.provider
+  activeAttemptId = fresh.attemptId || ''
   actualQuality = Number(fresh.quality || 0)
   mergeLineOptions(ep.idx, fresh.options)
   updateQuality()
@@ -1488,16 +1511,27 @@ async function play(idx, autoplay = true, requestedLine = '', { fromEpisode = nu
     else resetStallCheck()
   })
   const markPlaybackFailure = () => {
-    if (generation !== playGeneration || sourceAttempt !== playbackAttemptId || mediaStarted) return
-    void reportPlaybackResult(show.id, currentProvider, false)
+    if (generation !== playGeneration || sourceAttempt !== playbackAttemptId || mediaStarted || !playbackWanted || playbackAttemptResultSent) return
+    playbackAttemptResultSent = true
+    void reportPlaybackResult(show.id, currentProvider, false, activeAttemptId)
   }
-  const startFailureTimer = setTimeout(markPlaybackFailure, 12_000)
+  const startFailureTimer = setTimeout(() => {
+    markPlaybackFailure()
+    if (generation === playGeneration && playbackWanted && !mediaStarted) void switchToNextLine(generation)
+  }, 12_000)
   video.addEventListener('playing', () => {
     if (generation !== playGeneration || sourceAttempt !== playbackAttemptId) return
     clearTimeout(startFailureTimer)
+    if (!playbackWanted) {
+      video.pause()
+      return
+    }
     mediaStarted = true
     remember(ep.idx)
-    void reportPlaybackResult(show.id, currentProvider, true)
+    if (!playbackAttemptResultSent) {
+      playbackAttemptResultSent = true
+      void reportPlaybackResult(show.id, currentProvider, true, activeAttemptId)
+    }
     lastSuccessfulProvider = fresh.provider || currentProvider
     actualQuality = Number(video.videoHeight || fresh.quality || 0)
     try { localStorage.setItem(`kj-line:${show.id}`, currentProvider) } catch {}
@@ -1524,13 +1558,17 @@ async function play(idx, autoplay = true, requestedLine = '', { fromEpisode = nu
 function startPlayback() {
   const generation = playGeneration
   const attempt = playbackAttemptId
-  playbackWanted = true
+  if (!playbackWanted) return
   const p = video.play()
   if (!p || typeof p.catch !== 'function') return
   p.catch((error) => {
     if (generation !== playGeneration || attempt !== playbackAttemptId || error?.name === 'AbortError') return
     if (error?.name !== 'NotAllowedError') {
       failedProviders.add(currentProvider)
+      if (!playbackAttemptResultSent) {
+        playbackAttemptResultSent = true
+        void reportPlaybackResult(show.id, currentProvider, false, activeAttemptId)
+      }
       void switchToNextLine(generation)
     }
     sayPlayStatus('播放器没有开始播放（' + (error?.name || 'Error') + '），请点一下画面重试或选择其他线路。')
@@ -1539,7 +1577,10 @@ function startPlayback() {
 
 video.addEventListener('error', () => {
   if (video.error?.code === MediaError.MEDIA_ERR_ABORTED || !video.currentSrc || switchingAutomatically) return
-  if (!mediaStarted) void reportPlaybackResult(show.id, currentProvider, false)
+  if (!mediaStarted && playbackWanted && !playbackAttemptResultSent) {
+    playbackAttemptResultSent = true
+    void reportPlaybackResult(show.id, currentProvider, false, activeAttemptId)
+  }
   if (pending) return
   void switchToNextLine(playGeneration)
 })
@@ -1619,7 +1660,7 @@ video.addEventListener('progress', paintProgress)
 btnNext.addEventListener('click', () => {
   const cur = currentEpIdx()
   const nxt = show.cat !== 'movie' && nextEpisodeAfter(eps, cur)
-  if (nxt) void play(nxt.idx)
+  if (nxt) void play(nxt.idx, true, '', { fromEpisode: cur })
   else showToast('已经是最后一集了')
 })
 

@@ -27,7 +27,12 @@ const json = (data, status = 200, cacheControl = 'no-store') =>
   new Response(JSON.stringify(data), { status, headers: { ...CORS, 'content-type': 'application/json; charset=utf-8', 'cache-control': cacheControl } })
 
 const hex = (buf) => [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, '0')).join('')
-const sha = async (s) => hex(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(String(s)))).slice(0, 16)
+const sha = async (value) => {
+  const bytes = value instanceof ArrayBuffer || ArrayBuffer.isView(value)
+    ? value
+    : new TextEncoder().encode(String(value))
+  return hex(await crypto.subtle.digest('SHA-256', bytes)).slice(0, 16)
+}
 
 async function hmacHex(secret, msg) {
   const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign'])
@@ -205,7 +210,7 @@ async function inspectHls(url, signal) {
   })
   if (!result.ok) return result
   const first = result.firstSegment
-  const contentFingerprint = result.firstBytes.byteLength > 1024 ? await sha(new Uint8Array(result.firstBytes)) : null
+  const contentFingerprint = result.firstBytes.byteLength > 1024 ? `hls-bytes:${await sha(result.firstBytes)}` : null
   return {
     ...result,
     first,
@@ -244,7 +249,7 @@ async function inspectSource(url, signal) {
     signal,
   }).then(async (result) => {
     if (!result.ok) return result
-    const fingerprint = result.firstBytes.byteLength > 1024 ? await sha(result.firstBytes) : await sha(`${result.firstSegment.split('?')[0]}|${result.segments}|${Math.round(result.duration)}`)
+    const fingerprint = result.firstBytes.byteLength > 1024 ? `hls-bytes:${await sha(result.firstBytes)}` : null
     return { ...result, fingerprint }
   })
   return inspectMp4(url, signal)
@@ -298,11 +303,11 @@ async function saveSource(env, showId, epIdx, s) {
   ).catch(() => {})
 }
 
-async function playUrl(env, showId, idx, requestedLine = '', targetQuality = 0, preferred = '') {
+async function playUrl(env, showId, idx, requestedLine = '', targetQuality = 0, preferred = '', strictLine = false) {
   const requestedQuality = Number(targetQuality) || 0
   const key = `${showId}#${idx}#${requestedLine}#${requestedQuality}#${preferred}`
   const hit = playCache.get(key)
-  if (!requestedLine && hit && Date.now() - hit.at < 90_000) return { ...hit.value, cached: true }
+  if (!requestedLine && hit && Date.now() - hit.at < 90_000) return { ...hit.value, attemptId: crypto.randomUUID(), cached: true }
 
   let ep = await dbFirst(env, 'SELECT * FROM episodes WHERE show_id=? AND idx=?', showId, Number(idx)).catch(() => null)
   if (!ep) {
@@ -327,6 +332,12 @@ async function playUrl(env, showId, idx, requestedLine = '', targetQuality = 0, 
 
   const firstEp = await dbFirst(env, 'SELECT idx, number, token FROM episodes WHERE show_id=? ORDER BY idx LIMIT 1', showId).catch(() => null)
   const health = await healthMap(env, showId)
+  for (const [provider, row] of health) {
+    if (row.verdict === 'dup' && /与第\d+集同内容|所有集指向第1集/.test(row.detail || '')) {
+      await dbRun(env, 'UPDATE provider_health SET verdict=\'unknown\',detail=\'需要按 HLS 首片字节指纹复核\' WHERE show_id=? AND provider=?', showId, provider).catch(() => {})
+      health.set(provider, { ...row, verdict: 'unknown', detail: '需要按 HLS 首片字节指纹复核' })
+    }
+  }
   const successfulProviders = new Map((await dbAll(env, `SELECT p.provider,p.successes,p.failures,p.successes+p.failures total,MAX(s.quality) quality
        FROM provider_playback_stats p LEFT JOIN sources s ON s.show_id=p.show_id AND s.provider=p.provider
        WHERE p.show_id=? GROUP BY p.provider`, showId).catch(() => [])).map((row) => [row.provider, row]))
@@ -366,7 +377,7 @@ async function playUrl(env, showId, idx, requestedLine = '', targetQuality = 0, 
     if (at > 0) lines.unshift(lines.splice(at, 1)[0])
   }
   const candidates = requestedLine
-    ? [lines.find((line) => line.provider === requestedLine), ...lines.filter((line) => line.provider !== requestedLine)]
+    ? strictLine ? [lines.find((line) => line.provider === requestedLine)] : [lines.find((line) => line.provider === requestedLine), ...lines.filter((line) => line.provider !== requestedLine)]
     : lines
   const tried = []
   const probed = await probeCandidates(candidates.filter(Boolean), async (line, signal) => {
@@ -383,12 +394,14 @@ async function playUrl(env, showId, idx, requestedLine = '', targetQuality = 0, 
     const info = await inspectSource(url, signal)
     if (!info.ok) return { line, ok: false, url, ...info }
     const rows = await dbAll(env, 'SELECT ep_idx, fingerprint FROM sources WHERE show_id=? AND provider=? AND fingerprint IS NOT NULL', showId, line.provider).catch(() => [])
-    const collision = rows.find((row) => row.fingerprint === info.fingerprint && Number(row.ep_idx) !== Number(idx))
+    const collision = info.fingerprint?.startsWith('hls-bytes:')
+      ? rows.find((row) => row.fingerprint?.startsWith('hls-bytes:') && row.fingerprint === info.fingerprint && Number(row.ep_idx) !== Number(idx))
+      : null
     if (collision) {
       await setHealth(env, showId, line.provider, 'dup', `第${Number(collision.ep_idx) + 1}集与第${Number(idx) + 1}集同内容`)
       return { ...info, line, url, ok: false, error: 'episode_collision' }
     }
-    if (!rows.length && firstEp && Number(idx) !== Number(firstEp.idx)) {
+    if (!rows.some((row) => row.fingerprint?.startsWith('hls-bytes:')) && firstEp && Number(idx) !== Number(firstEp.idx)) {
       const baseline = await dbFirst(env, 'SELECT fingerprint FROM provider_baseline WHERE show_id=? AND provider=?', showId, line.provider).catch(() => null)
       if (baseline?.fingerprint && baseline.fingerprint === info.fingerprint) {
         await setHealth(env, showId, line.provider, 'dup', '所有集指向第1集')
@@ -401,7 +414,6 @@ async function playUrl(env, showId, idx, requestedLine = '', targetQuality = 0, 
   for (const item of probed) {
     if (!item.ok) {
       tried.push({ label: item.line.label, provider: item.line.provider, reason: item.error || 'unavailable', quality: Number(item.height || item.variantHeight) || 0 })
-      if (!item.deferred && !['member', 'resolve_failed', 'probe_aborted'].includes(item.error)) await recordLineProbe(env, showId, item.line.provider, false)
       if (item.url && !['member', 'resolve_failed', 'probe_budget_exceeded', 'probe_timeout', 'probe_aborted'].includes(item.error)) {
         await saveSource(env, showId, Number(idx), { provider: item.line.provider, label: item.line.label, url: item.url, kind: item.kind, quality: Number(item.height) || null, status: item.error || 'dead' })
       }
@@ -432,6 +444,7 @@ async function playUrl(env, showId, idx, requestedLine = '', targetQuality = 0, 
       firstSegmentMs: chosen.firstSegmentMs ?? null,
       fingerprint: fp,
       verified: true,
+      attemptId: crypto.randomUUID(),
       skip,
       options: probed.map((item) => ({
         provider: item.line.provider,
@@ -1135,24 +1148,31 @@ export default {
       }
 
       if (u.pathname === '/api/playback-result' && request.method === 'POST') {
+        const user = await authenticate(request, env)
+        if (!user) return json({ error: '登录后才能提交播放统计' }, 401)
         const body = await request.json().catch(() => ({}))
         const showId = String(body.showId || '')
         const provider = String(body.provider || '')
-        if (!showId || !provider || typeof body.ok !== 'boolean' || showId.length > 160 || provider.length > 120) return json({ error: '播放结果参数无效' }, 400)
-        const known = await dbFirst(env, 'SELECT provider FROM episodes WHERE show_id=? AND provider=? LIMIT 1', showId, provider).catch(() => null)
-          || await dbFirst(env, 'SELECT provider FROM sources WHERE show_id=? AND provider=? LIMIT 1', showId, provider).catch(() => null)
+        const attemptId = String(body.attemptId || '')
+        if (!showId || !provider || !/^[0-9a-f-]{36}$/i.test(attemptId) || typeof body.ok !== 'boolean' || showId.length > 160 || provider.length > 120) return json({ error: '播放结果参数无效' }, 400)
+        const known = await dbFirst(env, 'SELECT provider FROM sources WHERE show_id=? AND provider=? AND status=\'ok\' LIMIT 1', showId, provider).catch(() => null)
         if (!known) return json({ error: '未知播放线路' }, 404)
-        await recordLineProbe(env, showId, provider, body.ok)
-        return json({ ok: true })
+        const inserted = await dbRun(env, 'INSERT OR IGNORE INTO provider_playback_attempts(attempt_id,user_id,show_id,provider,ok,created_at) VALUES(?,?,?,?,?,datetime(\'now\'))', attemptId, user.id, showId, provider, body.ok ? 1 : 0).catch(() => null)
+        if (Number(inserted?.meta?.changes) === 1) {
+          await recordLineProbe(env, showId, provider, body.ok)
+          await setHealth(env, showId, provider, body.ok ? 'ok' : 'dead', body.ok ? '' : '浏览器起播失败')
+        }
+        return json({ ok: true, duplicate: Number(inserted?.meta?.changes) !== 1 })
       }
 
       if (u.pathname === '/api/play') {
         const showId = u.searchParams.get('show')
         const idx = Number(u.searchParams.get('ep') || 0)
         const line = u.searchParams.get('line') || ''
+        const strictLine = u.searchParams.get('strict') === '1'
         const preferred = u.searchParams.get('preferred') || ''
         const quality = Number(u.searchParams.get('quality')) || 0
-        const out = await playUrl(env, showId, idx, line, quality, preferred)
+        const out = await playUrl(env, showId, idx, line, quality, preferred, strictLine)
         return json({ object: 'play', ...out })
       }
 

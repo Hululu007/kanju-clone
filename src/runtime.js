@@ -27,21 +27,29 @@ export const proxyReady = (async () => {
   return null
 })()
 
-export async function reportPlaybackResult(showId, provider, ok) {
-  if (!PROXY || !showId || !provider) return
-  await fetch(`${PROXY}/api/playback-result`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ showId, provider, ok }),
-    signal: AbortSignal.timeout(3000),
-  }).catch(() => {})
+export async function reportPlaybackResult(showId, provider, ok, attemptId) {
+  if (!PROXY || !showId || !provider || !attemptId) return false
+  const token = localStorage.getItem('kj-auth-token') || ''
+  if (!token) return false
+  try {
+    const response = await fetch(`${PROXY}/api/playback-result`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+      body: JSON.stringify({ showId, provider, ok, attemptId }),
+      signal: AbortSignal.timeout(3000),
+    })
+    return response.ok
+  } catch {
+    return false
+  }
 }
 
-export async function resolvePlay(showId, idx, line = '', { quality = 0, preferred = '', signal } = {}) {
+export async function resolvePlay(showId, idx, line = '', { quality = 0, preferred = '', strict = false, signal } = {}) {
   if (!PROXY) return null
   try {
     const params = new URLSearchParams({ show: showId, ep: String(idx) })
     if (line) params.set('line', line)
+    if (strict) params.set('strict', '1')
     if (Number(quality) > 0) params.set('quality', String(Number(quality)))
     if (preferred) params.set('preferred', preferred)
     // Official line tickets may need a second upstream request.
