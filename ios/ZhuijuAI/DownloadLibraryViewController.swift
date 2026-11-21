@@ -627,9 +627,11 @@ final class DownloadEpisodesViewController: UITableViewController {
         /* 从整份快照里筛出这部剧：删除、状态变化都可能发生在别的界面。 */
         let all = downloader.snapshotForPage().compactMap { DownloadLibraryItem($0) }
         let mine = all.filter { $0.showKey == show.key }
+        /* 封面也要进签名：补图是异步的，同一个路径拿到本地图后路径不变、只有 coverPath 变，
+           漏了它就不会刷新，二级列表会一直显示占位图到重新进入。 */
         let signature = mine.map { item in
             let bucket = item.total > 0 ? Int((Double(item.received) / Double(item.total)) * 100) : -1
-            return item.id + "|" + item.status + "|" + String(bucket) + "|" + item.path
+            return item.id + "|" + item.status + "|" + String(bucket) + "|" + item.path + "|" + item.coverPath
         }.joined(separator: ";")
         guard force || signature != lastSignature else { return }
         lastSignature = signature

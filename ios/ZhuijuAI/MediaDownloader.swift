@@ -501,7 +501,24 @@ final class MediaDownloader: NSObject {
             NSLog("refuse cover path outside the cover directory: %@", raw ?? "")
             return nil
         }
+        /* 层级对还不够：目标若是目录（或符号链接解出来的目录），后面 removeItem 会把整棵子树删掉。
+           第一次落盘时文件还不存在是正常的，所以「不存在」放行，「存在但不是普通文件」拒绝。 */
+        guard isRegularFileOrMissing(target) else {
+            NSLog("refuse non-regular cover target: %@", raw ?? "")
+            return nil
+        }
         return target
+    }
+
+    /// 封面目录里只认普通文件。目录、别名、其它特殊类型一律不认；目标不存在按「尚未落盘」放行。
+    private static func isRegularFileOrMissing(_ url: URL) -> Bool {
+        let manager = FileManager.default
+        var isDirectory: ObjCBool = false
+        guard manager.fileExists(atPath: url.path, isDirectory: &isDirectory) else { return true }
+        guard !isDirectory.boolValue else { return false }
+        guard let attributes = try? manager.attributesOfItem(atPath: url.path),
+              let type = attributes[.type] as? FileAttributeType else { return false }
+        return type == .typeRegular
     }
 
     /// 这部剧已经落盘的封面相对路径（磁盘上真有这个文件才算）。
@@ -654,6 +671,12 @@ final class MediaDownloader: NSObject {
             NSLog("cover data is not an image: %@", showId)
             return
         }
+        /* 补图是异步的：请求发出去之后这部剧可能已经被整剧删光。
+           没有活记录了就别再落盘，否则删掉的封面会被晚到的响应重新写回来，而且没人再清理它。 */
+        guard hasLiveRecord(showId: showId, title: title) else {
+            NSLog("cover dropped, show already deleted: %@", showId)
+            return
+        }
         let relative = coverRelativePath(showId: showId, title: title)
         guard let target = coverURL(forStoredPath: relative) else { return }
         do {
@@ -666,11 +689,21 @@ final class MediaDownloader: NSObject {
         applyCoverPath(relative, showId: showId, title: title)
     }
 
-    /// 把相对路径写进这部剧的每一条记录（同一部剧共用一张封面）。
+    /// 这部剧是否还有未删除的记录（封面只跟着活记录走，墓碑不算引用）。
+    private static func hasLiveRecord(showId: String, title: String) -> Bool {
+        loadRecords().contains { record in
+            guard !isDeleted(record) else { return false }
+            return !showId.isEmpty ? (record.showId ?? "") == showId : record.title == title
+        }
+    }
+
+    /// 把相对路径写进这部剧的每一条**活**记录（同一部剧共用一张封面）。
+    /// 墓碑记录不写：它不再引用这个文件，写进去只会留下一条指向已删文件的脏路径。
     private static func applyCoverPath(_ relative: String, showId: String, title: String) {
         records = loadRecords()
         var changed = false
         for index in records.indices {
+            guard !isDeleted(records[index]) else { continue }
             let sameShow = !showId.isEmpty
                 ? (records[index].showId ?? "") == showId
                 : records[index].title == title

@@ -26,32 +26,34 @@ struct OfflinePlaylist {
 /// 这样「全屏=横屏」「其他页面=竖屏」「横拿自动横屏」三个结论只在一处判断。
 final class OfflinePlayerViewController: UIViewController {
     /// 画面模式：三种，和在线播放的默认 / 拉伸 / 平铺对应。
+    /// 三档语义跟着 REG-015/017 走，别按字面猜：
+    /// 默认=等比装进容器（留黑边）、拉伸=非等比铺满容器（改比例）、平铺=等比放大填满并裁边。
     enum VideoMode: Int, CaseIterable {
         case fit
-        case aspectFill
         case stretch
+        case fill
 
         var title: String {
             switch self {
             case .fit: return "默认"
-            case .aspectFill: return "拉伸"
-            case .stretch: return "平铺"
+            case .stretch: return "拉伸"
+            case .fill: return "平铺"
             }
         }
 
         var gravity: AVLayerVideoGravity {
             switch self {
             case .fit: return .resizeAspect
-            case .aspectFill: return .resizeAspectFill
             case .stretch: return .resize
+            case .fill: return .resizeAspectFill
             }
         }
 
         var next: VideoMode {
             switch self {
-            case .fit: return .aspectFill
-            case .aspectFill: return .stretch
-            case .stretch: return .fit
+            case .fit: return .stretch
+            case .stretch: return .fill
+            case .fill: return .fit
             }
         }
     }
@@ -172,16 +174,28 @@ final class OfflinePlayerViewController: UIViewController {
         saveProgress()
     }
 
-    /// 退出全屏后先锁竖屏；设备真的回到竖屏了才放开自动旋转，
+    /// 设备姿态（不是界面方向）。全屏时界面被锁在横屏，系统不会替我们转回来，
+    /// 所以「拿着手机站直了」这条只能在这里判：全屏 + 设备回到竖持 → 主动退出全屏并锁回竖屏。
+    /// 非全屏时只做一件事：设备真的回到竖屏了才放开自动旋转，
     /// 否则手还横着会立刻又被判成「横拿」再进一次全屏。
     @objc private func deviceOrientationChanged() {
-        guard !isFullscreen, WebViewController.offlineRotationLocked else { return }
-        switch UIDevice.current.orientation {
-        case .portrait, .portraitUpsideDown:
-            owner?.unlockOfflineRotation()
-        default:
-            break
+        let orientation = UIDevice.current.orientation
+        let portrait = orientation == .portrait || orientation == .portraitUpsideDown
+        if isFullscreen {
+            guard portrait else { return }
+            /* 标 explicit：让外层按「主动退出全屏」处理（先锁竖屏、再请求竖屏几何），
+               否则全屏横屏掩码下界面会停在「非全屏但仍是横屏」的中间态。 */
+            setFullscreen(false, explicit: true)
+            /* 设备本来就是竖持，不会再有一次方向变更来触发解锁；
+               等旋转落定后补一次，把自动旋转还回去，否则以后横拿不会再进全屏。 */
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                guard let self = self, !self.isFullscreen else { return }
+                self.owner?.unlockOfflineRotation()
+            }
+            return
         }
+        guard WebViewController.offlineRotationLocked, portrait else { return }
+        owner?.unlockOfflineRotation()
     }
 
     // MARK: - 布局
