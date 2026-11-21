@@ -81,6 +81,10 @@ final class HLSDownloader: NSObject {
     private static var planning: [String: Int] = [:]
     private static var finalizing: Set<String> = []
     private static var backgroundCompletion: (() -> Void)?
+    /// 本进程是否已经跟系统对过账（把系统里真实存在的分片任务认领回来）。
+    /// 没对账就发新任务 = 进程重建后给同一片再发第二条任务，白耗流量还可能写坏缓存。
+    private static var sessionAdopted = false
+    private static var adopting = false
 
     /// 这条线路是不是 HLS：网页给的 kind 优先，其次看扩展名。
     static func isHLSSource(url: String, kind: String?) -> Bool {
@@ -158,6 +162,8 @@ final class HLSDownloader: NSObject {
         guard let job = jobs[id] else { return }
         switch job.phase {
         case "segments":
+            /* 先按磁盘补齐已经落盘、但进程死在落库前的分片，再接着下。 */
+            reconcileDisk(id: id)
             pump(id: id)
         case "finalize":
             jobs[id]?.phase = "segments"
@@ -170,6 +176,13 @@ final class HLSDownloader: NSObject {
     static func adoptBackgroundEvents(completion: @escaping () -> Void) {
         ensureLoaded()
         backgroundCompletion = completion
+        guard !sessionAdopted else {
+            /* 本进程已经对过账：这一次只是又一轮事件收尾，直接归还，别把系统卡在等回调上。 */
+            finishBackgroundEvents()
+            return
+        }
+        guard !adopting else { return }
+        adopting = true
         backgroundSession().getAllTasks { systemTasks in
             for task in systemTasks {
                 guard let key = task.taskDescription, let split = splitKey(key) else {
@@ -193,6 +206,14 @@ final class HLSDownloader: NSObject {
                     tasks[task.taskIdentifier] = downloadTask
                 }
             }
+            /* 先记「本进程已跟系统对过账」再发任务：pump 里有同一道门，
+               否则下面几个 pump 会把自己挡住。 */
+            adopting = false
+            sessionAdopted = true
+            /* 磁盘对账：上一条进程里落了盘、但没来得及落库的分片，直接算完成，不重下。 */
+            for id in Array(jobs.keys) where jobs[id]?.phase == "segments" {
+                reconcileDisk(id: id)
+            }
             var ids: Set<String> = []
             for key in taskKeys.values {
                 if let split = splitKey(key) { ids.insert(split.id) }
@@ -203,16 +224,60 @@ final class HLSDownloader: NSObject {
             /* 系统没把后台任务交回来的（进程被回收、任务已死）：只要记录还在下，就接着下。
                以前只 pump 拿到回调的那几条，剩下的 job 永远停在 segments、记录永远是 running，
                于是那两个并发名额被俩僵尸占着，后面全部卡在「排队中」。 */
-            for (id, job) in jobs where job.phase == "segments" {
+            for id in Array(jobs.keys) where jobs[id]?.phase == "segments" {
                 guard !paused.contains(id), MediaDownloader.isRunning(id: id) else { continue }
                 if taskKeys.values.contains(where: { $0.hasPrefix(id + "#") }) { continue }
                 pump(id: id)
             }
-            if systemTasks.isEmpty, let pending = backgroundCompletion {
-                backgroundCompletion = nil
-                pending()
-            }
+            /* 不管队列里还有没有任务，事件处理完就要把收尾回调还给系统：
+               不归还，系统会认为我们还在处理事件，不再为这条会话唤醒 App，分片就停在那儿。 */
+            finishBackgroundEvents()
         }
+    }
+
+    /// 本进程还没跟系统对过账：借同一条通道做一次认领，认领完它自己接着发分片。
+    private static func ensureAdoption() {
+        if sessionAdopted || adopting { return }
+        adoptBackgroundEvents(completion: {})
+    }
+
+    /// 后台会话的收尾回调：只许调一次，而且必须调（见 adoptBackgroundEvents 末尾的说明）。
+    private static func finishBackgroundEvents() {
+        guard let pending = backgroundCompletion else { return }
+        backgroundCompletion = nil
+        pending()
+    }
+
+    /// 磁盘对账：`seg-<序号>.part` 是「整片下完才改名」的，存在即可认为这一片已完成。
+    /// 进程在落库前一刻被系统杀掉时，磁盘和系统任务比 UserDefaults 新：按磁盘补齐，
+    /// 补齐后整集都齐了就直接合成，不会停在一个「其实已经下完」的活儿上，也不重复下载。
+    @discardableResult
+    private static func reconcileDisk(id: String) -> Bool {
+        ensureLoaded()
+        guard let job = jobs[id], job.phase == "segments" else { return false }
+        let directory = segmentDirectory(id: id)
+        var recovered: [Int: Int64] = [:]
+        for index in job.segments.indices where !job.segments[index].done {
+            let path = directory.appendingPathComponent("seg-" + String(index) + ".part")
+            guard let attributes = try? FileManager.default.attributesOfItem(atPath: path.path),
+                  let number = attributes[.size] as? NSNumber,
+                  number.int64Value > 0 else { continue }
+            recovered[index] = number.int64Value
+        }
+        if !recovered.isEmpty {
+            update(id) { current in
+                for (index, size) in recovered where index < current.segments.count {
+                    current.segments[index].done = true
+                    current.segments[index].bytes = size
+                    current.segments[index].attempts = 0
+                }
+            }
+            report(id: id)
+        }
+        if let latest = jobs[id], latest.segments.allSatisfy({ $0.done }) {
+            finalize(id: id)
+        }
+        return !recovered.isEmpty
     }
 
     // MARK: - 会话
@@ -222,6 +287,9 @@ final class HLSDownloader: NSObject {
         let configuration = URLSessionConfiguration.background(withIdentifier: backgroundIdentifier)
         configuration.isDiscretionary = false
         configuration.sessionSendsLaunchEvents = true
+        /* 并发上限交给系统：整集分片一次全部投递进后台队列，由系统按这个连接数排队连发。
+           旧实现靠进程内的「空位」一片一片发，App 一挂起就没人发下一片（REG-032）。 */
+        configuration.httpMaximumConnectionsPerHost = maxSegmentConcurrency
         configuration.timeoutIntervalForRequest = 30
         configuration.timeoutIntervalForResource = 60 * 60
         configuration.waitsForConnectivity = true
@@ -490,20 +558,25 @@ final class HLSDownloader: NSObject {
 
     // MARK: - 分片调度
 
+    /// 把这一集**所有**还没下完的分片一次性投递给系统后台队列。
+    ///
+    /// 旧实现按「空位」算：系统里最多只允许 4 条分片任务，下一片必须等进程内收到完成回调再发。
+    /// App 一挂起就没有代码发新片——4 条传完队列就空了，进度自然不动（REG-032 的真机现象）。
+    /// 现在并发由会话的 `httpMaximumConnectionsPerHost` 限制，任务本身归系统所有，
+    /// App 挂起、锁屏时都由系统继续传。
     private static func pump(id: String) {
         ensureLoaded()
         guard let job = jobs[id], job.phase == "segments" else { return }
         guard !paused.contains(id) else { return }
-        var active = 0
-        for key in taskKeys.values where key.hasPrefix(id + "#") { active += 1 }
-        var slots = maxSegmentConcurrency - active
-        guard slots > 0 else { return }
+        /* 还没跟系统对过账：先认领系统里已经在跑的分片，否则重启后会给同一片再发一条任务。 */
+        guard sessionAdopted else {
+            ensureAdoption()
+            return
+        }
         for index in job.segments.indices {
-            if slots <= 0 { break }
             let key = job.id + "#" + String(index)
             /* 有重试票的分片由它自己的定时器拉起，别的回调不能提前抢跑。 */
             if job.segments[index].done || inFlight.contains(key) || retryScheduled[key] != nil { continue }
-            slots -= 1
             startSegment(id: id, index: index)
         }
     }
@@ -511,6 +584,9 @@ final class HLSDownloader: NSObject {
     private static func startSegment(id: String, index: Int) {
         ensureLoaded()
         guard let job = jobs[id], index < job.segments.count else { return }
+        let key = id + "#" + String(index)
+        /* 同一片绝不发第二条系统任务：pump 会被多个回调重入，这里再兜一层。 */
+        guard !inFlight.contains(key) else { return }
         let segment = job.segments[index]
         guard let link = URL(string: segment.url) else {
             retry(id: id, index: index, reason: "分片地址无效")
@@ -524,7 +600,6 @@ final class HLSDownloader: NSObject {
             request.setValue("bytes=" + String(segment.byteRangeOffset) + "-" + String(end), forHTTPHeaderField: "Range")
         }
         let task = backgroundSession().downloadTask(with: request)
-        let key = id + "#" + String(index)
         task.taskDescription = key
         tasks[task.taskIdentifier] = task
         taskKeys[task.taskIdentifier] = key
@@ -532,7 +607,8 @@ final class HLSDownloader: NSObject {
         inFlight.insert(key)
         /* 这一片真的起来了，之前挂的票（含更早的定时器）全部作废。 */
         retryScheduled.removeValue(forKey: key)
-        update(id) { job in
+        /* 一次要投几百片，这里不能每片都整份落库：attempts 不是持久必需的数据，节流写。 */
+        update(id, force: false) { job in
             if index < job.segments.count { job.segments[index].attempts += 1 }
         }
         task.resume()

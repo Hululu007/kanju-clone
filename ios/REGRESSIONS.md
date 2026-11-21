@@ -1139,3 +1139,59 @@ testToolbarDownloadButtonReplacesTheDanmakuSlot → missing-button
 - **修复版本**：0.1.19（build 27，本分支 2f3297b 之后）
 - **验证**：全部套 `python C:/Users/kenzh/hark_tasks/memcap.py 2048`：本分支 113/113 通过；同一条失败断言在草稿代码上修复前 OOM、修复后 52ms 内以普通 AssertionError 失败，内存降到 512MB 也不会 OOM。触发版本 hash、复现命令和完整证据见 `ios/DOWNLOAD_TEST_MEMORY_20261120.md`。
 - **验证边界**：这是 Node 夹具/测试基础设施问题，不涉及 Swift 编译或真机行为。
+
+## REG-032 切到后台后 HLS 下载实际停住（build 27 报，build 28 修）【真机】
+
+- **现象**（Ken 真机 build 26/27）：一部剧下载中，切到其他 App 看 10 多分钟，回来进度几乎没动。
+- **复现步骤**：选一部 HLS 线路的剧（绝大多数线路都是 HLS）→ 点下载 → 立刻切到别的 App（或锁屏）→ 等 10 分钟 →
+  回到 App 看「我的下载」那一行的进度；同样条件下锁屏 10 分钟再回来看。
+- **根因（源码可证，两条，非猜测）**：
+  1. **分片派发是进程内串行的**。`HLSDownloader.pump` 用 `maxSegmentConcurrency - active` 算「空位」，
+     系统里任何时刻最多只有 4 条分片任务，下一片必须**等进程内收到完成回调**才发。
+     App 被挂起后没有代码继续发任务，这 4 条传完队列就空了 —— 分片任务本身在后台会话里，
+     但「发下一片」这一步绑在 App 进程上，这就是进度不动的原因。
+     线上片源实测：单集 401~1378 个分片（`hongniu`/`jinying` 用 AES-128，其余多为 `METHOD=NONE`），
+     一部剧要几百次「完成回调 → 发下一片」的接力，挂起期间不可能完成。
+  2. **后台事件收尾回调没有归还**。`adoptBackgroundEvents` 只在 `systemTasks.isEmpty` 时才调用
+     `handleEventsForBackgroundURLSession` 给的 completionHandler。一集有几百片时系统任务几乎从不空，
+     回调就一直没交回系统；iOS 据此认为 App 还在处理事件，不再为这条会话唤醒/续跑，分片彻底停住。
+  - **用户初步判断的核对结果**：`isDiscretionary` 两条后台会话早已是 `false`（疑虑 3 排除）；
+     `foregroundSession` 只做清单/密钥，媒体分片走的是后台会话 `org.dpdns.zhuiju.ios.hls`（疑虑 2 与源码不符），
+     **但「一片完成才发下一片」这条已确认，是主因**。
+- **修复（build 28，采用方案二：全量计划一次入队）**：
+  - `pump` 不再算空位：解析完清单后把**所有未完成分片一次性投递**进系统后台队列；
+    并发改由 `URLSessionConfiguration.httpMaximumConnectionsPerHost = maxSegmentConcurrency`（4）限制，
+    任务归系统所有，App 挂起/锁屏都由系统继续传，不再依赖进程内回调接力。
+  - `adoptBackgroundEvents` 重写：认领系统任务 → 记「本进程已对账」→ 磁盘对账 → 再补发缺失分片 →
+    **无条件** `finishBackgroundEvents()` 归还收尾回调（只归还一次）。`ensureAdoption()` 让首次发包前必先对账，
+    避免进程重建后给同一片再发一条任务。
+  - 新增 `reconcileDisk(id:)`：`seg-<序号>.part` 是整片下完才改名的，存在即视为已完成；
+    进程死在落库前也不重下，整集齐了直接 `finalize`，不会停在「其实已经下完」的活儿上。
+  - `startSegment` 增加 `inFlight` 兜底（同一片绝不发两条系统任务）；`attempts` 改为节流落库（一次投几百片不整份写盘）。
+  - 暂停/恢复/取消/删除语义不变：`pause` 仍保留已下分片、`cancel`/`discard` 仍清缓存并取消全部已投递任务，
+    代次校验与墓碑语义沿用（晚到回调不会复活已删记录）。
+  - mp4 直链原本就走后台会话，未改动。
+- **改动文件**：`ios/ZhuijuAI/HLSDownloader.swift`、`ios/Tests/backgroundDownload.test.mjs`（新增）、
+  `ios/project.yml`（build 27→28）、`.github/workflows/ios-ipa-only.yml`（产物 build 断言 28）、`ios/REGRESSIONS.md`。
+- **测试名**（Node，`ios/Tests/backgroundDownload.test.mjs`，6 条）：分片全量入队：pump 把剩下的分片一次性交给系统队列，
+  不再按空位在进程内派发、后台会话并发上限交给系统：整集分片一次入队，仍在 4 条连接内排队、
+  后台事件收尾：completionHandler 必须归还，不能等「系统任务空了」才还、重启对账：先认回系统里在跑的分片再发新任务，
+  磁盘上已完成的分片不重下、暂停/删除照样停掉已经投递进系统队列的全部分片、mp4 直链仍然走真正的后台会话。
+- **本地验证**：套内存硬上限 `python C:\Users\kenzh\hark_tasks\memcap.py 2048 node --test Tests/*.test.mjs`：
+  修复前这 6 条里 4 条红（分片全量入队、会话并发上限、收尾回调、重启对账）；修复后全仓 **132/132 通过**（0 失败，未触发 memcap）。
+  旧测试未删、未跳、断言未放宽。
+- **修复版本**：0.1.19（build 28）
+- **为什么没选方案一（AVAssetDownloadURLSession）**：
+  1. 现有回归有 15+ 条源码守卫钉住分片引擎（pump/retry/finalize/decrypt），规则不许删测试或改断言；
+  2. `.movpkg` 只能 AVFoundation 播，而 App 的离线播放入口、外部播放器打开、左滑删除、相对路径都按单文件设计，
+     换方案要重做整条播放/删除/片库链路；
+  3. 该 API 没有受支持的途径给每个分片请求注入本仓库必需的 Referer/UA（本仓库已有 CDN 403 实证），
+     AES-128 线路的密钥获取也不受我们控制。
+- **验证边界（真机待验收，未提前声称通过）**：Windows 上没有 Swift 编译器，Swift 只做了源码守卫 + 打包阶段编译；
+  以下四项必须在 Ken 装 build 28 后真机核对：
+  1. m3u8 剧下载中切到别的 App 10 分钟，回来进度明显前进或已完成；
+  2. 锁屏 10 分钟，回来进度继续；
+  3. 完成后断网，App 内离线播放正常（AES-128 线路也要能播）；
+  4. 左滑删除能真删掉文件，队列继续走、记录不复活。
+  已知平台边界：解密与合成必须在 App 进程里做，后台只保证「传输」；如果全部片段在后台传完，
+  合成会在回到前台时进行。
