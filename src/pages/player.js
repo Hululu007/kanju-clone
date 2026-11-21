@@ -4,9 +4,11 @@ import { icon } from '../icons.js'
 import { shell, bindShell, initTheme, pageHead, posterCard, showToast } from '../shell.js'
 import { findShow, shows } from '../data.js'
 import { u } from '../base.js'
-import { proxyReady, proxyShowFresh, resolvePlay, fetchLines, fetchDanmaku, sendDanmaku } from '../runtime.js'
+import { proxyReady, proxyShowFresh, resolvePlay, reportPlaybackResult, fetchLines, fetchDanmaku, sendDanmaku } from '../runtime.js'
 import { authReady, fetchShowProgress, flushSavedProgress, saveProgress } from '../auth.js'
 import { openSettings } from '../settings-panel.js'
+import { createPictureClickHandlers, didTouchMove } from '../player-gestures.js'
+import { nextEpisodeAfter, rankPlayableLines, sampleStall, shouldHandlePlaybackShortcut, shouldShowNextCue } from '../player-policy.js'
 import {
   FILL_MODES,
   clampRate,
@@ -28,7 +30,7 @@ const KIND_LABEL = { series: '电视剧', short_drama: '短剧', movie: '电影'
 async function loadRemoteShow(showId) {
   const s = await proxyShowFresh(showId)
   if (!s) return null
-  const eps = (s.episodes || []).map((e) => ({ idx: e.idx, label: e.label, url: '', quality: e.quality, line: e.line }))
+  const eps = (s.episodes || []).map((e) => ({ idx: e.idx, number: e.number, label: e.label, url: '', quality: e.quality, line: e.line }))
   return {
     id: s.id,
     title: s.title,
@@ -113,6 +115,11 @@ const body = `<section class="page-body"><div class="wrap page pw" style="--h:${
           <button class="pl-bigplay" id="bigPlay" type="button" aria-label="播放">${icon('play', 30)}</button>
           <button class="pl-epov" id="epOverlay" type="button">≡▷ <span id="playerLabel">${epLabel(startIdx)}</span> ›</button>
           <p class="pl-status" id="playStatus" role="status" aria-live="polite" hidden></p>
+          <div class="pl-next-cue" id="nextCue" role="status" aria-live="polite" hidden>
+            <span id="nextCueText"></span>
+            <button type="button" id="nextPlayNow">立即播放</button>
+            <button type="button" id="nextCancel">取消</button>
+          </div>
           <button class="pw-handle" id="pwHandle" type="button" aria-label="收起侧栏" title="收起侧栏">‹</button>
         </div>
 
@@ -365,7 +372,7 @@ function canAutoHide() {
   if (popupOpen()) return false
   // 只有正在往弹幕输入框里打字才保持显示；按钮的焦点不算「操作中」
   const active = document.activeElement
-  if (active && ppCtrl && ppCtrl.contains(active) && (active.matches('input, textarea, select') || active.isContentEditable)) return false
+  if (active && ppCtrl && ppCtrl.contains(active) && (active.matches('input:not([type="range"]), textarea, select') || active.isContentEditable)) return false
   return true
 }
 
@@ -439,12 +446,18 @@ ppCtrl?.addEventListener('focusout', (event) => {
 video.addEventListener('play', () => {
   syncPlayButton()
   showControls()
+  resetStallCheck()
+  scheduleStallCheck(playGeneration)
 })
 video.addEventListener('pause', () => {
   syncPlayButton()
   showControls({ keep: true })
 })
-video.addEventListener('seeked', () => showControls())
+video.addEventListener('seeking', () => resetStallCheck())
+video.addEventListener('seeked', () => {
+  showControls()
+  if (!dragging && playing()) scheduleStallCheck(playGeneration)
+})
 
 /* ---------------- 播放 / 进度 / 时间 ---------------- */
 
@@ -491,6 +504,7 @@ function seekTo(clientX) {
 
 seekBar.addEventListener('pointerdown', (event) => {
   dragging = true
+  resetStallCheck()
   player.classList.add('seeking')
   seekBar.setPointerCapture?.(event.pointerId)
   seekTo(event.clientX)
@@ -507,6 +521,7 @@ const endSeek = (event) => {
   // 只有正常抬手才按松手位置定位；pointercancel / 捕获被抢走时不要再动进度
   if (event?.type === 'pointerup' && typeof event.clientX === 'number') seekTo(event.clientX)
   showControls()
+  if (!video.seeking && playing()) scheduleStallCheck(playGeneration)
 }
 seekBar.addEventListener('pointerup', endSeek)
 seekBar.addEventListener('pointercancel', endSeek)
@@ -516,22 +531,49 @@ window.addEventListener('blur', () => {
   if (dragging) endSeek()
 })
 seekBar.addEventListener('keydown', (event) => {
-  if (!video.duration) return
-  if (event.key === 'ArrowRight') video.currentTime = Math.min(video.duration, video.currentTime + 5)
-  if (event.key === 'ArrowLeft') video.currentTime = Math.max(0, video.currentTime - 5)
+  if (!Number.isFinite(video.duration) || video.duration <= 0) return
+  if (event.key !== 'ArrowRight' && event.key !== 'ArrowLeft') return
+  event.preventDefault()
+  video.currentTime = Math.min(video.duration, Math.max(0, video.currentTime + (event.key === 'ArrowRight' ? 5 : -5)))
+  showControls()
 })
 
 function togglePlay() {
-  if (video.paused || video.ended) startPlayback()
-  else video.pause()
-  showControls({ keep: true })
+  if (video.paused || video.ended) {
+    playbackWanted = true
+    startPlayback()
+  } else {
+    playbackWanted = false
+    playRequest?.abort()
+    video.pause()
+  }
+  showControls({ keep: video.paused })
 }
 
 btnPlay.addEventListener('click', togglePlay)
 bigPlay.addEventListener('click', togglePlay)
-// 轻触 / 单击画面：切换控制栏显隐；双击仍是全屏。
-// 画面里还盖着弹幕层、状态条和留边空白，所以监听整个画面容器，只排除明确的交互控件。
+// Defer the single-click action so a double-click only changes fullscreen.
 const picture = player.querySelector('.pl-picture')
+const pictureClick = createPictureClickHandlers({ singleClick: togglePlay, doubleClick: toggleFullscreen })
+let picturePointer = null
+let suppressPictureClick = false
+picture.addEventListener('pointerdown', (event) => {
+  if (event.pointerType !== 'touch') return
+  picturePointer = { x: event.clientX, y: event.clientY, moved: false }
+})
+picture.addEventListener('pointermove', (event) => {
+  if (!picturePointer || event.pointerType !== 'touch') return
+  if (didTouchMove(picturePointer, { x: event.clientX, y: event.clientY })) picturePointer.moved = true
+})
+picture.addEventListener('pointerup', () => {
+  if (picturePointer?.moved) {
+    pictureClick.cancel()
+    suppressPictureClick = true
+    setTimeout(() => { suppressPictureClick = false }, 350)
+  }
+  picturePointer = null
+})
+picture.addEventListener('pointercancel', () => { picturePointer = null; pictureClick.cancel() })
 
 function isPictureChrome(target) {
   if (!(target instanceof Element)) return true
@@ -540,11 +582,15 @@ function isPictureChrome(target) {
 
 picture.addEventListener('click', (event) => {
   if (isPictureChrome(event.target)) return
-  toggleControls()
+  if (suppressPictureClick) {
+    suppressPictureClick = false
+    return
+  }
+  pictureClick.click()
 })
 picture.addEventListener('dblclick', (event) => {
   if (isPictureChrome(event.target)) return
-  toggleFullscreen()
+  pictureClick.doubleClick()
 })
 
 btnVol.addEventListener('click', () => {
@@ -696,13 +742,13 @@ function pumpDm() {
   }
 }
 
-async function loadDm(epIdx) {
+async function loadDm(epIdx, generation) {
   dmList = []
   dmCursor = 0
   lastT = 0
   dmLayer.innerHTML = ''
   const j = await fetchDanmaku(show.id, epIdx).catch(() => null)
-  if (j?.items?.length) {
+  if (generation === playGeneration && j?.items?.length) {
     dmList = j.items.map((x) => ({ t: Number(x.t) || 0, text: String(x.text || ''), color: x.color || '' })).filter((x) => x.text)
   }
 }
@@ -850,18 +896,31 @@ function renderSpeedList() {
 
 let linesByEp = new Map()
 let currentProvider = ''
+let lastSuccessfulProvider = ''
 const STATUS_TIP = { dup: '该线路串集，已停用', dead: '线路不可用', empty: '线路为空', member: '需要会员或更高等级', unknown: '', ok: '' }
 
 function lineOptions(epIdx) {
   return linesByEp.get(Number(epIdx))?.options || []
 }
 
+function mergeLineOptions(epIdx, incoming) {
+  const old = linesByEp.get(Number(epIdx)) || {}
+  const options = new Map((old.options || []).map((option) => [option.provider, option]))
+  for (const option of incoming || []) {
+    const previous = options.get(option.provider)
+    if (previous && option.status === 'unknown' && previous.status !== 'unknown') continue
+    options.set(option.provider, { ...previous, ...option })
+  }
+  linesByEp.set(Number(epIdx), { ...old, options: [...options.values()] })
+}
+
 function updateQuality() {
   const options = lineOptions(currentEpIdx())
-  const hit = options.find((o) => o.provider === currentProvider) || options[0]
+  const hit = options.find((option) => option.provider === currentProvider) || options[0]
   qualityButtons.forEach((button) => {
-    button.querySelector('[data-quality-text]').textContent = hit ? hit.label : '1080P-官方R'
-    button.title = hit ? hit.label : ''
+    const resolution = Number(hit?.quality || actualQuality) > 0 ? `${Number(hit?.quality || actualQuality)}P` : '清晰度未知'
+    button.querySelector('[data-quality-text]').textContent = hit ? `${resolution} · ${hit.label}` : '清晰度未知'
+    button.title = hit ? `${resolution} · ${hit.label}` : ''
   })
 }
 
@@ -1112,31 +1171,34 @@ function loadHls() {
 
 const isHlsUrl = (value) => /\.m3u8(\?|$)/i.test(String(value || ''))
 
-function attach(url) {
+function attach(url, kind = '', onFatal = () => {}, onAttached = () => {}) {
+  const attempt = ++playbackAttemptId
   if (hls) {
     hls.destroy()
     hls = null
   }
+  video.removeAttribute('src')
+  video.load()
   if (!url) return
-  if (isHlsUrl(url) && typeof window.MediaSource !== 'undefined') {
+  const useNativeHls = (kind === 'hls' || isHlsUrl(url)) && !!video.canPlayType('application/vnd.apple.mpegurl')
+  if (!useNativeHls && (kind === 'hls' || isHlsUrl(url)) && typeof window.MediaSource !== 'undefined') {
     loadHls()
       .then((Hls) => {
+        if (attempt !== playbackAttemptId) return
+        if (!Hls?.isSupported()) throw new Error('HLS unsupported')
         hls = new Hls({ maxBufferLength: 30 })
-        hls.on(Hls.Events.ERROR, (_e, data) => {
-          if (!data?.fatal) return
-          sayPlayStatus('这条 HLS 线路播不动，换一集或稍后再试。')
-        })
+        hls.on(Hls.Events.ERROR, (_e, data) => { if (attempt === playbackAttemptId && data?.fatal) onFatal() })
+        hls.on(Hls.Events.MEDIA_ATTACHED, () => { if (attempt === playbackAttemptId) onAttached() })
         hls.loadSource(url)
         hls.attachMedia(video)
       })
-      .catch(() => {
-        sayPlayStatus('HLS 线路加载失败，请换一集或稍后重试。')
-      })
+      .catch(() => { if (attempt === playbackAttemptId) onFatal() })
     return
   }
   video.src = url
   video.load()
   applyRate()
+  onAttached()
 }
 
 /* ---------------- 线路数据 ---------------- */
@@ -1146,7 +1208,7 @@ async function ensureLines(epIdx) {
   await proxyReady
   if (linesByEp.has(Number(epIdx))) return
   const j = await fetchLines(show.id, epIdx).catch(() => null)
-  if (j) linesByEp.set(Number(epIdx), j)
+  if (j) mergeLineOptions(epIdx, j.options)
 }
 
 function currentEpIdx() {
@@ -1170,95 +1232,349 @@ function downloadName() {
 
 /* ---------------- 播放主流程 ---------------- */
 
-let playRetried = false
 let skipInfo = null
 let skipDone = { intro: false, outro: false }
+let playGeneration = 0
+let playbackAttemptId = 0
+let playRequest = null
+let pending = false
+let playbackWanted = false
+let switchingAutomatically = false
+let switchingGeneration = null
+let activeEpisode = null
+let mediaStarted = false
+let cancelMediaWait = null
+let actualQuality = 0
+let stallState = null
+let stallTimer = null
+let nextTarget = null
+let nextCancelledFor = null
+const failedProviders = new Set()
+const MAX_AUTO_ALTERNATIVES = 4
+const nextCue = document.getElementById('nextCue')
+const nextCueText = document.getElementById('nextCueText')
 
-async function play(idx, autoplay = true, preferred = '') {
-  const ep = eps.find((e) => e.idx === Number(idx)) || eps[0]
+function clearNextCue() {
+  nextTarget = null
+  if (nextCue) nextCue.hidden = true
+}
+
+function scheduleNextEpisode() {
+  const current = currentEpIdx()
+  const next = !pending && mediaStarted && activeEpisode === current && show.cat !== 'movie' && nextEpisodeAfter(eps, current)
+  if (!next || !shouldShowNextCue({ duration: video.duration, currentTime: video.currentTime, current, cancelled: nextCancelledFor })) {
+    clearNextCue()
+    return
+  }
+  if (nextTarget !== Number(next.idx)) {
+    clearNextCue()
+    nextTarget = Number(next.idx)
+    nextCueText.textContent = `即将播放${next.label || epLabel(next.idx)}`
+    nextCue.hidden = false
+  }
+}
+
+document.getElementById('nextPlayNow')?.addEventListener('click', () => {
+  const current = currentEpIdx()
+  const target = nextTarget
+  clearNextCue()
+  if (target != null && current === activeEpisode && nextCancelledFor !== current) {
+    nextCancelledFor = current
+    void play(target, true, '', { fromEpisode: current })
+  }
+})
+document.getElementById('nextCancel')?.addEventListener('click', () => {
+  nextCancelledFor = currentEpIdx()
+  clearNextCue()
+})
+
+function resetStallCheck() {
+  stallState = null
+  clearTimeout(stallTimer)
+  stallTimer = null
+}
+
+function scheduleStallCheck(generation) {
+  clearTimeout(stallTimer)
+  stallTimer = setTimeout(() => {
+    const suspended = generation !== playGeneration || pending || video.paused || document.visibilityState === 'hidden' || video.seeking || dragging || document.pictureInPictureElement
+    stallState = sampleStall(stallState, { now: Date.now(), position: video.currentTime || 0, suspended })
+    if (stallState?.expired) void switchToNextLine(generation)
+    else if (!suspended) scheduleStallCheck(generation)
+  }, 1_000)
+}
+
+async function switchToNextLine(generation = playGeneration) {
+  if (generation !== playGeneration || switchingAutomatically || !playbackWanted ||
+      document.visibilityState === 'hidden' || video.seeking || dragging || document.pictureInPictureElement) return
+  pending = false
+  failedProviders.add(currentProvider)
+  const candidates = lineOptions(currentEpIdx()).filter((option) => option.provider && option.provider !== currentProvider && !failedProviders.has(option.provider) && option.status !== 'dead' && option.status !== 'dup' && option.status !== 'member')
+  if (!candidates.length) {
+    sayPlayStatus('当前集的其他线路也不可用，请手动选择线路。')
+    return
+  }
+  switchingAutomatically = true
+  switchingGeneration = generation
+  const oldTime = video.currentTime || 0
+  const wasPlaying = playbackWanted
+  const epIdx = currentEpIdx()
+  const ordered = rankPlayableLines(candidates, { preferred: lastSuccessfulProvider, targetQuality: actualQuality || 1080 })
+  try {
+    for (const candidate of ordered.slice(0, MAX_AUTO_ALTERNATIVES)) {
+      if (generation !== playGeneration || !playbackWanted) return
+      const controller = new AbortController()
+      playRequest = controller
+      const result = await resolvePlay(show.id, currentEpIdx(), candidate.provider, { quality: actualQuality, signal: controller.signal }).catch(() => null)
+      if (playRequest === controller) playRequest = null
+      if (generation !== playGeneration || !playbackWanted) return
+      if (!result?.url || result.error) {
+        failedProviders.add(candidate.provider)
+        continue
+      }
+      currentProvider = result.provider || candidate.provider
+      const switched = await new Promise((resolve) => {
+        let metadataReady = false
+        let started = false
+        let settled = false
+        const onMetadata = () => {
+          if (generation !== playGeneration) return finish(false)
+          metadataReady = true
+          video.currentTime = Math.min(oldTime, Math.max(0, (video.duration || oldTime + 1) - 1))
+          applyRate()
+          if (wasPlaying) startPlayback()
+          else finish(true)
+        }
+        const onPlaying = () => { started = true; finish(true) }
+        const finish = (ok) => {
+          if (settled) return
+          settled = true
+          clearTimeout(timeout)
+          video.removeEventListener('playing', onPlaying)
+          video.removeEventListener('error', onError)
+          video.removeEventListener('loadedmetadata', onMetadata)
+          resolve(ok && (started || !wasPlaying && metadataReady))
+        }
+        const onError = () => finish(false)
+        const timeout = setTimeout(() => finish(false), 8_000)
+        video.addEventListener('playing', onPlaying, { once: true })
+        video.addEventListener('error', onError, { once: true })
+        video.addEventListener('loadedmetadata', onMetadata, { once: true })
+        currentProvider = result.provider || candidate.provider
+        attach(result.url, result.kind, () => finish(false), () => {
+          if (generation !== playGeneration) return finish(false)
+          if (video.readyState >= 1) onMetadata()
+        })
+      })
+      if (generation !== playGeneration) return
+      if (!switched) {
+        failedProviders.add(candidate.provider)
+        void reportPlaybackResult(show.id, candidate.provider, false)
+        continue
+      }
+      mediaStarted = true
+      void reportPlaybackResult(show.id, currentProvider, true)
+      lastSuccessfulProvider = currentProvider
+      actualQuality = Number(result.quality || 0)
+      try { localStorage.setItem(`kj-line:${show.id}`, currentProvider) } catch {}
+      updateQuality()
+      renderLineList()
+      mergeLineOptions(epIdx, result.options)
+      skipInfo = result.skip || skipInfo
+      resetStallCheck()
+      if (wasPlaying) startPlayback()
+      sayPlayStatus(`已自动切换到 ${candidate.label} 线路`)
+      return
+    }
+    sayPlayStatus('当前集所有可用线路均播放失败，请手动选择线路。')
+  } finally {
+    if (switchingGeneration === generation) {
+      switchingAutomatically = false
+      switchingGeneration = null
+      resetStallCheck()
+      if (playing()) scheduleStallCheck(generation)
+    }
+  }
+}
+
+async function play(idx, autoplay = true, requestedLine = '', { fromEpisode = null, preferred = '' } = {}) {
+  const ep = eps.find((e) => Number(e.idx) === Number(idx)) || eps[0]
   if (!ep) return
-  playRetried = false
+  const sameEpisode = Number(ep.idx) === activeEpisode
+  const resumeAt = sameEpisode ? video.currentTime : Number(ep.idx) === Number(resumeIdx) ? resumeTime : 0
+  if (video.currentTime > 0 && mediaStarted && activeEpisode != null) {
+    void saveProgress({ showId: show.id, idx: activeEpisode, position: video.currentTime, duration: video.duration || null }, { force: true })
+  }
+  const generation = ++playGeneration
+  playRequest?.abort()
+  cancelMediaWait?.()
+  playRequest = new AbortController()
+  const requestSignal = playRequest.signal
+  pending = true
+  playbackWanted = autoplay
+  switchingAutomatically = false
+  switchingGeneration = null
+  attach('')
+  playbackWanted = autoplay
+  activeEpisode = null
+  mediaStarted = false
+  lastSavedSecond = -10
+  if (!sameEpisode) nextCancelledFor = null
+  resetStallCheck()
+  failedProviders.clear()
+  clearNextCue()
+  if (!requestedLine) preferred = preferred || lastSuccessfulProvider
   skipDone = { intro: false, outro: false }
   clearPlayStatus()
   paintEpSelection(ep.idx)
-  await ensureLines(ep.idx)
-  if (!preferred) preferred = currentProvider
-  const fresh = await resolvePlay(show.id, ep.idx, preferred).catch(() => null)
+  if (!requestedLine && !preferred) {
+    try { preferred = localStorage.getItem(`kj-line:${show.id}`) || '' } catch {}
+  }
+  await proxyReady
+  if (generation !== playGeneration) return
+  const fresh = await resolvePlay(show.id, ep.idx, requestedLine, {
+    quality: fromEpisode == null && !sameEpisode ? 1080 : actualQuality || 1080,
+    preferred,
+    signal: requestSignal,
+  }).catch(() => null)
+  if (generation !== playGeneration) return
+  if (playRequest?.signal === requestSignal) playRequest = null
+  if (!fresh?.options?.length) void ensureLines(ep.idx).then(() => {
+    if (generation === playGeneration) renderLineList()
+  })
   if (!fresh) {
-    sayPlayStatus('片源服务响应超时或未连接，请稍后重试本集。')
+    pending = false
+    if (playRequest?.signal === requestSignal) playRequest = null
+    resetStallCheck()
+    if (generation === playGeneration) sayPlayStatus('本集没有通过真实首片验证的可用线路，请稍后重试。')
     return
   }
   if (fresh?.error === 'login_required') {
+    pending = false
+    if (playRequest?.signal === requestSignal) playRequest = null
     sayPlayStatus('这一集在原站是会员片源，匿名拿不到地址。换一部标着「可播放」的片子就能直接看。')
     return
   }
-  const url = fresh?.url || ep.url
+  const url = fresh.url
   if (fresh?.error) {
+    pending = false
+    if (playRequest?.signal === requestSignal) playRequest = null
     sayPlayStatus('这一集的片源暂时取不到（线路维护或需要会员），换一集或换一部试试。')
     return
   }
   if (!url) {
+    pending = false
+    if (playRequest?.signal === requestSignal) playRequest = null
     sayPlayStatus('这一集暂时取不到片源（可能是会员片源或线路维护），换一集或换一部试试。')
     return
   }
+  activeEpisode = Number(ep.idx)
   if (fresh?.provider) currentProvider = fresh.provider
-  if (fresh?.options?.length) linesByEp.set(Number(ep.idx), { options: fresh.options })
+  actualQuality = Number(fresh.quality || 0)
+  mergeLineOptions(ep.idx, fresh.options)
   updateQuality()
   renderLineList()
-  attach(url)
   clearPlayStatus()
+  const sourceAttempt = playbackAttemptId + 1
+  attach(url, fresh.kind, () => {
+    if (generation === playGeneration) {
+      failedProviders.add(currentProvider)
+      void switchToNextLine(generation)
+    }
+  }, () => {
+    if (generation !== playGeneration) return
+    pending = false
+    if (autoplay) startPlayback()
+    else resetStallCheck()
+  })
+  const markPlaybackFailure = () => {
+    if (generation !== playGeneration || sourceAttempt !== playbackAttemptId || mediaStarted) return
+    void reportPlaybackResult(show.id, currentProvider, false)
+  }
+  const startFailureTimer = setTimeout(markPlaybackFailure, 12_000)
+  video.addEventListener('playing', () => {
+    if (generation !== playGeneration || sourceAttempt !== playbackAttemptId) return
+    clearTimeout(startFailureTimer)
+    mediaStarted = true
+    remember(ep.idx)
+    void reportPlaybackResult(show.id, currentProvider, true)
+    lastSuccessfulProvider = fresh.provider || currentProvider
+    actualQuality = Number(video.videoHeight || fresh.quality || 0)
+    try { localStorage.setItem(`kj-line:${show.id}`, currentProvider) } catch {}
+    updateQuality()
+    renderLineList()
+  }, { once: true })
   skipInfo = fresh?.skip || null
-  loadDm(ep.idx)
-  if (resumeTime > 0 && Number(ep.idx) === Number(resumeIdx)) {
+  loadDm(ep.idx, generation)
+  if (resumeAt > 0) {
     const seekResume = () => {
-      video.currentTime = Math.min(resumeTime, Math.max(0, video.duration - 1))
-      video.removeEventListener('loadedmetadata', seekResume)
-      remember(ep.idx)
+      if (generation !== playGeneration || sourceAttempt !== playbackAttemptId) return
+      video.currentTime = Math.min(resumeAt, Math.max(0, video.duration - 1))
     }
     if (video.readyState >= 1) seekResume()
     else video.addEventListener('loadedmetadata', seekResume, { once: true })
   }
-  if (autoplay) {
-    startPlayback()
-    if (!(resumeTime > 0 && Number(ep.idx) === Number(resumeIdx))) remember(ep.idx)
+  if (generation === playGeneration && !autoplay) {
+    pending = false
   }
+  if (Number(ep.idx) === Number(resumeIdx)) resumeTime = 0
 }
 
 // 播放启动失败不能静默：iOS 上 play() 会被拒绝或卡住，页面却已写着「当前线路可播放」，用户看到的就是黑屏。
 function startPlayback() {
+  const generation = playGeneration
+  const attempt = playbackAttemptId
+  playbackWanted = true
   const p = video.play()
   if (!p || typeof p.catch !== 'function') return
   p.catch((error) => {
-    const name = (error && error.name) || 'Error'
-    if (!playRetried) {
-      playRetried = true
-      sayPlayStatus('播放器还没开始播放（' + name + '），点一下画面重试。')
-      const retry = () => {
-        document.removeEventListener('pointerup', retry, true)
-        document.removeEventListener('touchend', retry, true)
-        const again = video.play()
-        if (again && again.catch) {
-          again.catch(() => sayPlayStatus('播放器没有开始播放（' + name + '），请再点一次本集或换一条线路。'))
-        }
-      }
-      document.addEventListener('pointerup', retry, true)
-      document.addEventListener('touchend', retry, true)
-      return
+    if (generation !== playGeneration || attempt !== playbackAttemptId || error?.name === 'AbortError') return
+    if (error?.name !== 'NotAllowedError') {
+      failedProviders.add(currentProvider)
+      void switchToNextLine(generation)
     }
-    sayPlayStatus('播放器没有开始播放（' + name + '），请再点一次本集或换一条线路。')
+    sayPlayStatus('播放器没有开始播放（' + (error?.name || 'Error') + '），请点一下画面重试或选择其他线路。')
   })
 }
 
 video.addEventListener('error', () => {
-  sayPlayStatus('这条线路在浏览器里播不动。请再点一次本集（会自动换线），或换一条线路。')
+  if (video.error?.code === MediaError.MEDIA_ERR_ABORTED || !video.currentSrc || switchingAutomatically) return
+  if (!mediaStarted) void reportPlaybackResult(show.id, currentProvider, false)
+  if (pending) return
+  void switchToNextLine(playGeneration)
+})
+video.addEventListener('waiting', () => {
+  if (video.paused || document.visibilityState === 'hidden' || video.seeking || switchingAutomatically) return
+  const generation = playGeneration
+  stallState = sampleStall(stallState, { now: Date.now(), position: video.currentTime || 0, suspended: false })
+  scheduleStallCheck(generation)
+})
+video.addEventListener('playing', () => {
+  resetStallCheck()
+  scheduleStallCheck(playGeneration)
+  scheduleNextEpisode()
+})
+video.addEventListener('ended', () => {
+  const current = currentEpIdx()
+  if (pending || switchingAutomatically || !mediaStarted || activeEpisode !== current || !video.ended) return
+  remember(current)
+  if (show.cat === 'movie' || nextCancelledFor === current) return
+  const next = nextEpisodeAfter(eps, current)
+  if (next) {
+    nextCancelledFor = current
+    clearNextCue()
+    void play(next.idx, true, '', { fromEpisode: current })
+  }
 })
 video.addEventListener('loadedmetadata', () => {
   applyRate()
   paintProgress()
 })
 video.addEventListener('pause', () => {
-  const active = currentEpIdx()
-  if (!(video.currentTime > 0)) return
+  if (pending || switchingAutomatically) return
+  playbackWanted = false
+  const active = activeEpisode
+  if (!mediaStarted || active == null || active !== currentEpIdx() || !(video.currentTime > 0)) return
   void saveProgress(
     { showId: show.id, idx: active, position: video.currentTime || 0, duration: video.duration || null },
     { force: true }
@@ -1276,10 +1592,12 @@ function runSkip() {
   }
   if (getSetting('skipOutro') && skipInfo.outroFrom && d > 0 && !skipDone.outro && d - t <= skipInfo.outroFrom) {
     skipDone.outro = true
-    const nxt = eps.find((e) => Number(e.idx) > currentEpIdx())
+    const current = currentEpIdx()
+    const nxt = show.cat !== 'movie' && nextCancelledFor !== current && nextEpisodeAfter(eps, current)
     if (nxt) {
+      nextCancelledFor = current
       showToast('已跳过片尾，播放下一集')
-      void play(nxt.idx)
+      void play(nxt.idx, true, '', { fromEpisode: current })
     }
   }
 }
@@ -1287,18 +1605,20 @@ function runSkip() {
 video.addEventListener('timeupdate', () => {
   pumpDm()
   paintProgress()
-  runSkip()
+  if (!mediaStarted || pending || switchingAutomatically || activeEpisode !== currentEpIdx()) return
+  if (Number.isFinite(video.duration) && video.duration > 0) scheduleNextEpisode()
   const second = Math.floor(video.currentTime)
   if (second > 0 && second - lastSavedSecond >= 10) {
     lastSavedSecond = second
     remember(currentEpIdx())
   }
+  runSkip()
 })
 video.addEventListener('progress', paintProgress)
 
 btnNext.addEventListener('click', () => {
   const cur = currentEpIdx()
-  const nxt = eps.find((e) => Number(e.idx) > cur)
+  const nxt = show.cat !== 'movie' && nextEpisodeAfter(eps, cur)
   if (nxt) void play(nxt.idx)
   else showToast('已经是最后一集了')
 })
@@ -1342,29 +1662,45 @@ if (eps.length) {
     renderLineList()
   })
   if (resumeParams.has('ep')) void play(initialEp.idx, true)
-  else {
-    // 未指定集数时先把首集地址挂上（不自动播），点播放即可出画面
-    void play(initialEp.idx, false)
-  }
+  else void play(initialEp.idx, true)
 }
 
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState !== 'hidden') return
-  if (!(video.currentTime > 0)) return
+  if (document.visibilityState !== 'hidden') {
+    if (playing()) { resetStallCheck(); scheduleStallCheck(playGeneration) }
+    return
+  }
+  resetStallCheck()
+  if (pending || !mediaStarted || activeEpisode == null || activeEpisode !== currentEpIdx() || !(video.currentTime > 0)) return
   void saveProgress(
-    { showId: show.id, idx: currentEpIdx(), position: video.currentTime || 0, duration: video.duration || null },
+    { showId: show.id, idx: activeEpisode, position: video.currentTime || 0, duration: video.duration || null },
     { force: true }
   )
 })
 window.addEventListener('pagehide', () => void flushSavedProgress())
 
 document.addEventListener('keydown', (event) => {
-  if (event.target instanceof Element && event.target.matches('input, textarea, select')) return
-  if (event.key === ' ' || event.key === 'k') {
+  const target = event.target
+  const onControl = target instanceof Element && (target.isContentEditable || !!target.closest('input, textarea, select, button, a, [role="button"], [role="slider"]'))
+  if (event.altKey || event.ctrlKey || event.metaKey) return
+  if (event.key !== 'Escape' && !shouldHandlePlaybackShortcut({ defaultPrevented: event.defaultPrevented, onControl })) return
+  if (event.key === 'Escape' && (event.defaultPrevented || (target instanceof Element && (target.isContentEditable || target.matches('input, textarea, select'))))) return
+  if (event.key === ' ' || event.key.toLowerCase() === 'k') {
     event.preventDefault()
     togglePlay()
+    return
   }
-  if (event.key === 'f') toggleFullscreen()
+  if (event.key === 'ArrowRight' || event.key === 'ArrowLeft') {
+    if (!Number.isFinite(video.duration) || video.duration <= 0) return
+    event.preventDefault()
+    video.currentTime = Math.min(video.duration, Math.max(0, video.currentTime + (event.key === 'ArrowRight' ? 5 : -5)))
+    showControls()
+    return
+  }
+  if (event.key.toLowerCase() === 'f') {
+    event.preventDefault()
+    toggleFullscreen()
+  }
   if (event.key === 'Escape') {
     if (webFull) setWebFull(false)
     closePops()

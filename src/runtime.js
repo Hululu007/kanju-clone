@@ -5,6 +5,7 @@ const DEFAULT_PROXY = 'https://kanju-api.kenzhao123.workers.dev'
 
 const CANDIDATES = [
   import.meta.env.VITE_PROXY_BASE,
+  typeof location !== 'undefined' && location.hostname === 'zhuiju.dpdns.org' ? location.origin : '',
   (typeof localStorage !== 'undefined' && localStorage.getItem('kj-proxy')) || '',
   DEFAULT_PROXY,
   'http://127.0.0.1:8899',
@@ -26,12 +27,26 @@ export const proxyReady = (async () => {
   return null
 })()
 
-export async function resolvePlay(showId, idx, line = '') {
+export async function reportPlaybackResult(showId, provider, ok) {
+  if (!PROXY || !showId || !provider) return
+  await fetch(`${PROXY}/api/playback-result`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ showId, provider, ok }),
+    signal: AbortSignal.timeout(3000),
+  }).catch(() => {})
+}
+
+export async function resolvePlay(showId, idx, line = '', { quality = 0, preferred = '', signal } = {}) {
   if (!PROXY) return null
   try {
-    const extra = line ? `&line=${encodeURIComponent(line)}` : ''
-    // 官方线路要二次换 ticket，慢的时候会超过 15 秒
-    const r = await fetch(`${PROXY}/api/play?show=${encodeURIComponent(showId)}&ep=${idx}${extra}`, { signal: AbortSignal.timeout(60000) })
+    const params = new URLSearchParams({ show: showId, ep: String(idx) })
+    if (line) params.set('line', line)
+    if (Number(quality) > 0) params.set('quality', String(Number(quality)))
+    if (preferred) params.set('preferred', preferred)
+    // Official line tickets may need a second upstream request.
+    const timeout = AbortSignal.timeout(45_000)
+    const r = await fetch(`${PROXY}/api/play?${params}`, { signal: signal ? AbortSignal.any([signal, timeout]) : timeout })
     const j = await r.json().catch(() => null)
     if (!r.ok || !j || j.error) {
       // 把原因带给播放页：会员片 / 线路异常要分开提示

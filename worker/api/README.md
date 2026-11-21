@@ -5,12 +5,21 @@ D1：`kanju-db`（`41dca879-dd13-416f-acf0-3ca6e8feb9a1`）
 
 ## 部署
 
+新建空 D1 数据库时执行 `schema.sql`。已有数据库先检查并只执行尚未应用的增量迁移，再执行 schema 和部署；不要对已有数据库重放 `migrate-v7.sql`，因为 SQLite 不支持 `ADD COLUMN IF NOT EXISTS`。
+
 ```powershell
 cd worker/api
+# 新数据库：
+wrangler d1 execute kanju-db --remote --file=schema.sql
+# 旧数据库且 sources.quality 尚不存在时：
+wrangler d1 execute kanju-db --remote --command="PRAGMA table_info(sources)"
+wrangler d1 execute kanju-db --remote --file=migrate-v7.sql
 wrangler d1 execute kanju-db --remote --file=schema.sql
 wrangler deploy
 '<上游签名密钥>' | wrangler secret put KJ_SECRET   # 加密 Secret，不是明文 var
 ```
+
+v7 migration 仅新增 `sources.quality` 列，不改写或删除现有来源记录。部署前应先备份/核对远端 D1，并确认该列不存在；已存在则跳过迁移、只执行 schema。
 
 ## 数据同步（从本地 SQLite）
 
@@ -53,6 +62,7 @@ node sync-all.mjs update 4    # 最近更新的新剧/新集
 | `/api/show?id=` | 详情 + 分集 + 线路健康度 |
 | `/api/lines?show=&ep=` | 该集可选线路（官方/普通） |
 | `/api/play?show=&ep=&line=` | 解析并校验后返回直链 |
+| `/api/playback-result` | POST JSON `{showId,provider,ok}`，记录浏览器真实起播/解码失败结果 |
 | `/api/audit?show=` | 线路体检结果 |
 | `/api/progress` | 播放进度读写 |
 | `POST /api/auth/register` | 账号注册，返回 30 天会话令牌 |

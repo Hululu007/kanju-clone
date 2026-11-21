@@ -61,6 +61,7 @@ CREATE TABLE IF NOT EXISTS sources (
   fingerprint TEXT,
   segments INTEGER,
   duration REAL,
+  quality INTEGER,
   status TEXT,
   checked_at TEXT,
   PRIMARY KEY (show_id, ep_idx, provider)

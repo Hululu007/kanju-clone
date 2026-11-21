@@ -39,12 +39,38 @@ if (!existsSync(CLIP)) {
 
 const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.json': 'application/json', '.png': 'image/png', '.svg': 'image/svg+xml', '.ico': 'image/x-icon', '.woff2': 'font/woff2', '.webmanifest': 'application/manifest+json', '.mp4': 'video/mp4' }
 
+const playRequests = []
+const options = [
+  { provider: 'fixture-a', label: 'Fixture A', status: 'ok', quality: 720 },
+  { provider: 'fixture-b', label: 'Fixture B', status: 'ok', quality: 720 },
+]
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, 'http://127.0.0.1')
+  if (url.pathname.startsWith('/api/')) {
+    let body = { ok: true }
+    if (url.pathname === '/api/lines') body = { options }
+    if (url.pathname === '/api/play') {
+      const provider = url.searchParams.get('line') || options[0].provider
+      playRequests.push(provider)
+      body = { url: `/__clip.mp4?line=${provider}`, kind: 'mp4', provider, quality: 720,
+        options: url.searchParams.has('line') ? options.filter((option) => option.provider === provider) : options }
+    }
+    res.writeHead(200, { 'content-type': 'application/json' })
+    return res.end(JSON.stringify(body))
+  }
   if (url.pathname === '/__clip.mp4') {
-    const stat = statSync(CLIP)
-    res.writeHead(200, { 'content-type': 'video/mp4', 'content-length': stat.size, 'accept-ranges': 'bytes' })
-    return readFileSync(CLIP) && res.end(readFileSync(CLIP))
+    const clip = readFileSync(CLIP)
+    const range = /^bytes=(\d+)-(\d*)$/.exec(req.headers.range || '')
+    const start = range ? Number(range[1]) : 0
+    const end = range?.[2] ? Math.min(Number(range[2]), clip.length - 1) : clip.length - 1
+    if (start > end || start >= clip.length) {
+      res.writeHead(416, { 'content-range': `bytes */${clip.length}` })
+      return res.end()
+    }
+    const headers = { 'content-type': 'video/mp4', 'content-length': end - start + 1, 'accept-ranges': 'bytes' }
+    if (range) headers['content-range'] = `bytes ${start}-${end}/${clip.length}`
+    res.writeHead(range ? 206 : 200, headers)
+    return res.end(clip.subarray(start, end + 1))
   }
   let file = join(DIST, decodeURIComponent(url.pathname))
   if (existsSync(file) && statSync(file).isDirectory()) file = join(file, 'index.html')
@@ -83,7 +109,7 @@ const mouse = async (type, x, y, extra = {}) => send('Input.dispatchMouseEvent',
 const clickAt = async (x, y, count = 1) => {
   await mouse('mouseMoved', x, y); await sleep(40)
   await mouse('mousePressed', x, y, { clickCount: count }); await sleep(40)
-  await mouse('mouseReleased', x, y, { clickCount: count }); await sleep(60)
+  await mouse('mouseReleased', x, y, { clickCount: count }); await sleep(count > 1 ? 60 : 650)
 }
 const key = async (k, code, vk) => { await send('Input.dispatchKeyEvent', { type: 'keyDown', key: k, code, windowsVirtualKeyCode: vk }); await send('Input.dispatchKeyEvent', { type: 'keyUp', key: k, code, windowsVirtualKeyCode: vk }) }
 
@@ -93,17 +119,13 @@ if (process.env.HEADED === '1') { try { await send('Page.bringToFront') } catch 
 await send('Network.setBlockedURLs', { urls: ['https://*', 'http://kanju*', 'http://localhost*'] })
 await send('Emulation.setDeviceMetricsOverride', { width: WIDTH, height: HEIGHT, deviceScaleFactor: 1, mobile: false })
 const SHOW_ID = process.env.SHOW_ID || 'av_11r8C6YQBbEwnXSLgPkpXBr8a6knud-m8Zj5bcSXdcpG8mQ-vMYEC-OmE6GG0wYU8_vDj7_XQCQ98mo'
+await send('Page.addScriptToEvaluateOnNewDocument', { source: `localStorage.setItem('kj-proxy', location.origin)` })
 await send('Page.navigate', { url: `http://127.0.0.1:${PORT}/player/?id=${SHOW_ID}` })
 await sleep(3000)
-
-// 注入本地片子：直接播本地 mp4，避免依赖外网片源
-await evaluate(`(async () => {
-  const v = document.getElementById('video');
-  v.loop = false; v.src = 'http://127.0.0.1:${PORT}/__clip.mp4';
-  try { await v.play(); } catch (e) { document.title = 'playfail:' + e.message }
-  return v.readyState;
-})()`)
-await sleep(1200)
+const firstTime = await evaluate(`document.getElementById('video')?.currentTime ?? 0`)
+await sleep(700)
+const secondTime = await evaluate(`document.getElementById('video')?.currentTime ?? 0`)
+const startsThroughApi = playRequests.includes('fixture-a') && secondTime > firstTime
 
 const state = () => evaluate(`(() => {
   const p = document.getElementById('player'), c = document.getElementById('plCtrl'), v = document.getElementById('video');
@@ -139,7 +161,14 @@ console.log('scroll:', JSON.stringify(scrollInfo), 'after:', JSON.stringify(awai
 const park = async () => { await mouse('mouseMoved', 3, 3); await sleep(50) }
 
 const S0 = await state()
-rec('视频真的在播放', !S0.paused && S0.t > 0, JSON.stringify({ paused: S0.paused, t: S0.t, ready: S0.ready }))
+rec('正常片源接口起播且时间前进', startsThroughApi && !S0.paused && S0.t > 0, JSON.stringify({ requests: playRequests, firstTime, secondTime, paused: S0.paused, ready: S0.ready }))
+if (process.argv.includes('--start-only')) {
+  console.log(out.join('\n'))
+  ws.close()
+  chrome.kill()
+  server.close()
+  process.exit(startsThroughApi ? 0 : 1)
+}
 
 const geo = await evaluate(`(() => {
   const pic = document.querySelector('.pl-picture').getBoundingClientRect();
@@ -152,8 +181,10 @@ const geo = await evaluate(`(() => {
 let pic = await rect('.pl-picture')
 // 画面里避开中央播放键的点（暂停时中央是大播放钮）
 const tapPt = { x: pic.x, y: pic.t + Math.round(pic.h * 0.22) }
-const ensureShown = async () => { if ((await state()).controls !== 'on') await clickAt(tapPt.x, tapPt.y) }
-const ensureHidden = async () => { if ((await state()).controls !== 'off') await clickAt(tapPt.x, tapPt.y) }
+const ensureShown = async () => {
+  await evaluate(`(() => { const control = document.getElementById('btnPlay'); control.focus({ preventScroll: true }); control.blur() })()`)
+  await sleep(260)
+}
 
 // R0：播放中静止 3.4s 自动隐藏
 await park(); await ensureShown(); await park()
@@ -161,29 +192,30 @@ await sleep(3400)
 let s = await state()
 rec('R0 播放中无操作 3.4s 自动隐藏', s.controls === 'off' && !s.ctrlVisible, `controls=${s.controls} visible=${s.ctrlVisible}`)
 
-// R1：点画面显示 / 再点隐藏
+// R1：画面单击切换播放状态，暂停时控制栏保持显示
 await clickAt(tapPt.x, tapPt.y)
 s = await state()
-rec('R1a 点画面显示控制栏', s.controls === 'on' && s.ctrlVisible, `controls=${s.controls} visible=${s.ctrlVisible}`)
+rec('R1a 单击画面暂停并显示控制栏', s.paused && s.controls === 'on' && s.ctrlVisible, `paused=${s.paused} controls=${s.controls}`)
 await clickAt(tapPt.x, tapPt.y)
 s = await state()
-rec('R1b 再点画面立即隐藏', s.controls === 'off' && !s.ctrlVisible, `controls=${s.controls} visible=${s.ctrlVisible}`)
+rec('R1b 再次单击画面恢复播放', !s.paused && s.controls === 'on', `paused=${s.paused} controls=${s.controls}`)
 
-// R2：画面各点（含弹幕层覆盖区、画面留边）都能切换
-await ensureHidden()
+// R2：画面各处（含弹幕层覆盖区、留边）都能切换播放状态
 const dmResults = []
 for (const [x, y, t] of geo.hit) {
-  const before = (await state()).controls
+  const before = (await state()).paused
   await clickAt(x, y)
-  const after = (await state()).controls
-  dmResults.push(`${x},${y}(${t}):${before}→${after}`)
-  if (after === 'on') await clickAt(x, y)
+  const after = (await state()).paused
+  dmResults.push(`${x},${y}(${t}):${before ? 'paused' : 'playing'}→${after ? 'paused' : 'playing'}`)
+  if (after) await clickAt(x, y)
 }
-rec('R2 画面各处点击都能切换显隐', dmResults.every((r) => /on→off|off→on/.test(r)), dmResults.join(' | '))
+rec('R2 画面各处单击切换播放状态', dmResults.every((r) => /paused→playing|playing→paused/.test(r)), dmResults.join(' | '))
 
-// R3：只在画面上划动不算操作，3.4s 后仍隐藏
-await ensureHidden(); await ensureShown(); await park()
+// R3：画面内连续移动鼠标不续显示计时
+if ((await state()).paused) await evaluate(`document.getElementById('video').play()`)
+await park(); await ensureShown()
 for (let i = 0; i < 14; i++) { await mouse('mouseMoved', tapPt.x + (i % 5) * 22 - 44, tapPt.y + (i % 3) * 12 - 12); await sleep(240) }
+await sleep(3200)
 s = await state()
 rec('R3 只在画面上划动不续时（3.4s 后仍隐藏）', s.controls === 'off', `controls=${s.controls}`)
 
@@ -195,15 +227,14 @@ for (let i = 0; i < 7; i++) { await mouse('mouseMoved', ctrl.x + i * 3, ctrl.y);
 s = await state()
 rec('R4a 停在控制栏上 3.5s 不隐藏', s.controls === 'on' && s.ctrlVisible, `controls=${s.controls} visible=${s.ctrlVisible}`)
 await park()
-await sleep(3300)
+await sleep(3400)
 s = await state()
-rec('R4b 离开控制栏 3.3s 后隐藏', s.controls === 'off', `controls=${s.controls}`)
+rec('R4b 离开控制栏后自动隐藏', s.controls === 'off', `controls=${s.controls} hover=${s.hoverCtrl} focus=${s.activeEl} hide=${await evaluate('!!window.__hideTimer')} pointer=${JSON.stringify(await evaluate('window.__autoHide ? window.__autoHide() : null'))}`)
 
-// R5：暂停时保持显示
+// R5：暂停时保持显示，观察期间不再点击画面（画面单击会恢复播放）
 await park(); await ensureShown()
 await evaluate(`document.getElementById('video').pause()`)
 await sleep(300)
-await clickAt(tapPt.x, tapPt.y)   // 暂停状态下点画面：显示且不隐藏
 await park()
 await sleep(3600)
 s = await state()
@@ -233,15 +264,15 @@ await park(); await ensureShown()
 await mouse('mouseMoved', seek.l + 20, seek.y)
 await mouse('mousePressed', seek.l + 20, seek.y)
 await sleep(250)
-await evaluate(`document.getElementById('plSeek').dispatchEvent(new PointerEvent('lostpointercapture', { bubbles: true }))`)
+const releasedCapture = await evaluate(`(() => { const bar = document.getElementById('plSeek'); if (!bar.hasPointerCapture(1)) return false; bar.releasePointerCapture(1); return true })()`)
 await park()
 await sleep(3400)
 s = await state()
-rec('R7 拖动被中断后不卡死（3.4s 后隐藏）', s.controls === 'off', `controls=${s.controls}`)
-await mouse('mouseReleased', seek.l + 20, seek.y)
+rec('R7 拖动被中断后自动隐藏恢复', releasedCapture && s.controls === 'off', `captureReleased=${releasedCapture} controls=${s.controls} hover=${s.hoverCtrl} focus=${s.activeEl} paused=${s.paused} seeking=${s.seeking}`)
+await mouse('mouseReleased', 3, 3)
 
 // R8：设置面板打开时保持显示
-await park(); await ensureHidden(); await ensureShown()
+await park(); await ensureShown()
 const gearBtn = await rect('#btnGear')
 await clickAt(gearBtn.x, gearBtn.y)
 await park()
@@ -263,17 +294,18 @@ if (MODE !== 'normal') {
     // headless 里 requestFullscreen 会被拒绝，页面会退回网页全屏；这里改成直接打上真实的 is-fullscreen 类，
     // 走的是同一条 syncFullscreen() 的 CSS/逻辑路径（光标隐藏等规则完全一致）
     await evaluate(`(() => { const p = document.getElementById('player'); p.classList.remove('is-webfull'); document.documentElement.classList.remove('pl-webfull'); p.classList.add('is-fullscreen'); document.getElementById('plCtrl').classList.add('on'); p.dataset.controls = 'on'; })()`)
-    out.push('NOTE fullscreen :: headless 拒绝了真实 fullscreen，已改用 is-fullscreen 类验证（CSS 规则一致）')
+    out.push('UNVERIFIED fullscreen :: headless 拒绝系统 fullscreen；其余全屏样式仅作模拟检查，不计通过')
     await sleep(300)
   }
   await park()
   pic = await rect('.pl-picture')
   const tp = { x: pic.x, y: pic.t + Math.round(pic.h * 0.25) }
-  const shownInMode = async () => { if ((await state()).controls !== 'on') await clickAt(tp.x, tp.y) }
+  const shownInMode = ensureShown
 
   s = await state()
   const fsEl = await evaluate('!!document.fullscreenElement')
-  rec(`R10a 已进入 ${MODE}`, s.mode !== '' && (MODE === 'webfull' || fsEl), `picMode=${s.mode} fullscreenElement=${fsEl}`)
+  if (MODE === 'fullscreen' && !fsEl) out.push(`UNVERIFIED R10a 系统全屏 :: fullscreenElement=${fsEl}，网页样式模拟不作真实全屏证据`)
+  else rec(`R10a 已进入 ${MODE}`, s.mode !== '' && (MODE === 'webfull' || fsEl), `picMode=${s.mode} fullscreenElement=${fsEl}`)
 
   await evaluate(`(() => { window.__seekLog = []; const v = document.getElementById('video'); ['seeking','seeked','loop','ended','play','pause','ratechange'].forEach((e) => v.addEventListener(e, () => window.__seekLog.push([e, Math.round(v.currentTime * 100) / 100]))); return 1 })()`)
   await shownInMode(); await park()
@@ -299,7 +331,8 @@ if (MODE !== 'normal') {
   console.log('DBG postclick:', JSON.stringify(s), JSON.stringify(await evaluate('window.__autoHide ? window.__autoHide() : null')), JSON.stringify(await evaluate('(window.__scLog||[]).slice(-3)')))
   rec(`R10d ${MODE} 中点画面重新显示、光标恢复`, s.controls === 'on' && s.cursor !== 'none', `controls=${s.controls} cursor=${s.cursor}`)
 
-  // R9：弹幕输入框聚焦时保持显示，失焦后与控制栏一起隐藏（全屏下才有输入框）
+  // R9：弹幕输入框聚焦时保持显示，失焦后控制栏和输入框必须隐藏。
+  if ((await state()).paused) await clickAt(tp.x, tp.y)
   await shownInMode(); await park()
   const dm = await rect('#dmText')
   await clickAt(dm.x, dm.y)
@@ -309,10 +342,11 @@ if (MODE !== 'normal') {
   s = await state()
   const focused = await evaluate(`document.activeElement && document.activeElement.id`)
   rec('R9a 弹幕输入框有焦点时保持显示且输入框可见', s.controls === 'on' && s.dmVisible && focused === 'dmText', `controls=${s.controls} dmVisible=${s.dmVisible} focus=${focused}`)
-  await evaluate(`document.getElementById('dmText').blur()`)
+  await evaluate(`document.getElementById('dmText').blur(); document.getElementById('player').dispatchEvent(new PointerEvent('pointermove', { bubbles: true, pointerType: 'mouse' }))`)
   await sleep(3400)
   s = await state()
-  rec('R9b 失焦 3.4s 后隐藏，弹幕输入框同步隐藏', s.controls === 'off' && !s.dmVisible, `controls=${s.controls} dmVisible=${s.dmVisible}`)
+  const focusState = await evaluate(`(() => ({ active: document.activeElement?.id || document.activeElement?.tagName, hideTimer: !!window.__hideTimer, pointer: document.querySelector('.pl-ctrl').matches(':hover'), popup: [...document.querySelectorAll('.pl-pop')].some((el) => !el.hidden) }))()`)
+  rec('R9b 失焦后弹幕输入框和控制栏都隐藏', s.controls === 'off' && !s.ctrlVisible && !s.dmVisible, `controls=${s.controls} dmVisible=${s.dmVisible} focus=${JSON.stringify(focusState)}`)
 }
 
 const shot = await send('Page.captureScreenshot', { format: 'png' })
@@ -323,7 +357,8 @@ console.log(`### ${WIDTH}x${HEIGHT} ${MODE}`)
 console.log('geo:', JSON.stringify(geo))
 for (const line of out) console.log(line)
 const failures = out.filter((l) => l.startsWith('FAIL'))
-console.log('结果:', out.filter((l) => l.startsWith('PASS')).length + '/' + out.length)
+const unverified = out.filter((l) => l.startsWith('UNVERIFIED'))
+console.log('结果:', out.filter((l) => l.startsWith('PASS')).length + '/' + out.length, `失败=${failures.length} 未验证=${unverified.length}`)
 
 ws.close(); await sleep(200)
 try { chrome.kill('SIGKILL') } catch {}

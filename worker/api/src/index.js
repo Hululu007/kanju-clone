@@ -2,6 +2,9 @@
 import { syncOnce } from './sync.js'
 import { syncHomeFeed, syncHotRanks } from './feed-sync.js'
 import { inspectHlsResource } from './playback-probe.js'
+import { mediaDimensions, readBounded } from './media-dimensions.js'
+import { probeCandidates, selectPlayable } from './source-selection.js'
+import { orderLines } from './line-order.js'
 // 契约与本地 server/proxy.mjs 一致：/api/health /api/list /api/show /api/lines /api/play /api/audit /api/progress
 const SITE = 'https://kanju32.com'
 const BUILD = 'dianyingtiantang-v2026.11.12.3-worker-flag-fix-46f791897b69-web'
@@ -13,14 +16,6 @@ const priorityOf = (p) => {
   return i < 0 ? 90 : i
 }
 const isOfficial = (p) => /^(official|bytevod|bytedance)/i.test(String(p || ''))
-const qualityRank = (label = '') => {
-  const text = String(label)
-  const match = text.match(/(\d{3,4})\s*[pP]?/)
-  if (match) return Number(match[1])
-  if (/4K|UHD/i.test(text)) return 2160
-  if (/高清|HD/i.test(text)) return 720
-  return 0
-}
 
 const CORS = {
   'access-control-allow-origin': '*',
@@ -57,7 +52,7 @@ function throttle() {
   return p
 }
 
-async function signedFetch(env, path, { method = 'GET', body, cookie = '', timeout = 20000 } = {}) {
+async function signedFetch(env, path, { method = 'GET', body, cookie = '', timeout = 20000, signal } = {}) {
   const u = new URL(path, SITE)
   const ts = String(Date.now())
   const nonce = [...crypto.getRandomValues(new Uint8Array(16))].map((b) => b.toString(16).padStart(2, '0')).join('')
@@ -79,7 +74,7 @@ async function signedFetch(env, path, { method = 'GET', body, cookie = '', timeo
     headers,
     body: body === undefined ? undefined : JSON.stringify(body),
     redirect: 'manual',
-    signal: AbortSignal.timeout(timeout),
+    signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(timeout)]) : AbortSignal.timeout(timeout),
   })
   const text = await res.text()
   return { status: res.status, text, cookies: res.headers.getSetCookie?.() || [] }
@@ -152,10 +147,12 @@ async function resolveEpisode(env, ep) {
   return value
 }
 
-async function resolveTicket(env, ticket) {
+async function resolveTicket(env, ticket, signal) {
   await throttle()
+  if (signal?.aborted) throw new Error('probe_aborted')
   const cookie = await getGuest(env).catch(() => '')
-  const r = await signedFetch(env, '/v1/playback/resolve-line', { method: 'POST', body: { ticket }, cookie })
+  if (signal?.aborted) throw new Error('probe_aborted')
+  const r = await signedFetch(env, '/v1/playback/resolve-line', { method: 'POST', body: { ticket }, cookie, timeout: 7000, signal })
   if (r.status < 200 || r.status >= 300) {
     const err = new Error(`HTTP ${r.status} ${r.text.slice(0, 120)}`)
     err.body = r.text
@@ -185,26 +182,6 @@ function lineOptions(rv) {
     .filter((x) => x.provider && (x.ticket || x.url))
 }
 
-function orderLines(lines, stats = new Map()) {
-  return [...lines].sort((a, b) => {
-    const rankA = qualityRank(a.label)
-    const rankB = qualityRank(b.label)
-    const exact1080A = rankA === 1080
-    const exact1080B = rankB === 1080
-    if (exact1080A !== exact1080B) return exact1080A ? -1 : 1
-    const sa = stats.get(a.provider)
-    const sb = stats.get(b.provider)
-    const scoreA = sa ? Number(sa.successes || 0) / Math.max(1, Number(sa.successes || 0) + Number(sa.failures || 0)) : null
-    const scoreB = sb ? Number(sb.successes || 0) / Math.max(1, Number(sb.successes || 0) + Number(sb.failures || 0)) : null
-    if (scoreA != null && scoreB == null) return -1
-    if (scoreB != null && scoreA == null) return 1
-    if (scoreA != null && scoreB != null && scoreA !== scoreB) return scoreB - scoreA
-    if (a.selected !== b.selected) return a.selected ? -1 : 1
-    if (a.group !== b.group) return a.group === 'official' ? -1 : 1
-    if (a.group === 'official') return a.index - b.index
-    return a.priority - b.priority
-  })
-}
 
 function sniff(buf, contentType = '') {
   if (/image\//i.test(contentType)) {
@@ -220,10 +197,11 @@ function sniff(buf, contentType = '') {
   return 'unknown'
 }
 
-async function inspectHls(url) {
+async function inspectHls(url, signal) {
   const result = await inspectHlsResource(url, {
     fetchImpl: (resource, options) => fetch(resource, { ...options, headers: { ...options.headers, 'user-agent': UA } }),
     timeoutMs: 5000,
+    signal,
   })
   if (!result.ok) return result
   const first = result.firstSegment
@@ -235,32 +213,41 @@ async function inspectHls(url) {
   }
 }
 
-async function inspectMp4(url) {
+async function inspectMp4(url, signal) {
   try {
     const r = await fetch(url, {
-      headers: { 'user-agent': UA, range: 'bytes=0-4095' },
+      headers: { 'user-agent': UA, range: 'bytes=0-8388607' },
       redirect: 'follow',
-      signal: AbortSignal.timeout(15000),
+      signal: AbortSignal.any([AbortSignal.timeout(7000), ...(signal ? [signal] : [])]),
     })
     if (r.status >= 400) return { ok: false, kind: 'mp4', status: r.status, error: `http_${r.status}` }
     const ct = r.headers.get('content-type') || ''
     const len = r.headers.get('content-range') || r.headers.get('content-length') || ''
-    const buf = await r.arrayBuffer()
+    const buf = await readBounded(r, 8 * 1024 * 1024)
     const kind = sniff(buf, ct)
-    if (kind === 'hls') return inspectHls(url)
+    if (kind === 'hls') return inspectHls(url, signal)
     if (kind === 'image') return { ok: false, kind: 'image', error: 'placeholder_image' }
     if (kind === 'html') return { ok: false, kind: 'page', error: 'not_video' }
-    if (kind !== 'mp4') return { ok: false, kind, error: 'not_video', contentType: ct }
+    if (kind !== 'mp4') return { ok: false, kind, error: 'not_video' }
     if (!buf.byteLength) return { ok: false, kind: 'mp4', error: 'empty_media' }
-    return { ok: true, kind: 'mp4', length: len, fingerprint: await sha(`${String(r.url || url).split('?')[0]}|${len}`) }
-  } catch (e) {
+    const dimensions = mediaDimensions(buf)
+    return { ok: true, kind: 'mp4', length: len, ...dimensions, qualitySource: dimensions.height ? 'media' : 'unknown', mediaUrl: r.url || url, fingerprint: await sha(`${String(r.url || url).split('?')[0]}|${len}`) }
+  } catch {
     return { ok: false, kind: 'mp4', error: 'fetch_failed' }
   }
 }
 
-async function inspectSource(url) {
-  if (/\.m3u8(\?|$)/i.test(url)) return inspectHls(url)
-  return inspectMp4(url)
+async function inspectSource(url, signal) {
+  if (/\.m3u8(\?|$)/i.test(url)) return inspectHlsResource(url, {
+    fetchImpl: (resource, options) => fetch(resource, { ...options, headers: { ...options.headers, 'user-agent': UA } }),
+    timeoutMs: 5000,
+    signal,
+  }).then(async (result) => {
+    if (!result.ok) return result
+    const fingerprint = result.firstBytes.byteLength > 1024 ? await sha(result.firstBytes) : await sha(`${result.firstSegment.split('?')[0]}|${result.segments}|${Math.round(result.duration)}`)
+    return { ...result, fingerprint }
+  })
+  return inspectMp4(url, signal)
 }
 
 // ---------- 播放 ----------
@@ -283,13 +270,20 @@ async function setHealth(env, showId, provider, verdict, detail = '') {
   ).catch(() => {})
 }
 
+async function recordLineProbe(env, showId, provider, ok) {
+  await dbRun(env,
+    `INSERT INTO provider_playback_stats(show_id,provider,successes,failures,updated_at) VALUES(?,?,?,?,datetime('now'))
+     ON CONFLICT(show_id,provider) DO UPDATE SET successes=successes+excluded.successes, failures=failures+excluded.failures, updated_at=datetime('now')`,
+    showId, provider, ok ? 1 : 0, ok ? 0 : 1).catch(() => {})
+}
+
 async function saveSource(env, showId, epIdx, s) {
   await dbRun(
     env,
-    `INSERT INTO sources(show_id,ep_idx,provider,label,url,kind,fingerprint,segments,duration,status,checked_at)
-     VALUES(?,?,?,?,?,?,?,?,?,?,datetime('now'))
+    `INSERT INTO sources(show_id,ep_idx,provider,label,url,kind,fingerprint,segments,duration,quality,status,checked_at)
+     VALUES(?,?,?,?,?,?,?,?,?,?,?,datetime('now'))
      ON CONFLICT(show_id,ep_idx,provider) DO UPDATE SET label=excluded.label,url=excluded.url,kind=excluded.kind,
-       fingerprint=excluded.fingerprint,segments=excluded.segments,duration=excluded.duration,status=excluded.status,checked_at=excluded.checked_at`,
+       fingerprint=excluded.fingerprint,segments=excluded.segments,duration=excluded.duration,quality=COALESCE(excluded.quality, sources.quality),status=excluded.status,checked_at=excluded.checked_at`,
     showId,
     epIdx,
     s.provider,
@@ -299,15 +293,16 @@ async function saveSource(env, showId, epIdx, s) {
     s.fingerprint ?? null,
     s.segments ?? null,
     s.duration ?? null,
+    s.quality ?? null,
     s.status ?? 'ok'
   ).catch(() => {})
 }
 
-async function playUrl(env, showId, idx, preferred = '') {
-  // 指定线路时不读缓存，避免返回上一次自动选择的结果
-  const key = `${showId}#${idx}#${preferred || ''}`
+async function playUrl(env, showId, idx, requestedLine = '', targetQuality = 0, preferred = '') {
+  const requestedQuality = Number(targetQuality) || 0
+  const key = `${showId}#${idx}#${requestedLine}#${requestedQuality}#${preferred}`
   const hit = playCache.get(key)
-  if (!preferred && hit && Date.now() - hit.at < 90_000) return { ...hit.value, cached: true }
+  if (!requestedLine && hit && Date.now() - hit.at < 90_000) return { ...hit.value, cached: true }
 
   let ep = await dbFirst(env, 'SELECT * FROM episodes WHERE show_id=? AND idx=?', showId, Number(idx)).catch(() => null)
   if (!ep) {
@@ -332,8 +327,9 @@ async function playUrl(env, showId, idx, preferred = '') {
 
   const firstEp = await dbFirst(env, 'SELECT idx, number, token FROM episodes WHERE show_id=? ORDER BY idx LIMIT 1', showId).catch(() => null)
   const health = await healthMap(env, showId)
-  const playbackStats = new Map((await dbAll(env, 'SELECT provider,successes,failures FROM provider_playback_stats WHERE show_id=?', showId).catch(() => [])).map((row) => [row.provider, row]))
-  if (preferred && health.get(preferred)?.verdict === 'dup') throw new Error('该线路已判定串集，已停用；请换一条线路')
+  const successfulProviders = new Map((await dbAll(env, `SELECT p.provider,p.successes,p.failures,p.successes+p.failures total,MAX(s.quality) quality
+       FROM provider_playback_stats p LEFT JOIN sources s ON s.show_id=p.show_id AND s.provider=p.provider
+       WHERE p.show_id=? GROUP BY p.provider`, showId).catch(() => [])).map((row) => [row.provider, row]))
 
   // 片头片尾（原站 /v1/catalog/:id 的 playback_skip_settings_preset），按剧缓存到 D1
   let skip = null
@@ -356,88 +352,98 @@ async function playUrl(env, showId, idx, preferred = '') {
     /* 拿不到就不显示跳过按钮 */
   }
 
-  const lines = orderLines(lineOptions(rv), playbackStats).filter((l) => health.get(l.provider)?.verdict !== 'dup')
-  if (preferred) {
-    const at = lines.findIndex((l) => l.provider === preferred)
+  const lines = orderLines(lineOptions(rv).map((line) => ({
+    ...line,
+    quality: 0,
+    stats: successfulProviders.get(line.provider),
+  })), successfulProviders).filter((line) => health.get(line.provider)?.verdict !== 'dup')
+  if (requestedLine) {
+    const at = lines.findIndex((line) => line.provider === requestedLine)
+    if (at < 0) throw new Error('所选线路在本集不可用')
+    if (at > 0) lines.unshift(lines.splice(at, 1)[0])
+  } else if (preferred) {
+    const at = lines.findIndex((line) => line.provider === preferred)
     if (at > 0) lines.unshift(lines.splice(at, 1)[0])
   }
-  const attempt = preferred ? lines.filter((l) => l.provider === preferred) : lines.slice(0, 20)
-
+  const candidates = requestedLine
+    ? [lines.find((line) => line.provider === requestedLine), ...lines.filter((line) => line.provider !== requestedLine)]
+    : lines
   const tried = []
-  for (const line of attempt) {
+  const probed = await probeCandidates(candidates.filter(Boolean), async (line, signal) => {
     let url = line.url
     if (!url && line.ticket) {
-      try {
-        url = await resolveTicket(env, line.ticket)
-      } catch (e) {
-        const body = String(e.body || e.message || '')
-        if (/playback_user_session_required|login_required/.test(body)) {
-          await setHealth(env, showId, line.provider, 'member', '需要登录/会员')
-          tried.push({ label: line.label, provider: line.provider, reason: 'member' })
-        } else {
-          tried.push({ label: line.label, provider: line.provider, reason: 'resolve_failed' })
-        }
-        continue
+      try { url = await resolveTicket(env, line.ticket, signal) } catch (error) {
+        const body = String(error.body || error.message || '')
+        const member = /playback_user_session_required|login_required/.test(body)
+        if (member) await setHealth(env, showId, line.provider, 'member', '需要登录/会员')
+        return { line, ok: false, url: '', kind: '', error: member ? 'member' : 'resolve_failed' }
       }
     }
-    if (!url) {
-      tried.push({ label: line.label, provider: line.provider, reason: 'no_url' })
-      continue
-    }
-    const info = await inspectSource(url)
-    if (!info.ok) {
-      tried.push({ label: line.label, provider: line.provider, reason: info.error || 'not_playable', kind: info.kind })
-      await saveSource(env, showId, Number(idx), { provider: line.provider, label: line.label, url, kind: info.kind, status: info.error || 'dead' })
-      continue
-    }
-    const fp = info.fingerprint
+    if (!url) return { line, ok: false, url: '', kind: '', error: 'no_url' }
+    const info = await inspectSource(url, signal)
+    if (!info.ok) return { line, ok: false, url, ...info }
     const rows = await dbAll(env, 'SELECT ep_idx, fingerprint FROM sources WHERE show_id=? AND provider=? AND fingerprint IS NOT NULL', showId, line.provider).catch(() => [])
-    const collision = rows.find((r) => r.fingerprint === fp && Number(r.ep_idx) !== Number(idx))
+    const collision = rows.find((row) => row.fingerprint === info.fingerprint && Number(row.ep_idx) !== Number(idx))
     if (collision) {
       await setHealth(env, showId, line.provider, 'dup', `第${Number(collision.ep_idx) + 1}集与第${Number(idx) + 1}集同内容`)
-      tried.push({ label: line.label, provider: line.provider, reason: 'episode_collision' })
-      continue
+      return { ...info, line, url, ok: false, error: 'episode_collision' }
     }
     if (!rows.length && firstEp && Number(idx) !== Number(firstEp.idx)) {
-      const base = await dbFirst(env, 'SELECT fingerprint FROM provider_baseline WHERE show_id=? AND provider=?', showId, line.provider).catch(() => null)
-      if (base?.fingerprint && base.fingerprint === fp) {
+      const baseline = await dbFirst(env, 'SELECT fingerprint FROM provider_baseline WHERE show_id=? AND provider=?', showId, line.provider).catch(() => null)
+      if (baseline?.fingerprint && baseline.fingerprint === info.fingerprint) {
         await setHealth(env, showId, line.provider, 'dup', '所有集指向第1集')
-        tried.push({ label: line.label, provider: line.provider, reason: 'same_as_first_episode' })
-        continue
+        return { ...info, line, url, ok: false, error: 'same_as_first_episode' }
       }
     }
-    await saveSource(env, showId, Number(idx), {
-      provider: line.provider,
-      label: line.label,
-      url,
-      kind: info.kind,
-      fingerprint: fp,
-      segments: info.segments,
-      duration: info.duration,
-      status: 'ok',
-    })
+    return { line, url, ...info, ok: true }
+  }, { concurrency: 4, timeoutMs: 7000, budgetMs: 20000 })
+
+  for (const item of probed) {
+    if (!item.ok) {
+      tried.push({ label: item.line.label, provider: item.line.provider, reason: item.error || 'unavailable', quality: Number(item.height || item.variantHeight) || 0 })
+      if (!item.deferred && !['member', 'resolve_failed', 'probe_aborted'].includes(item.error)) await recordLineProbe(env, showId, item.line.provider, false)
+      if (item.url && !['member', 'resolve_failed', 'probe_budget_exceeded', 'probe_timeout', 'probe_aborted'].includes(item.error)) {
+        await saveSource(env, showId, Number(idx), { provider: item.line.provider, label: item.line.label, url: item.url, kind: item.kind, quality: Number(item.height) || null, status: item.error || 'dead' })
+      }
+    }
+  }
+  const mediaCandidates = probed.map((item) => ({ ...item.line, ...item, quality: Number(item.height || item.variantHeight) || 0 }))
+  const chosen = requestedLine
+    ? mediaCandidates.find((item) => item.provider === requestedLine && item.ok) || selectPlayable(mediaCandidates.filter((item) => item.provider !== requestedLine), { preferred, targetQuality: requestedQuality })
+    : selectPlayable(mediaCandidates, { preferred, targetQuality: requestedQuality })
+  if (chosen) {
+    const { line, mediaUrl, fingerprint: fp, kind, segments, duration, height = 0, width = 0 } = chosen
+    const quality = Number(height || chosen.variantHeight) || 0
+    const url = mediaUrl || chosen.url
+    await saveSource(env, showId, Number(idx), { provider: line.provider, label: line.label, url, kind, fingerprint: fp, segments, duration, quality: quality || null, status: 'ok' })
     const value = {
       showId,
       idx: Number(idx),
       url,
-      kind: info.kind,
+      kind,
       episodeNumber: Number(gotNum ?? wantNum),
       line: line.label,
       provider: line.provider,
-      segments: info.segments,
-      duration: info.duration,
-      quality: info.variantHeight || qualityRank(line.label),
+      segments,
+      duration,
+      width,
+      quality,
+      qualitySource: chosen.qualitySource || 'unknown',
+      firstSegmentMs: chosen.firstSegmentMs ?? null,
       fingerprint: fp,
       verified: true,
       skip,
-      options: lineOptions(rv).map((l) => ({
-        provider: l.provider,
-        label: l.label,
-        group: l.group,
-        mode: l.ticket ? 'ticket' : 'direct',
-        status: health.get(l.provider)?.verdict || 'unknown',
-        selected: l.provider === line.provider,
+      options: probed.map((item) => ({
+        provider: item.line.provider,
+        label: item.line.label,
+        group: item.line.group,
+        mode: item.line.ticket ? 'ticket' : 'direct',
+        status: item.ok ? 'ok' : item.error === 'member' ? 'member' : item.deferred || ['probe_timeout', 'probe_budget_exceeded', 'resolve_failed', 'probe_aborted'].includes(item.error) ? 'unknown' : 'dead',
+        quality: Number(item.height || item.variantHeight) || 0,
+        successRate: item.line.stats?.total >= 2 ? item.line.stats.successes / item.line.stats.total : null,
+        selected: item.line.provider === line.provider,
       })),
+      candidateProviders: probed.filter((item) => item.ok).map((item) => item.line.provider),
       tried,
     }
     playCache.set(key, { at: Date.now(), value })
@@ -1088,23 +1094,6 @@ export default {
         })
       }
 
-      if (u.pathname === '/api/line-result') {
-        if (request.method !== 'POST') return json({ error: '只支持 POST' }, 405)
-        const origin = request.headers.get('origin') || ''
-        if (origin !== 'https://zhuiju.dpdns.org') return json({ error: '来源不允许' }, 403)
-        const body = await request.json().catch(() => ({}))
-        const provider = String(body.provider || '').slice(0, 80)
-        if (!provider || !/^[a-zA-Z0-9_-]+$/.test(provider)) return json({ error: '线路参数无效' }, 400)
-        if (typeof body.ok !== 'boolean') return json({ error: '结果参数无效' }, 400)
-        const showId = String(body.showId || '').slice(0, 120)
-        if (!/^[a-zA-Z0-9_-]+$/.test(showId)) return json({ error: '作品参数无效' }, 400)
-        await dbRun(env,
-          `INSERT INTO provider_playback_stats(show_id,provider,successes,failures,updated_at) VALUES(?,?,?,?,datetime('now'))
-           ON CONFLICT(show_id,provider) DO UPDATE SET successes=successes+excluded.successes, failures=failures+excluded.failures, updated_at=datetime('now')`,
-          showId, provider, body.ok ? 1 : 0, body.ok ? 0 : 1)
-        return json({ ok: true })
-      }
-
       if (u.pathname === '/api/lines') {
         const showId = u.searchParams.get('show')
         const idx = Number(u.searchParams.get('ep') || 0)
@@ -1125,27 +1114,45 @@ export default {
           throw e
         }
         const health = await healthMap(env, showId)
-        const playbackStats = new Map((await dbAll(env, 'SELECT provider,successes,failures FROM provider_playback_stats WHERE show_id=?', showId).catch(() => [])).map((row) => [row.provider, row]))
+        const successfulProviders = new Map((await dbAll(env, `SELECT p.provider,p.successes,p.failures,p.successes+p.failures total,MAX(s.quality) quality
+          FROM provider_playback_stats p LEFT JOIN sources s ON s.show_id=p.show_id AND s.provider=p.provider
+          WHERE p.show_id=? GROUP BY p.provider`, showId).catch(() => [])).map((row) => [row.provider, row]))
         return json({
           object: 'lines',
           showId,
           idx,
           episodeNumber: rv?.current_episode?.episode_number ?? ep.number,
-          options: orderLines(lineOptions(rv), playbackStats).map((l) => ({
+          options: orderLines(lineOptions(rv), successfulProviders).map((l) => ({
             provider: l.provider,
             label: l.label,
             group: l.group,
             mode: l.ticket ? 'ticket' : 'direct',
             status: health.get(l.provider)?.verdict || 'unknown',
+            quality: Number(successfulProviders.get(l.provider)?.quality) || 0,
+            successRate: successfulProviders.has(l.provider) && Number(successfulProviders.get(l.provider).total) > 0 ? Number(successfulProviders.get(l.provider).successes || 0) / Number(successfulProviders.get(l.provider).total) : null,
           })),
         })
+      }
+
+      if (u.pathname === '/api/playback-result' && request.method === 'POST') {
+        const body = await request.json().catch(() => ({}))
+        const showId = String(body.showId || '')
+        const provider = String(body.provider || '')
+        if (!showId || !provider || typeof body.ok !== 'boolean' || showId.length > 160 || provider.length > 120) return json({ error: '播放结果参数无效' }, 400)
+        const known = await dbFirst(env, 'SELECT provider FROM episodes WHERE show_id=? AND provider=? LIMIT 1', showId, provider).catch(() => null)
+          || await dbFirst(env, 'SELECT provider FROM sources WHERE show_id=? AND provider=? LIMIT 1', showId, provider).catch(() => null)
+        if (!known) return json({ error: '未知播放线路' }, 404)
+        await recordLineProbe(env, showId, provider, body.ok)
+        return json({ ok: true })
       }
 
       if (u.pathname === '/api/play') {
         const showId = u.searchParams.get('show')
         const idx = Number(u.searchParams.get('ep') || 0)
         const line = u.searchParams.get('line') || ''
-        const out = await playUrl(env, showId, idx, line)
+        const preferred = u.searchParams.get('preferred') || ''
+        const quality = Number(u.searchParams.get('quality')) || 0
+        const out = await playUrl(env, showId, idx, line, quality, preferred)
         return json({ object: 'play', ...out })
       }
 
