@@ -1162,24 +1162,33 @@ testToolbarDownloadButtonReplacesTheDanmakuSlot → missing-button
   - `pump` 不再算空位：解析完清单后把**所有未完成分片一次性投递**进系统后台队列；
     并发改由 `URLSessionConfiguration.httpMaximumConnectionsPerHost = maxSegmentConcurrency`（4）限制，
     任务归系统所有，App 挂起/锁屏都由系统继续传，不再依赖进程内回调接力。
-  - `adoptBackgroundEvents` 重写：认领系统任务 → 记「本进程已对账」→ 磁盘对账 → 再补发缺失分片 →
-    **无条件** `finishBackgroundEvents()` 归还收尾回调（只归还一次）。`ensureAdoption()` 让首次发包前必先对账，
-    避免进程重建后给同一片再发一条任务。
+  - `adoptBackgroundEvents` 重写：认领系统任务 → 记「本进程已对账」→ 磁盘对账 → 再补发缺失分片。
+    **认领与收尾分开**：这趟只负责接管和补发，收尾回调不在这儿归还。
+    completionHandler 改为在 `urlSessionDidFinishEvents` 里归还（这一轮事件真的处理完才还），
+    另留一张 8 秒兜底票（系统把这一轮判空、或代理回调迟到时自己还），票号保证只还一次。
+    `ensureAdoption()` 让首次发包前必先对账，避免进程重建后给同一片再发一条任务。
   - 新增 `reconcileDisk(id:)`：`seg-<序号>.part` 是整片下完才改名的，存在即视为已完成；
     进程死在落库前也不重下，整集齐了直接 `finalize`，不会停在「其实已经下完」的活儿上。
-  - `startSegment` 增加 `inFlight` 兜底（同一片绝不发两条系统任务）；`attempts` 改为节流落库（一次投几百片不整份写盘）。
+  - `startSegment` 增加 `inFlight` 兜底（同一片绝不发两条系统任务）；投递计数改走本类新增的
+    `bumpAttempts`（内存立即加一、落盘按秒节流）。
+    **修正**：送审版误用了 `update(id, force: false)`，而这个签名只存在于 `MediaDownloader`，
+    `HLSDownloader` 自己的 `update` 只有 `(id, mutate)` —— 跨类用不了，会直接编译失败（审核 2026-11-21 第 1 条）。
   - 暂停/恢复/取消/删除语义不变：`pause` 仍保留已下分片、`cancel`/`discard` 仍清缓存并取消全部已投递任务，
     代次校验与墓碑语义沿用（晚到回调不会复活已删记录）。
   - mp4 直链原本就走后台会话，未改动。
 - **改动文件**：`ios/ZhuijuAI/HLSDownloader.swift`、`ios/Tests/backgroundDownload.test.mjs`（新增）、
   `ios/project.yml`（build 27→28）、`.github/workflows/ios-ipa-only.yml`（产物 build 断言 28）、`ios/REGRESSIONS.md`。
-- **测试名**（Node，`ios/Tests/backgroundDownload.test.mjs`，6 条）：分片全量入队：pump 把剩下的分片一次性交给系统队列，
+- **测试名**（Node，`ios/Tests/backgroundDownload.test.mjs`，7 条）：分片全量入队：pump 把剩下的分片一次性交给系统队列，
   不再按空位在进程内派发、后台会话并发上限交给系统：整集分片一次入队，仍在 4 条连接内排队、
-  后台事件收尾：completionHandler 必须归还，不能等「系统任务空了」才还、重启对账：先认回系统里在跑的分片再发新任务，
+  后台事件收尾：认领与收尾分开，回调等这一轮事件处理完才在 `urlSessionDidFinishEvents` 里归还、
+  分片投递计数走本类自己的节流写，不调用不存在的 `update(id:force:)`、重启对账：先认回系统里在跑的分片再发新任务，
   磁盘上已完成的分片不重下、暂停/删除照样停掉已经投递进系统队列的全部分片、mp4 直链仍然走真正的后台会话。
-- **本地验证**：套内存硬上限 `python C:\Users\kenzh\hark_tasks\memcap.py 2048 node --test Tests/*.test.mjs`：
-  修复前这 6 条里 4 条红（分片全量入队、会话并发上限、收尾回调、重启对账）；修复后全仓 **132/132 通过**（0 失败，未触发 memcap）。
-  旧测试未删、未跳、断言未放宽。
+- **本地验证**：套内存硬上限 `python C:\Users\kenzh\hark_tasks\memcap.py 2048 node --test ios/Tests/*.test.mjs`：
+  首次送审版（`746527f`）这 6 条里 4 条红（分片全量入队、会话并发上限、收尾回调、重启对账）；
+  审核打回后按两条意见改，新增 1 条「不调用不存在的 `update(id:force:)`」守卫：
+  把 Swift 回退到送审版时这 2 条必红（收尾回调、投递计数），改完后全仓 **133/133 通过**（0 失败，未触发 memcap）。
+  旧测试未删、未跳、断言未放宽；「收尾回调」那条断言是审核指出口径错之后改的：旧断言要求
+  「对账时就归还」，新断言要求「认领与收尾分开、只在 `urlSessionDidFinishEvents` 归还 + 兜底票」。
 - **修复版本**：0.1.19（build 28）
 - **为什么没选方案一（AVAssetDownloadURLSession）**：
   1. 现有回归有 15+ 条源码守卫钉住分片引擎（pump/retry/finalize/decrypt），规则不许删测试或改断言；

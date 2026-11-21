@@ -34,14 +34,37 @@ test('后台会话并发上限交给系统：整集分片一次入队，仍在 4
   assert.ok(background.includes('sessionSendsLaunchEvents = true'));
 });
 
-test('后台事件收尾：completionHandler 必须归还，不能等「系统任务空了」才还', () => {
-  const adopt = section(downloader, 'static func adoptBackgroundEvents', '// MARK: - 会话');
+test('后台事件收尾：认领与收尾分开，回调等这一轮事件处理完才在 urlSessionDidFinishEvents 里归还', () => {
+  const adopt = section(downloader, 'static func adoptBackgroundEvents', '/// 给收尾回调上保险');
   assert.ok(!adopt.includes('systemTasks.isEmpty'),
     '一集有 400~1400 片，队列永远不空；等空了才还回调，系统就不再为这条会话唤醒 App');
-  assert.ok(adopt.includes('finishBackgroundEvents()'), '事件处理完就要把收尾回调交回系统');
-  const finish = section(downloader, 'private static func finishBackgroundEvents', '// MARK: - 会话');
+  assert.ok(!adopt.includes('finishBackgroundEvents()'),
+    '被唤醒 ≠ 这一轮事件处理完：在对账回调里提前归还，会让 App 在分片搬盘、状态落库前被挂起');
+  assert.ok(adopt.includes('armFinishEventsDeadline()'), '要留兜底，绝不把系统晾在那儿等回调');
+
+  const deadline = section(downloader, 'private static func armFinishEventsDeadline', '/// 跟系统对账');
+  assert.ok(deadline.includes('finishEventsTicket'), '兜底要凭票号，不能提前还掉下一轮的回调');
+
+  const adoptTasks = section(downloader, 'private static func adoptIfNeeded', '/// 本进程还没跟系统对过账');
+  assert.ok(!adoptTasks.includes('finishBackgroundEvents'), '认领系统任务不等于这一轮事件处理完，不能顺手归还');
+
+  const finish = section(downloader, 'private static func finishBackgroundEvents', '/// 磁盘对账');
   assert.ok(finish.includes('backgroundCompletion = nil'), '收尾回调只许调一次');
   assert.ok(finish.includes('pending()'));
+  assert.ok(finish.includes('finishEventsTicket += 1'), '归还后作废没到点的兜底票');
+
+  const delegate = section(downloader, 'func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession)', '\n}');
+  assert.ok(delegate.includes('Self.finishBackgroundEvents()'), '这一轮事件处理完的归宿只有 urlSessionDidFinishEvents');
+});
+
+test('分片投递计数走本类自己的节流写，不调用不存在的 update(id:force:)', () => {
+  assert.ok(!downloader.includes('force:'),
+    'HLSDownloader 的 update 只有 (id, mutate) 两个参数，带 force 的是 MediaDownloader 的同名方法，跨类用不了');
+  const bump = section(downloader, 'private static func bumpAttempts', '// MARK: - 开始 / 解析清单');
+  assert.ok(bump.includes('attempts += 1'), '投递计数要真的加一（重试上限靠它）');
+  assert.ok(bump.includes('persist()'), '内存立即生效，磁盘按秒节流，不能每片整份写盘');
+  const startSegment = section(downloader, 'private static func startSegment', '/// 分片失败：给这一片挂一张专属重试票');
+  assert.ok(startSegment.includes('bumpAttempts(id: id, index: index)'), 'startSegment 要调本类的 bumpAttempts');
 });
 
 test('重启对账：先认回系统里在跑的分片再发新任务，磁盘上已完成的分片不重下', () => {

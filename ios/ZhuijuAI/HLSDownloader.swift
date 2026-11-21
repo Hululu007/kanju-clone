@@ -85,6 +85,10 @@ final class HLSDownloader: NSObject {
     /// 没对账就发新任务 = 进程重建后给同一片再发第二条任务，白耗流量还可能写坏缓存。
     private static var sessionAdopted = false
     private static var adopting = false
+    /// 收尾回调的兜底票号：正常由 `urlSessionDidFinishEvents` 归还，兜底到点也还，谁先到谁作废对方。
+    private static var finishEventsTicket = 0
+    /// 分片投递计数的落盘节流：一次投几百片，每片都整份写盘会卡住主线程。
+    private static var lastAttemptsPersist = Date.distantPast
 
     /// 这条线路是不是 HLS：网页给的 kind 优先，其次看扩展名。
     static func isHLSSource(url: String, kind: String?) -> Bool {
@@ -176,12 +180,27 @@ final class HLSDownloader: NSObject {
     static func adoptBackgroundEvents(completion: @escaping () -> Void) {
         ensureLoaded()
         backgroundCompletion = completion
-        guard !sessionAdopted else {
-            /* 本进程已经对过账：这一次只是又一轮事件收尾，直接归还，别把系统卡在等回调上。 */
+        /* 这里只记下回调，不归还：此刻只是「系统把我唤醒、事件正在送过来」，
+           这一轮事件还没处理完。提前归还会让 App 在分片搬盘、状态落库之前就被挂起。 */
+        armFinishEventsDeadline()
+        adoptIfNeeded()
+    }
+
+    /// 给收尾回调上保险：系统把这一轮判成空、或代理回调迟到（重启后尤其）时，到点自己还。
+    /// 一直不还，系统会终止 App，之后也不再为这条会话唤醒。
+    private static func armFinishEventsDeadline() {
+        finishEventsTicket += 1
+        let ticket = finishEventsTicket
+        DispatchQueue.main.asyncAfter(deadline: .now() + 8) {
+            guard finishEventsTicket == ticket, backgroundCompletion != nil else { return }
             finishBackgroundEvents()
-            return
         }
-        guard !adopting else { return }
+    }
+
+    /// 跟系统对账：把系统里真实存在的分片任务认领回来，再补齐没下完的分片。
+    /// 一个进程只做一次；`ensureAdoption` 也走这里，不碰系统的收尾回调。
+    private static func adoptIfNeeded() {
+        guard !sessionAdopted, !adopting else { return }
         adopting = true
         backgroundSession().getAllTasks { systemTasks in
             for task in systemTasks {
@@ -229,22 +248,22 @@ final class HLSDownloader: NSObject {
                 if taskKeys.values.contains(where: { $0.hasPrefix(id + "#") }) { continue }
                 pump(id: id)
             }
-            /* 不管队列里还有没有任务，事件处理完就要把收尾回调还给系统：
-               不归还，系统会认为我们还在处理事件，不再为这条会话唤醒 App，分片就停在那儿。 */
-            finishBackgroundEvents()
+            /* 认领完、补发完就结束这一趟：收尾回调不在这儿还。
+               等 delegate 把这一轮事件（分片搬盘、状态落库）处理干净，再走 urlSessionDidFinishEvents。 */
         }
     }
 
-    /// 本进程还没跟系统对过账：借同一条通道做一次认领，认领完它自己接着发分片。
+    /// 本进程还没跟系统对过账：先认领，认领完它自己接着发分片。
     private static func ensureAdoption() {
-        if sessionAdopted || adopting { return }
-        adoptBackgroundEvents(completion: {})
+        adoptIfNeeded()
     }
 
-    /// 后台会话的收尾回调：只许调一次，而且必须调（见 adoptBackgroundEvents 末尾的说明）。
+    /// 这一轮后台事件真的处理完了：把系统回调还给系统，只许还一次。
     private static func finishBackgroundEvents() {
         guard let pending = backgroundCompletion else { return }
         backgroundCompletion = nil
+        /* 作废还没到点的兜底票，免得它把下一轮事件的回调提前还掉。 */
+        finishEventsTicket += 1
         pending()
     }
 
@@ -329,6 +348,20 @@ final class HLSDownloader: NSObject {
         guard var job = jobs[id] else { return }
         mutate(&job)
         jobs[id] = job
+        persist()
+    }
+
+    /// 分片投递计数加一：内存立刻生效，落盘按秒节流。
+    /// 一次投递几百片时每片都整份写盘会卡住主线程，而 `attempts` 只服务本轮的重试上限，
+    /// 进程被杀的极端情况最多丢一个重试额度（重启后会重新给满）。
+    private static func bumpAttempts(id: String, index: Int) {
+        ensureLoaded()
+        guard var job = jobs[id], index < job.segments.count else { return }
+        job.segments[index].attempts += 1
+        jobs[id] = job
+        let now = Date()
+        guard now.timeIntervalSince(lastAttemptsPersist) >= 1 else { return }
+        lastAttemptsPersist = now
         persist()
     }
 
@@ -607,10 +640,7 @@ final class HLSDownloader: NSObject {
         inFlight.insert(key)
         /* 这一片真的起来了，之前挂的票（含更早的定时器）全部作废。 */
         retryScheduled.removeValue(forKey: key)
-        /* 一次要投几百片，这里不能每片都整份落库：attempts 不是持久必需的数据，节流写。 */
-        update(id, force: false) { job in
-            if index < job.segments.count { job.segments[index].attempts += 1 }
-        }
+        bumpAttempts(id: id, index: index)
         task.resume()
     }
 
@@ -932,8 +962,7 @@ extension HLSDownloader: URLSessionDownloadDelegate {
     }
 
     func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession) {
-        guard let completion = Self.backgroundCompletion else { return }
-        Self.backgroundCompletion = nil
-        completion()
+        /* 这一轮事件（含分片搬盘、状态落库）到这里才算处理完，现在才把系统回调还回去。 */
+        Self.finishBackgroundEvents()
     }
 }
