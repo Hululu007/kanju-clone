@@ -80,24 +80,17 @@ final class HLSDownloader: NSObject {
     /// 正在解析的 job 及其代次；旧回调回来时不能把新一次的解析标记清掉。
     private static var planning: [String: Int] = [:]
     private static var finalizing: Set<String> = []
-    /// 系统交下来的收尾回调。上一轮还没还完系统又唤醒一次时会攒下两张票，
-    /// 所以用数组而不是单个变量：只存一个会把先到的那张永久吞掉，系统最后会终止 App。
+    /// 系统交下来的收尾回调，按唤醒顺序排队：上一轮还没还完系统又唤醒一次时会攒下两张，
+    /// 只存一个会把先到的那张永久吞掉，系统最后会终止 App。
     private static var pendingCompletions: [() -> Void] = []
-    /// 这一轮是否已经见到真实活动（分片代理回调、或对账回调）。
-    /// `urlSessionDidFinishEvents` 没有轮次标识，只能靠它挡「上一轮迟到的收尾」。
-    private static var roundActivity = false
-    /// 正在处理的分片代理回调层数：非 0 说明搬盘/落库还在跑，这一轮不能算处理完。
-    private static var delegateDepth = 0
+    /// 已登记、还没收尾的唤醒票数。
+    /// `handleEventsForBackgroundURLSession` 每次登记一张，`urlSessionDidFinishEvents` 每次只销一张，
+    /// 按登记顺序还最早的那一张：上一轮迟到的收尾找不到票，碰不到下一轮登记的回调。
+    private static var wakeTickets = 0
     /// 本进程是否已经跟系统对过账（把系统里真实存在的分片任务认领回来）。
     /// 没对账就发新任务 = 进程重建后给同一片再发第二条任务，白耗流量还可能写坏缓存。
     private static var sessionAdopted = false
     private static var adopting = false
-    /// 对账回调真的跑完了（认领 + 磁盘对账 + 补发分片）。
-    /// 兜底判断「这一轮安静了吗」用它，而不是用 pump 的门 `sessionAdopted`：
-    /// 后者在回调中段就置上，那时可能正在搬盘。
-    private static var adoptionQuiet = false
-    /// 收尾回调的兜底票号：正常由 `urlSessionDidFinishEvents` 归还，兜底到点也还，谁先到谁作废对方。
-    private static var finishEventsTicket = 0
     /// 分片投递计数的落盘节流：一次投几百片，每片都整份写盘会卡住主线程。
     private static var lastAttemptsPersist = Date.distantPast
 
@@ -190,35 +183,12 @@ final class HLSDownloader: NSObject {
 
     static func adoptBackgroundEvents(completion: @escaping () -> Void) {
         ensureLoaded()
-        /* 这里只记下回调，不归还：此刻只是「系统把我唤醒、事件正在送过来」，
-           这一轮事件还没处理完。提前归还会让 App 在分片搬盘、状态落库之前就被挂起。 */
+        /* 这里只登记，不归还：此刻只是「系统把我唤醒、事件正在送过来」，这一轮还没处理完。
+           归还的唯一归宿是 `urlSessionDidFinishEvents` —— 系统在那里保证本轮事件已经送完。
+           这里也不挂任何定时器：定时器只能在「此刻没在处理」的瞬间触发，证明不了「事件已送完」。 */
         pendingCompletions.append(completion)
-        roundActivity = false
-        armFinishEventsDeadline(attempt: 0)
+        wakeTickets += 1
         adoptIfNeeded()
-    }
-
-    /// 给收尾回调上保险：系统把这一轮判成空、或代理回调迟到（重启后尤其）时，兜底归还。
-    /// 一直不还，系统会终止 App，之后也不再为这条会话唤醒。
-    /// 但「到点」不等于「处理完」：只有在能证明这一轮已经没有在跑的分片搬盘、对账也走过了
-    /// 才真还；否则顺延一小段再看。硬上限（约 14 秒）之后仍要还 —— 被系统终止 App
-    /// 比提前一点挂起更糟，这种情况下日志里会留下真实原因，供真机排查。
-    private static func armFinishEventsDeadline(attempt: Int) {
-        finishEventsTicket += 1
-        let ticket = finishEventsTicket
-        let delay: TimeInterval = attempt == 0 ? 8 : 2
-        DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
-            guard finishEventsTicket == ticket, !pendingCompletions.isEmpty else { return }
-            let quiet = adoptionQuiet && delegateDepth == 0
-            if !quiet && attempt < 3 {
-                armFinishEventsDeadline(attempt: attempt + 1)
-                return
-            }
-            if !quiet {
-                NSLog("[HLS] 收尾兜底到上限仍在忙（对账已跑完=%@，处理中=%d），先归还系统回调", String(describing: adoptionQuiet), delegateDepth)
-            }
-            finishBackgroundEvents(delegateSaysRoundDone: false)
-        }
     }
 
     /// 跟系统对账：把系统里真实存在的分片任务认领回来，再补齐没下完的分片。
@@ -227,8 +197,6 @@ final class HLSDownloader: NSObject {
         guard !sessionAdopted, !adopting else { return }
         adopting = true
         backgroundSession().getAllTasks { systemTasks in
-            /* 系统确实把事件送过来了：这一轮算有活动，迟到的代理收尾不能再拿它当借口。 */
-            roundActivity = true
             for task in systemTasks {
                 guard let key = task.taskDescription, let split = splitKey(key) else {
                     task.cancel()
@@ -276,7 +244,6 @@ final class HLSDownloader: NSObject {
             }
             /* 认领完、补发完就结束这一趟：收尾回调不在这儿还。
                等 delegate 把这一轮事件（分片搬盘、状态落库）处理干净，再走 urlSessionDidFinishEvents。 */
-            adoptionQuiet = true
         }
     }
 
@@ -285,18 +252,19 @@ final class HLSDownloader: NSObject {
         adoptIfNeeded()
     }
 
-    /// 这一轮后台事件真的处理完了：把系统回调还给系统，每张票只许还一次。
-    /// - delegateSaysRoundDone: 由 `urlSessionDidFinishEvents` 触发。它没有轮次标识，
-    ///   本轮若连一次分片回调/对账都没见到，这条大概率是上一轮的迟到尾巴，不能拿它结束本轮。
-    private static func finishBackgroundEvents(delegateSaysRoundDone: Bool) {
+    /// 这一轮后台事件真的处理完了：销一张唤醒票，按登记顺序把最早的那张回调还给系统。
+    /// 只有 `urlSessionDidFinishEvents` 调它 —— 系统在那个回调里保证本轮事件已经全部送达，
+    /// 所以进程内不需要（也无法）再判断「还有没有事件在路上」。
+    ///
+    /// 一次只还一张，而不是一次还一整批：连续两次唤醒攒下两张票时，两次收尾各还一张，
+    /// 后登记的那张不会被本轮还没送完的事件提前还掉。
+    /// 没有票就是上一轮的迟到通知，直接忽略，不会取走下一轮登记的回调。
+    private static func settleBackgroundWake() {
+        guard wakeTickets > 0 else { return }
+        wakeTickets -= 1
         guard !pendingCompletions.isEmpty else { return }
-        if delegateSaysRoundDone && !roundActivity { return }
-        let pending = pendingCompletions
-        pendingCompletions = []
-        /* 作废还没到点的兜底票，免得它把下一轮事件的回调提前还掉。 */
-        finishEventsTicket += 1
-        roundActivity = false
-        for completion in pending { completion() }
+        let completion = pendingCompletions.removeFirst()
+        completion()
     }
 
     /// 磁盘对账：`seg-<序号>.part` 是「整片下完才改名」的，存在即可认为这一片已完成。
@@ -708,10 +676,6 @@ final class HLSDownloader: NSObject {
     }
 
     private static func finish(key: String, taskIdentifier: Int, location: URL?, response: URLResponse?, error: Error?) {
-        delegateDepth += 1
-        defer { delegateDepth -= 1 }
-        /* 分片回调真的到了：这一轮算有活动（迟到收尾判定靠它）。 */
-        roundActivity = true
         ensureLoaded()
         /* 先按系统任务号取出这次回调的代次：旧任务晚到时连 inFlight 都不能碰，
            否则会把同一 id 新任务的状态删掉。 */
@@ -998,8 +962,8 @@ extension HLSDownloader: URLSessionDownloadDelegate {
     }
 
     func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession) {
-        /* 这一轮事件（含分片搬盘、状态落库）到这里才算处理完，现在才把系统回调还回去。
-           本轮一次回调都没见到时，这条可能是上一轮的迟到尾巴，由 `finishBackgroundEvents` 拒掉。 */
-        Self.finishBackgroundEvents(delegateSaysRoundDone: true)
+        /* 系统在这里保证这一轮事件（含分片搬盘、状态落库）已经全部送完，
+           所以这也是整份代码里唯一允许把系统回调还回去的地方。 */
+        Self.settleBackgroundWake()
     }
 }

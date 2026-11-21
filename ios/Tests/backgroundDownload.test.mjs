@@ -34,63 +34,65 @@ test('后台会话并发上限交给系统：整集分片一次入队，仍在 4
   assert.ok(background.includes('sessionSendsLaunchEvents = true'));
 });
 
-test('后台事件收尾：认领与收尾分开，回调等这一轮事件处理完才在 urlSessionDidFinishEvents 里归还', () => {
-  const adopt = section(downloader, 'static func adoptBackgroundEvents', '/// 给收尾回调上保险');
+test('后台事件收尾：认领与收尾分开，归还只由 urlSessionDidFinishEvents 触发', () => {
+  const adopt = section(downloader, 'static func adoptBackgroundEvents', '/// 跟系统对账');
   assert.ok(!adopt.includes('systemTasks.isEmpty'),
     '一集有 400~1400 片，队列永远不空；等空了才还回调，系统就不再为这条会话唤醒 App');
-  assert.ok(!adopt.includes('finishBackgroundEvents'),
-    '被唤醒 ≠ 这一轮事件处理完：在对账回调里提前归还，会让 App 在分片搬盘、状态落库前被挂起');
-  assert.ok(adopt.includes('armFinishEventsDeadline(attempt: 0)'), '要留兜底，绝不把系统晾在那儿等回调');
-
-  const deadline = section(downloader, 'private static func armFinishEventsDeadline', '/// 跟系统对账');
-  assert.ok(deadline.includes('finishEventsTicket'), '兜底要凭票号，不能提前还掉下一轮的回调');
+  assert.ok(!adopt.includes('settleBackgroundWake'),
+    '被唤醒 ≠ 这一轮事件处理完：登记回调时就归还，会让 App 在分片搬盘、状态落库前被挂起');
 
   const adoptTasks = section(downloader, 'private static func adoptIfNeeded', '/// 本进程还没跟系统对过账');
-  assert.ok(!adoptTasks.includes('finishBackgroundEvents'), '认领系统任务不等于这一轮事件处理完，不能顺手归还');
-
-  const finish = section(downloader, 'private static func finishBackgroundEvents', '/// 磁盘对账');
-  assert.ok(finish.includes('pendingCompletions = []'), '收尾时把攒下的票一起取走，每张只还一次');
-  assert.ok(finish.includes('for completion in pending'), '攒了多张票（连续两次唤醒）必须逐张归还，不能只还最后一张');
-  assert.ok(finish.includes('finishEventsTicket += 1'), '归还后作废没到点的兜底票');
+  assert.ok(!adoptTasks.includes('settleBackgroundWake'), '认领系统任务不等于这一轮事件处理完，不能顺手归还');
 
   const delegate = section(downloader, 'func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession)', '\n}');
-  assert.ok(delegate.includes('Self.finishBackgroundEvents(delegateSaysRoundDone: true)'),
+  assert.ok(delegate.includes('Self.settleBackgroundWake()'),
     '这一轮事件处理完的归宿只有 urlSessionDidFinishEvents');
+  /* 归还函数只许有「定义 + 代理里那一次调用」两个出现点：
+     多一个调用点就多一条提前归还的路径，这条断言直接把它挡住。 */
+  const callSites = downloader.split('settleBackgroundWake(').length - 1;
+  assert.equal(callSites, 2,
+    'settleBackgroundWake 只许有定义 1 处 + 代理调用 1 处，多出来的就是提前归还');
 });
 
 test('连续两次后台唤醒不吞回调：攒成队列，逐张归还', () => {
   assert.ok(downloader.includes('private static var pendingCompletions: [() -> Void] = []'),
     '只存一张回调时，后一次唤醒会直接覆盖前一张，前一张永远不归还，系统最后终止 App');
   assert.ok(!/private static var backgroundCompletion\b/.test(downloader), '不能再用单张回调变量');
-  const adopt = section(downloader, 'static func adoptBackgroundEvents', '/// 给收尾回调上保险');
+  const adopt = section(downloader, 'static func adoptBackgroundEvents', '/// 跟系统对账');
   assert.ok(adopt.includes('pendingCompletions.append(completion)'), '每次唤醒都要追加，不能覆盖');
+  const settle = section(downloader, 'private static func settleBackgroundWake', '/// 磁盘对账');
+  assert.ok(settle.includes('removeFirst()'),
+    '按唤醒顺序逐张归还：一次取走整批会让后登记的那张在本轮事件还没送完时就被还掉');
 });
 
-test('代理收尾有轮次校验：本轮一次活动都没见到时，不当成本轮处理完', () => {
-  assert.ok(downloader.includes('private static var roundActivity = false'));
-  const finish = section(downloader, 'private static func finishBackgroundEvents', '/// 磁盘对账');
-  assert.ok(finish.includes('if delegateSaysRoundDone && !roundActivity { return }'),
-    'urlSessionDidFinishEvents 没有轮次标识：上一轮超时归还后，迟到的尾巴不能提前结束下一轮');
-  const adoptTasks = section(downloader, 'private static func adoptIfNeeded', '/// 本进程还没跟系统对过账');
-  assert.ok(adoptTasks.includes('roundActivity = true'), '对账回调到了也算这一轮有活动');
-  const finishKey = section(downloader, 'private static func finish(key: String', 'private static func report(id: String)');
-  assert.ok(finishKey.includes('roundActivity = true'), '分片代理回调到了也算这一轮有活动');
+test('迟到的收尾碰不到下一轮：按唤醒票数逐张归还，不用单个布尔值表示轮次', () => {
+  assert.ok(downloader.includes('private static var wakeTickets = 0'),
+    '每次唤醒登记一张票、每次收尾销一张票，上一轮迟到的收尾才拿不到票');
+  const adopt = section(downloader, 'static func adoptBackgroundEvents', '/// 跟系统对账');
+  assert.ok(adopt.includes('wakeTickets += 1'), '登记回调的同时要登记唤醒票');
+
+  const settle = section(downloader, 'private static func settleBackgroundWake', '/// 磁盘对账');
+  assert.ok(settle.includes('guard wakeTickets > 0 else { return }'),
+    '没有票就说明这几轮的收尾都销过了：这条是迟到通知，直接忽略');
+  assert.ok(settle.includes('wakeTickets -= 1'), '每次收尾只销一张票，不给下一轮提前花掉');
+
+  /* 上一轮审核意见 2：轮次靠一个布尔值表示，会被「上一轮迟到分片 → 置 true →
+     上一轮迟到收尾取走下一轮回调」这种交错骗过。这条布尔值和它的两个置位点必须整体消失。 */
+  assert.ok(!downloader.includes('roundActivity'), '轮次不能用单个布尔值表示，必须靠唤醒票数');
+  assert.ok(!downloader.includes('delegateDepth'), 'delegateDepth 只服务于已删掉的超时兜底');
+  assert.ok(!downloader.includes('adoptionQuiet'), 'adoptionQuiet 同样只服务于那条兜底');
 });
 
-test('兜底不靠单纯超时判定：处理中顺延，到硬上限才还并留下原因', () => {
-  const deadline = section(downloader, 'private static func armFinishEventsDeadline', '/// 跟系统对账');
-  assert.ok(deadline.includes('let quiet = adoptionQuiet && delegateDepth == 0'),
-    '到点只查票号和回调存在还不够：必须确认这一轮没有在跑的分片搬盘、对账也走过了');
-  assert.ok(deadline.includes('if !quiet && attempt < 3'), '还在忙就顺延，不能直接还');
-  assert.ok(deadline.includes('armFinishEventsDeadline(attempt: attempt + 1)'), '顺延要重新上票，旧票作废');
-  assert.ok(deadline.includes('NSLog('), '到硬上限强行归还时必须留下真实原因，供真机排查');
-  assert.ok(downloader.includes('private static var delegateDepth = 0'));
-  assert.ok(downloader.includes('private static var adoptionQuiet = false'));
-  const finishKey = section(downloader, 'private static func finish(key: String', 'private static func report(id: String)');
-  assert.ok(finishKey.includes('delegateDepth += 1'), '搬盘/落库期间要能被兜底看见');
-  assert.ok(finishKey.includes('defer { delegateDepth -= 1 }'), '异常退出也要复位，否则兜底永远顺延');
-  const adoptTasks = section(downloader, 'private static func adoptIfNeeded', '/// 本进程还没跟系统对过账');
-  assert.ok(adoptTasks.includes('adoptionQuiet = true'), '对账真正跑完才能算安静');
+test('不设超时兜底：源码里没有任何「到点就还收尾回调」的路径', () => {
+  /* 上一轮审核意见 1：定时器只在主队列上「此刻没在处理」的瞬间触发，无法证明事件已送完。
+     这条机制不能加固，只能整条删掉 —— 归还的唯一依据是系统的「事件已送完」。 */
+  assert.ok(!downloader.includes('armFinishEventsDeadline'), '超时兜底无法证明事件已送完，必须整条删掉');
+  assert.ok(!downloader.includes('finishEventsTicket'), '票号只能作废计时器，拦不住提前归还');
+  const adoptToSettle = section(downloader, 'static func adoptBackgroundEvents', '/// 磁盘对账');
+  assert.ok(!adoptToSettle.includes('asyncAfter'), '登记到收尾这段里不许有任何定时器');
+  assert.ok(!adoptToSettle.includes('Timer'), '登记到收尾这段里不许有任何定时器');
+  assert.ok(!/DispatchQueue\.main\.asyncAfter[\s\S]{0,200}completion\(\)/.test(downloader),
+    '不许把 completion() 挂在延时回调里');
 });
 
 test('分片投递计数走本类自己的节流写，不调用不存在的 update(id:force:)', () => {

@@ -1168,11 +1168,18 @@ testToolbarDownloadButtonReplacesTheDanmakuSlot → missing-button
     **第二次送审后强化（审核 2026-11-21 第 2 轮）**：
     1. 回调改用 `pendingCompletions` 数组排队：上一轮还没还完系统又唤醒一次时，两张票都留下来逐张归还；
        旧版用单个变量，后一次唤醒会覆盖前一次，前一张永远不还，系统最后会终止 App。
-    2. 兜底不再「到点就还」：只有 `adoptionQuiet && delegateDepth == 0`（对账真的跑完、没有正在搬盘/落库的
-       分片回调）才还；还在忙就顺延 2 秒再看，最多 3 次（约 14 秒硬上限）。到硬上限仍要还并写日志 ——
-       被系统终止 App 比提前一点挂起更糟。`delegateDepth` 在 `finish(key:…)` 入口 +1、`defer` 复位。
-    3. `urlSessionDidFinishEvents` 加轮次校验：本轮若连一次分片回调/对账都没见到（`roundActivity == false`），
-       这条视为上一轮的迟到尾巴，直接忽略，交给本轮自己的兜底 —— 不会提前结束下一轮。
+    2. **整条删掉超时兜底**（`armFinishEventsDeadline` / `finishEventsTicket` / `adoptionQuiet` / `delegateDepth`，第 3 轮审核）。
+       原因：分片代理和兜底定时器都在主队列上跑，定时器触发时同步的 `finish(key:…)` 已退出、`delegateDepth` 必为 0，
+       它根本看不见「还在排队、还没送达」的回调；`adoptionQuiet` 首次对账后也一直为 true。
+       「到点」永远证明不了「事件已送完」，这条机制不能加固，只能删。
+       现在归还的唯一路径是 `urlSessionDidFinishEvents` —— 系统在那里保证本轮事件已全部送达。
+    3. **轮次改用唤醒票，不用单个布尔值**（`roundActivity` 已删，第 3 轮审核）。旧版会被这种交错骗过：
+       「上一轮超时归还 → 下一轮登记 completion → 上一轮迟到分片进 `finish` → 置 true →
+       上一轮迟到的 `urlSessionDidFinishEvents` 取走下一轮全部 completion」。
+       现在 `handleEventsForBackgroundURLSession` 每登记一张唤醒票 `wakeTickets += 1`，
+       `urlSessionDidFinishEvents` 每次只销一张、只还最早登记的那一张；没有票就是迟到的尾巴，直接忽略；
+       连续两次唤醒时两次收尾各还一张，后登记的那张不会被本轮还没送完的事件提前还掉。
+       迟到分片回调的归属仍由原有代次/任务号校验拦下。
     `ensureAdoption()` 让首次发包前必先对账，避免进程重建后给同一片再发一条任务。
   - 新增 `reconcileDisk(id:)`：`seg-<序号>.part` 是整片下完才改名的，存在即视为已完成；
     进程死在落库前也不重下，整集齐了直接 `finalize`，不会停在「其实已经下完」的活儿上。
@@ -1187,19 +1194,20 @@ testToolbarDownloadButtonReplacesTheDanmakuSlot → missing-button
   `ios/project.yml`（build 27→28）、`.github/workflows/ios-ipa-only.yml`（产物 build 断言 28）、`ios/REGRESSIONS.md`。
 - **测试名**（Node，`ios/Tests/backgroundDownload.test.mjs`，10 条）：分片全量入队：pump 把剩下的分片一次性交给系统队列，
   不再按空位在进程内派发、后台会话并发上限交给系统：整集分片一次入队，仍在 4 条连接内排队、
-  后台事件收尾：认领与收尾分开，回调等这一轮事件处理完才在 `urlSessionDidFinishEvents` 里归还、
+  后台事件收尾：认领与收尾分开，归还只由 `urlSessionDidFinishEvents` 触发、
   **连续两次后台唤醒不吞回调：攒成队列，逐张归还**、
-  **代理收尾有轮次校验：本轮一次活动都没见到时，不当成本轮处理完**、
-  **兜底不靠单纯超时判定：处理中顺延，到硬上限才还并留下原因**、
+  **迟到的收尾碰不到下一轮：按唤醒票数逐张归还，不用单个布尔值表示轮次**、
+  **不设超时兜底：源码里没有任何「到点就还收尾回调」的路径**、
   分片投递计数走本类自己的节流写，不调用不存在的 `update(id:force:)`、重启对账：先认回系统里在跑的分片再发新任务，
   磁盘上已完成的分片不重下、暂停/删除照样停掉已经投递进系统队列的全部分片、mp4 直链仍然走真正的后台会话。
-- **本地验证**：套内存硬上限 `python C:\Users\kenzh\hark_tasks\memcap.py 2048 node --test ios/Tests/*.test.mjs`：
+- **本地验证**：套内存硬上限 `python C:\Users\kenzh\hark_tasks\memcap.py 2048 node --test ios/Tests/*.test.mjs Tests/*.test.mjs`：
   首次送审版（`746527f`）6 条里 4 条红；第 1 轮审核打回后新增 1 条编译签名守卫，改完 **133/133**。
-  第 2 轮审核打回后改契约、补 3 条（连续两次唤醒、轮次校验、兜底不顺延）：
-  把 Swift 回退到第 2 轮送审版（`00aeaac`）时 **4 条红**（收尾契约、两次唤醒、轮次校验、兜底判定），
-  改完后全仓 **136/136 通过**（0 失败，未触发 memcap）。
-  旧测试未删、未跳；两处断言修改都是审核指出契约错之后改的（第 1 轮：只在 `urlSessionDidFinishEvents` 归还；
-  第 2 轮：单张回调改队列 + 兜底凭安静条件而非到点），改后断言比旧版更严，不是放宽。
+  第 2 轮审核打回后改契约、补 3 条（连续两次唤醒、轮次校验、兜底判定）：回退到 `00aeaac` 时 **4 条红**，
+  改完后全仓 **136/136 通过**（0 失败）。
+  第 3 轮审核打回后（超时兜底、单个布尔值轮次两条）：先把测试改成新契约，对 `f562b4d` 跑 **4 条红**
+  （收尾契约、两次唤醒逐张还、唤醒票、无超时路径），改完后全仓 **139/139 通过**（0 失败，未触发 memcap）。
+  旧测试未删、未跳；四处断言修改都是审核指出契约错之后改的（第 1 轮：只在 `urlSessionDidFinishEvents` 归还；
+  第 2 轮：单张回调改队列；第 3 轮：超时兜底整条删除、轮次改唤醒票），改后断言比旧版更严，不是放宽。
 - **修复版本**：0.1.19（build 28）
 - **为什么没选方案一（AVAssetDownloadURLSession）**：
   1. 现有回归有 15+ 条源码守卫钉住分片引擎（pump/retry/finalize/decrypt），规则不许删测试或改断言；
@@ -1214,5 +1222,8 @@ testToolbarDownloadButtonReplacesTheDanmakuSlot → missing-button
   3. 完成后断网，App 内离线播放正常（AES-128 线路也要能播）；
   4. 左滑删除能真删掉文件，队列继续走、记录不复活。
   已知平台边界：解密与合成必须在 App 进程里做，后台只保证「传输」；如果全部片段在后台传完，
-  合成会在回到前台时进行。收尾兜底在「仍在搬盘/落库」时会顺延，最晚约 14 秒后仍会归还（否则系统会终止 App），
-  这 14 秒之内 App 是被挂起的风险窗口，日志里会记「收尾兜底到上限仍在忙」。
+  合成会在回到前台时进行。
+  收尾回调按 iOS 的平台约定归还：`handleEventsForBackgroundURLSession` 登记、`urlSessionDidFinishEvents` 收尾，
+  一一配对，**不再设任何超时兜底**（上一版的 14 秒硬上限已删除）。若系统始终不调 `urlSessionDidFinishEvents`，
+  回调会一直挂着，最终由系统终止 App —— 这是 iOS 已定义的边界；App 内部没有办法更早、更安全地自证
+  「事件已送完」，不做超出平台契约的承诺。
