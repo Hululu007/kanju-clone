@@ -20,7 +20,7 @@ wrangler deploy
 '<上游签名密钥>' | wrangler secret put KJ_SECRET   # 加密 Secret，不是明文 var
 ```
 
-v7 migration 仅新增 `sources.quality` 列，不改写或删除现有来源记录。v8 用 `CREATE TABLE/INDEX IF NOT EXISTS` 安全重复执行；记录仅来自已登录会话，并按 `attemptId` 唯一去重。部署前应先备份/核对远端 D1，并确认 v7 列状态；本任务未对远端 D1 执行迁移。
+v7 migration 仅新增 `sources.quality` 列，不改写或删除现有来源记录。v8 用 `CREATE TABLE/INDEX IF NOT EXISTS` 安全重复执行；记录仅来自已登录会话；每次 `/api/play` 为已登录用户签发绑定用户、作品、集数、线路且 30 分钟过期的 HMAC 凭证，`attemptId` 不可自造，并按凭证唯一键去重。凭证只在响应中生成，不复用共享播放缓存。浏览器反馈只更新播放历史统计，不能改写 Worker 确认的串集健康状态。部署前应先备份/核对远端 D1，并确认 v7 列状态；本任务未对远端 D1 执行迁移。
 
 ## 数据同步（从本地 SQLite）
 
@@ -90,5 +90,5 @@ node sync-all.mjs update 4    # 最近更新的新剧/新集
 
 - 匿名访客 cookie 存在 D1 的 `meta` 表，冷启动自动复用
 - 官方 1080P 需要该 cookie；`resolve-line` 是 `POST`
-- 播放前会做内容指纹比对，串集线路自动拉黑
+- 播放前按媒体类型做内容指纹比对（HLS 首片字节、MP4 源地址和长度）；串集线路自动拉黑
 - `KJ_SECRET` 已用 `wrangler secret put` 存为加密 Secret（`secret_text`），不再有明文变量

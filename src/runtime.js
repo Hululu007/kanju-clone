@@ -54,7 +54,9 @@ export async function resolvePlay(showId, idx, line = '', { quality = 0, preferr
     if (preferred) params.set('preferred', preferred)
     // Official line tickets may need a second upstream request.
     const timeout = AbortSignal.timeout(45_000)
-    const r = await fetch(`${PROXY}/api/play?${params}`, { signal: signal ? AbortSignal.any([signal, timeout]) : timeout })
+    const token = localStorage.getItem('kj-auth-token') || ''
+    const headers = token ? { authorization: `Bearer ${token}` } : undefined
+    const r = await fetch(`${PROXY}/api/play?${params}`, { headers, signal: signal ? AbortSignal.any([signal, timeout]) : timeout })
     const j = await r.json().catch(() => null)
     if (!r.ok || !j || j.error) {
       // 把原因带给播放页：会员片 / 线路异常要分开提示
