@@ -1267,3 +1267,8 @@ testToolbarDownloadButtonReplacesTheDanmakuSlot → missing-button
   3. **部分 HLS 下载（.ts）无法 App 内播放**：App 内播放只认可 mp4/m4v/mov（`inAppPlayableExtensions`）；
      `.ts`/`.mkv` 点开时弹出说明并给「用其他应用打开」，二级长按的第一项也变成「用其他应用打开」，
      不再把用户丢进系统播放器的黑屏与 1.5 秒失败提示。
+- **审核第 2 轮返修（1 条）**：
+  4. **最新记录没路径、旧快照有路径时仍可能遗留孤儿文件**：删除改为「最新记录 + 界面快照」两份路径都算
+     （`downloadLibraryDeletionPaths`，去空去重），逐份停播、逐份删除；只要有一份删不掉就返回失败、
+     记录原样保留并提示。一级整剧、二级单集都走同一函数，`removeDownloadedFile(at: nil)` 不再被当成
+     「没有文件、直接删记录」的捷径。

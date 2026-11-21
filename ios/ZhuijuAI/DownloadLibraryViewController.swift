@@ -465,18 +465,15 @@ final class DownloadLibraryViewController: UITableViewController {
     /// 文件删不掉就返回 false，记录原样保留。
     @discardableResult
     private func deleteItem(_ item: DownloadLibraryItem) -> Bool {
-        /* 确认框开着的那几秒里这一集可能刚好下完：路径按**最新记录**重取，
-           不用确认前的旧快照（旧快照里的空路径会被当成「文件已删」）。 */
-        let livePath = downloader.currentStoredPath(
-            id: item.id.isEmpty ? nil : item.id,
-            showId: item.showId,
-            epKey: item.epKey
-        )
-        let stopPath = livePath.isEmpty ? item.path : livePath
-        if !stopPath.isEmpty {
-            onStopPlayback?(stopPath)
+        /* 确认框开着的那几秒里这一集可能刚好下完：最新记录和确认前的旧快照两份路径都算，
+           任一份上的文件还在就删掉；只要有一个删不掉就保留记录，不让文件变孤儿。 */
+        let paths = downloadLibraryDeletionPaths(for: item, downloader: downloader)
+        for path in paths {
+            onStopPlayback?(path)
         }
-        guard downloader.removeDownloadedFile(at: livePath) else { return false }
+        for path in paths where !downloader.removeDownloadedFile(at: path) {
+            return false
+        }
         downloader.deleteEpisode(
             id: item.id.isEmpty ? nil : item.id,
             showId: item.showId,
@@ -507,6 +504,28 @@ final class DownloadLibraryViewController: UITableViewController {
 }
 
 // MARK: - 二级：一集的列表
+
+/// 删除要动到的文件路径：最新记录和界面快照各取一份，去空去重。
+/// 两份都要算，因为确认框开着的那几秒里这一集可能刚好下完、换了文件名，
+/// 只删一份就会把另一份文件留成孤儿。
+fileprivate func downloadLibraryDeletionPaths(
+    for item: DownloadLibraryItem,
+    downloader: MediaDownloader
+) -> [String] {
+    let live = downloader.currentStoredPath(
+        id: item.id.isEmpty ? nil : item.id,
+        showId: item.showId,
+        epKey: item.epKey
+    )
+    var paths: [String] = []
+    for candidate in [live, item.path] {
+        let trimmed = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty && !paths.contains(trimmed) {
+            paths.append(trimmed)
+        }
+    }
+    return paths
+}
 
 /// 一部剧的集列表：点已完成的集离线播放，长按准备并分享那一个真实文件，左滑删单集。
 final class DownloadEpisodesViewController: UITableViewController {
@@ -744,12 +763,12 @@ final class DownloadEpisodesViewController: UITableViewController {
     }
 
     private func delete(_ item: DownloadLibraryItem) {
-        /* 确认框开着的那几秒里这一集可能刚好下完：路径按最新记录重取。 */
-        let livePath = livePath(for: item)
-        if !livePath.isEmpty {
-            onStopPlayback?(livePath)
+        /* 同上一级：最新记录 + 旧快照两份路径都删，删不干净就不删记录。 */
+        let paths = downloadLibraryDeletionPaths(for: item, downloader: downloader)
+        for path in paths {
+            onStopPlayback?(path)
         }
-        guard downloader.removeDownloadedFile(at: livePath) else {
+        for path in paths where !downloader.removeDownloadedFile(at: path) {
             alert("删除本地文件失败，这一集还留着")
             return
         }
