@@ -38,9 +38,9 @@ test('后台事件收尾：认领与收尾分开，回调等这一轮事件处�
   const adopt = section(downloader, 'static func adoptBackgroundEvents', '/// 给收尾回调上保险');
   assert.ok(!adopt.includes('systemTasks.isEmpty'),
     '一集有 400~1400 片，队列永远不空；等空了才还回调，系统就不再为这条会话唤醒 App');
-  assert.ok(!adopt.includes('finishBackgroundEvents()'),
+  assert.ok(!adopt.includes('finishBackgroundEvents'),
     '被唤醒 ≠ 这一轮事件处理完：在对账回调里提前归还，会让 App 在分片搬盘、状态落库前被挂起');
-  assert.ok(adopt.includes('armFinishEventsDeadline()'), '要留兜底，绝不把系统晾在那儿等回调');
+  assert.ok(adopt.includes('armFinishEventsDeadline(attempt: 0)'), '要留兜底，绝不把系统晾在那儿等回调');
 
   const deadline = section(downloader, 'private static func armFinishEventsDeadline', '/// 跟系统对账');
   assert.ok(deadline.includes('finishEventsTicket'), '兜底要凭票号，不能提前还掉下一轮的回调');
@@ -49,12 +49,48 @@ test('后台事件收尾：认领与收尾分开，回调等这一轮事件处�
   assert.ok(!adoptTasks.includes('finishBackgroundEvents'), '认领系统任务不等于这一轮事件处理完，不能顺手归还');
 
   const finish = section(downloader, 'private static func finishBackgroundEvents', '/// 磁盘对账');
-  assert.ok(finish.includes('backgroundCompletion = nil'), '收尾回调只许调一次');
-  assert.ok(finish.includes('pending()'));
+  assert.ok(finish.includes('pendingCompletions = []'), '收尾时把攒下的票一起取走，每张只还一次');
+  assert.ok(finish.includes('for completion in pending'), '攒了多张票（连续两次唤醒）必须逐张归还，不能只还最后一张');
   assert.ok(finish.includes('finishEventsTicket += 1'), '归还后作废没到点的兜底票');
 
   const delegate = section(downloader, 'func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession)', '\n}');
-  assert.ok(delegate.includes('Self.finishBackgroundEvents()'), '这一轮事件处理完的归宿只有 urlSessionDidFinishEvents');
+  assert.ok(delegate.includes('Self.finishBackgroundEvents(delegateSaysRoundDone: true)'),
+    '这一轮事件处理完的归宿只有 urlSessionDidFinishEvents');
+});
+
+test('连续两次后台唤醒不吞回调：攒成队列，逐张归还', () => {
+  assert.ok(downloader.includes('private static var pendingCompletions: [() -> Void] = []'),
+    '只存一张回调时，后一次唤醒会直接覆盖前一张，前一张永远不归还，系统最后终止 App');
+  assert.ok(!/private static var backgroundCompletion\b/.test(downloader), '不能再用单张回调变量');
+  const adopt = section(downloader, 'static func adoptBackgroundEvents', '/// 给收尾回调上保险');
+  assert.ok(adopt.includes('pendingCompletions.append(completion)'), '每次唤醒都要追加，不能覆盖');
+});
+
+test('代理收尾有轮次校验：本轮一次活动都没见到时，不当成本轮处理完', () => {
+  assert.ok(downloader.includes('private static var roundActivity = false'));
+  const finish = section(downloader, 'private static func finishBackgroundEvents', '/// 磁盘对账');
+  assert.ok(finish.includes('if delegateSaysRoundDone && !roundActivity { return }'),
+    'urlSessionDidFinishEvents 没有轮次标识：上一轮超时归还后，迟到的尾巴不能提前结束下一轮');
+  const adoptTasks = section(downloader, 'private static func adoptIfNeeded', '/// 本进程还没跟系统对过账');
+  assert.ok(adoptTasks.includes('roundActivity = true'), '对账回调到了也算这一轮有活动');
+  const finishKey = section(downloader, 'private static func finish(key: String', 'private static func report(id: String)');
+  assert.ok(finishKey.includes('roundActivity = true'), '分片代理回调到了也算这一轮有活动');
+});
+
+test('兜底不靠单纯超时判定：处理中顺延，到硬上限才还并留下原因', () => {
+  const deadline = section(downloader, 'private static func armFinishEventsDeadline', '/// 跟系统对账');
+  assert.ok(deadline.includes('let quiet = adoptionQuiet && delegateDepth == 0'),
+    '到点只查票号和回调存在还不够：必须确认这一轮没有在跑的分片搬盘、对账也走过了');
+  assert.ok(deadline.includes('if !quiet && attempt < 3'), '还在忙就顺延，不能直接还');
+  assert.ok(deadline.includes('armFinishEventsDeadline(attempt: attempt + 1)'), '顺延要重新上票，旧票作废');
+  assert.ok(deadline.includes('NSLog('), '到硬上限强行归还时必须留下真实原因，供真机排查');
+  assert.ok(downloader.includes('private static var delegateDepth = 0'));
+  assert.ok(downloader.includes('private static var adoptionQuiet = false'));
+  const finishKey = section(downloader, 'private static func finish(key: String', 'private static func report(id: String)');
+  assert.ok(finishKey.includes('delegateDepth += 1'), '搬盘/落库期间要能被兜底看见');
+  assert.ok(finishKey.includes('defer { delegateDepth -= 1 }'), '异常退出也要复位，否则兜底永远顺延');
+  const adoptTasks = section(downloader, 'private static func adoptIfNeeded', '/// 本进程还没跟系统对过账');
+  assert.ok(adoptTasks.includes('adoptionQuiet = true'), '对账真正跑完才能算安静');
 });
 
 test('分片投递计数走本类自己的节流写，不调用不存在的 update(id:force:)', () => {
