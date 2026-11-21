@@ -1272,3 +1272,65 @@ testToolbarDownloadButtonReplacesTheDanmakuSlot → missing-button
      （`downloadLibraryDeletionPaths`，去空去重），逐份停播、逐份删除；只要有一份删不掉就返回失败、
      记录原样保留并提示。一级整剧、二级单集都走同一函数，`removeDownloadedFile(at: nil)` 不再被当成
      「没有文件、直接删记录」的捷径。
+
+## REG-034 我的下载封面：飞行模式也显示同一部剧的海报（build 30）【真机】
+
+- **现象（Ken）**：切到飞行模式打开「我的下载」，每一部剧都是一块灰砖占位；一级剧分组、二级各集都没有封面。
+- **复现步骤**：
+  1. 联网下载任意一部剧的任意两集，返回后进入设置 → 我的下载。
+  2. 打开飞行模式（或直接断网），杀掉 App 重开，从报错页进「我的下载」。
+  3. 观察：一级列表每行都是灰色占位砖；进二级看集列表，也没有这部剧的封面。
+- **根因**（`ios/ZhuijuAI/MediaDownloader.swift` + `DownloadLibraryViewController.swift`）：
+  1. 封面只存在记录 `meta["cover"]` 里，是一个**远端 http 地址**，从来没往本机落过盘；断网时一个字节都取不到。
+  2. 原生快照（`snapshotForPage`）根本没带封面字段，片库注释里也写着「快照不带封面，所以用占位图」，
+     界面上取不到任何图。
+- **修复**：
+  - `MediaDownloader` 新增封面存储：`Documents/DownloadCovers/cover-<稳定剧哈希>.img`，**不进** `Documents/Downloads`
+    （下载目录里每个直接子项都是可播/可分享/可删的整集文件，封面混进去会被当成一集、也会把占用算歪）。
+    文件名由 showId（没有就用剧名）算稳定哈希，同一部剧的每一集写同一个相对路径 `coverPath`。
+  - 开始下载（`enqueue`）就把封面取回落盘；老记录在片库打开时 `backfillCovers` 按记录里带的封面地址补一次。
+    成功一次即落盘并写回该剧全部记录；远端 404/410 记进「明确无图」名单只补一次；
+    **断网 / 超时不算结论**，下次打开片库还会再试。
+  - 快照新增 `coverPath`（本机相对路径，不是远端地址），一级、二级都只读这一张本地图。
+  - 取不到封面时画**带剧名**的占位砖（最多两行剧名），不留白。
+  - 删除：整剧删到一集不剩时才删这部剧的封面；还有别的集在用就保留。路径按 `DownloadCovers` 直接子项校验，
+    越界/目录/符号链接解析后跑出目录的一律拒绝，不会误删别剧或用户其它文件。
+- **改动文件**：`ios/ZhuijuAI/MediaDownloader.swift`、`ios/ZhuijuAI/DownloadLibraryViewController.swift`、
+  `ios/REGRESSIONS.md`。
+- **修复版本**：0.1.19 build 30。
+- **验证边界**：Swift 在 Windows 上编不了；本版按 Ken 最新规则**不跑云端 CI / 模拟器 / 截图**，
+  只用 packaging-only 工作流（Release、无签名）验证能编译出包。
+  **真机待验收**（装 build 30 后核对）：①联网下载后立刻断网，进「我的下载」一级每部剧都有海报；
+  ②进二级，各集行左侧是同一部剧的封面小图；③老记录（之前下的、当时没封面）联网打开片库后自动补上，
+  再断网重开仍在；④取不到封面的剧显示带剧名的灰砖而不是空白；⑤删整剧后重启 App，这部剧的封面目录里不再留残留文件，
+  其它剧封面完好。
+
+## REG-035 离线播放：全屏横屏、进度/倍速/上下集/选集（build 30）【真机】
+
+- **现象（Ken）**：从「我的下载」点已下载的集，弹的是系统播放器（AVPlayerViewController）：没有选集/上一集/下一集，
+  没有倍速和画面模式，退出全屏后方向不回来，也没有断点续播。
+- **复现步骤**：
+  1. 飞行模式 → 设置 → 我的下载 → 选一部已下载的剧 → 点某一集。
+  2. 观察：系统播放器，只有系统自带控件；想切下一集只能退出来重新点。
+- **根因**：离线播放入口 `presentLocalPlayback` 直接 `AVPlayerViewController`，没有任何 App 自己的控件层；
+  全屏方向也没有接入 App 的全局方向掩码（`WebViewController.supportedOrientations`），所以退出全屏不会回竖屏。
+- **修复**（新增 `ios/ZhuijuAI/OfflinePlayerViewController.swift`，由 `WebViewController` 承接）：
+  - 一套完整控件：返回（全屏里先退出全屏）、剧名+集名、播放/暂停、时间、可拖动进度条、倍速（和在线播放同一份
+    九档表 0.5–3×）、上一集/下一集、选集、画面模式（默认/拉伸/平铺）、全屏按钮；暂停时画面模式照样能切换。
+  - 选集 / 上一集 / 下一集只认「已完成 + 本地真的存在 + App 内能播（mp4/m4v/mov）」的集，播放单在片库
+    二级处一次算好，下载中/失败/已删的集不会出现。
+  - 方向只在一处判断：离线播放器在场时允许竖屏+横屏，**手机横拿自动进全屏**；全屏状态锁横屏；
+    点「退出全屏」后主动要回竖屏并锁住，等设备真的回到竖屏才重新放开自动旋转（避免手还横着又立刻弹回全屏）。
+    片库、网页等其它页面仍然只竖屏。
+  - 进度按稳定的 `showId|epKey` 存本机（`kj-ios-offline-progress`），每 5 秒、暂停、切集、退出各存一次；
+    再次打开同一集从上次位置续播（剩不到 10 秒则从头开始）。
+  - 不动在线播放、后台下载、左滑删除、第三方播放器打开：网页的 `playLocal` 入口保持原样；
+    片库删除前仍先停播同一个文件（`stopLibraryPlayback` 现在同时管系统播放器和离线播放器）。
+- **改动文件**：`ios/ZhuijuAI/OfflinePlayerViewController.swift`（新增）、`ios/ZhuijuAI/WebViewController.swift`、
+  `ios/ZhuijuAI/DownloadLibraryViewController.swift`、`ios/project.yml`、`.github/workflows/ios-ipa-only.yml`。
+- **修复版本**：0.1.19 build 30。
+- **验证边界**：Swift 在 Windows 上编不了；本版按 Ken 最新规则**不跑云端 CI / 模拟器 / 截图**，
+  只用 packaging-only 工作流（Release、无签名）验证能编译出包。
+  **真机待验收**（装 build 30 后核对）：①点全屏进横屏铺满，退出全屏回竖屏；②系统未锁方向时手横拿自动横屏，
+  转回竖屏退出全屏；③进度条可拖动、倍速生效、暂停后仍可切默认/拉伸/平铺；④上一集/下一集只走已下载的集，
+  选集列表只列已下载的集；⑤退出再进同一集从上次位置续播；⑥在线播放、后台下载、左滑删除、第三方播放器打开都不变。

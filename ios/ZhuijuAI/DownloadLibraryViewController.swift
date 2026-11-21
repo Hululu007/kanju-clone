@@ -27,6 +27,8 @@ struct DownloadLibraryItem {
     let total: Int64
     let size: Int64
     let path: String
+    /// 这部剧封面在本机的相对路径（快照里的 `coverPath`），空串 = 还没有本地封面。
+    let coverPath: String
 
     init?(_ raw: [String: Any]) {
         guard let status = raw["status"] as? String, !status.isEmpty else { return nil }
@@ -42,6 +44,14 @@ struct DownloadLibraryItem {
         total = (raw["total"] as? NSNumber)?.int64Value ?? 0
         size = (raw["size"] as? NSNumber)?.int64Value ?? 0
         path = raw["path"] as? String ?? ""
+        coverPath = raw["coverPath"] as? String ?? ""
+    }
+
+    /// 本机封面图：只认下载器落盘的 `DownloadCovers` 直接子项，读不出来就当没有。
+    var coverImage: UIImage? {
+        guard !coverPath.isEmpty,
+              let url = MediaDownloader.coverURL(forStoredPath: coverPath) else { return nil }
+        return UIImage(contentsOfFile: url.path)
     }
 
     /// 归组用的键：剧号优先，没有剧号时退回剧名，再没有就用任务 id（一部剧一条，不会混在一起）。
@@ -101,6 +111,15 @@ struct DownloadLibraryShow {
     let key: String
     let title: String
     let items: [DownloadLibraryItem]
+
+    /// 一级、二级都只读这一张图：同一部剧的封面只有一份，不按集分别存。
+    var coverImage: UIImage? {
+        items.compactMap { $0.coverImage }.first
+    }
+
+    var coverPath: String {
+        items.first { !$0.coverPath.isEmpty }?.coverPath ?? ""
+    }
 
     var doneCount: Int { items.filter { $0.isDone }.count }
     var activeCount: Int { items.filter { $0.isActive }.count }
@@ -200,7 +219,8 @@ private func confirmDeletion(
 /// 也不改下载文件命名 / 目录 / 后台引擎。
 final class DownloadLibraryViewController: UITableViewController {
     /// 播放交给 `WebViewController`（它已经管着离线播放器的生命周期，删除时要先停播）。
-    var onPlay: ((String) -> Void)?
+    /// 交过去的是整部剧「已完成且本地存在」的集和起点，选集 / 上一集 / 下一集都在里面走。
+    var onPlay: ((OfflinePlaylist, Int) -> Void)?
     /// 删除文件前先停掉正在播的同一集。
     var onStopPlayback: ((String) -> Void)?
 
@@ -259,6 +279,11 @@ final class DownloadLibraryViewController: UITableViewController {
         downloader.restore { [weak self] in
             DispatchQueue.main.async { self?.reload() }
         }
+        /* 老记录没有本地封面：联网时按记录里带的封面地址补一次并落盘。
+           断网失败不算「这部剧没有封面」，下次打开片库还会再试。 */
+        downloader.backfillCovers { [weak self] in
+            self?.reload(force: true)
+        }
         startRefreshTimer()
     }
 
@@ -300,9 +325,9 @@ final class DownloadLibraryViewController: UITableViewController {
 
     private static func signature(_ items: [DownloadLibraryItem]) -> String {
         return items.map { item in
-            /* 进度只按 1% 取整进签名：百分比没动就不重画。 */
+            /* 进度只按 1% 取整进签名：百分比没动就不重画。封面到位也算变化。 */
             let bucket = item.total > 0 ? Int((Double(item.received) / Double(item.total)) * 100) : -1
-            return item.id + "|" + item.status + "|" + String(bucket) + "|" + item.path
+            return item.id + "|" + item.status + "|" + String(bucket) + "|" + item.path + "|" + item.coverPath
         }.joined(separator: ";")
     }
 
@@ -397,7 +422,8 @@ final class DownloadLibraryViewController: UITableViewController {
         content.text = show.title
         content.secondaryText = show.subtitle
         content.secondaryTextProperties.color = .secondaryLabel
-        content.image = Self.placeholderCover(for: show.title)
+        /* 有本地封面就用本地封面（飞行模式也在）；没有就画带剧名的占位，不留白。 */
+        content.image = show.coverImage ?? Self.placeholderCover(for: show.title)
         content.imageProperties.maximumSize = CGSize(width: 44, height: 60)
         content.imageProperties.cornerRadius = 6
         cell.contentConfiguration = content
@@ -482,23 +508,25 @@ final class DownloadLibraryViewController: UITableViewController {
         return true
     }
 
-    /// 快照不带封面：画一块灰色的占位砖，写上剧名首字，不假装有海报。
+    /// 没有本地封面时的占位：灰砖上写剧名（最多两行），不拿白块充数。
     static func placeholderCover(for title: String) -> UIImage {
         let size = CGSize(width: 44, height: 60)
         let renderer = UIGraphicsImageRenderer(size: size)
         return renderer.image { _ in
             UIColor(white: 0.22, alpha: 1).setFill()
             UIBezierPath(roundedRect: CGRect(origin: .zero, size: size), cornerRadius: 6).fill()
-            let text = String(title.prefix(1)) as NSString
+            let name = title.trimmingCharacters(in: .whitespacesAndNewlines)
+            let text = (name.isEmpty ? "未命名" : String(name.prefix(6))) as NSString
+            let paragraph = NSMutableParagraphStyle()
+            paragraph.alignment = .center
+            paragraph.lineBreakMode = .byTruncatingTail
             let attributes: [NSAttributedString.Key: Any] = [
-                .font: UIFont.systemFont(ofSize: 22, weight: .semibold),
+                .font: UIFont.systemFont(ofSize: 10, weight: .semibold),
                 .foregroundColor: UIColor.white.withAlphaComponent(0.85),
+                .paragraphStyle: paragraph,
             ]
-            let bounds = text.size(withAttributes: attributes)
-            text.draw(
-                at: CGPoint(x: (size.width - bounds.width) / 2, y: (size.height - bounds.height) / 2),
-                withAttributes: attributes
-            )
+            let bounds = CGRect(x: 3, y: 6, width: size.width - 6, height: size.height - 12)
+            text.draw(in: bounds, withAttributes: attributes)
         }
     }
 }
@@ -529,7 +557,8 @@ fileprivate func downloadLibraryDeletionPaths(
 
 /// 一部剧的集列表：点已完成的集离线播放，长按准备并分享那一个真实文件，左滑删单集。
 final class DownloadEpisodesViewController: UITableViewController {
-    var onPlay: ((String) -> Void)?
+    /// 和一级一样：交过去的是整部剧的播放单和起点。
+    var onPlay: ((OfflinePlaylist, Int) -> Void)?
     var onStopPlayback: ((String) -> Void)?
 
     private let downloader: MediaDownloader
@@ -627,7 +656,8 @@ final class DownloadEpisodesViewController: UITableViewController {
         let cell = tableView.dequeueReusableCell(withIdentifier: "episode", for: indexPath)
         guard let episode = cell as? DownloadEpisodeCell else { return cell }
         let item = items[indexPath.row]
-        episode.configure(item)
+        /* 二级每一集都只读这一部剧的同一张本地封面；没有就画带剧名的占位。 */
+        episode.configure(item, cover: show.coverImage ?? DownloadLibraryViewController.placeholderCover(for: show.title))
         return episode
     }
 
@@ -701,7 +731,6 @@ final class DownloadEpisodesViewController: UITableViewController {
             alert("这一集的文件已经不在了，请重新下载")
             return
         }
-        let path = livePath(for: item)
         guard Self.inAppPlayableExtensions.contains(fileURL.pathExtension.lowercased()) else {
             offerExternalOpen(for: fileURL, at: indexPath)
             return
@@ -714,7 +743,35 @@ final class DownloadEpisodesViewController: UITableViewController {
             present(controller, animated: true) { player.play() }
             return
         }
-        onPlay(path)
+        /* 播放单只装「已完成 + 本地真的存在 + App 内能播」的集，按集号排；
+           选集 / 上一集 / 下一集都只在这份单子里走。 */
+        let ordered = items
+            .filter { $0.isDone && Self.inAppPlayableExtensions.contains($0.storedExtension) }
+            .sorted { left, right in
+                let leftNumber = Int(left.epKey) ?? Int.max
+                let rightNumber = Int(right.epKey) ?? Int.max
+                if leftNumber != rightNumber { return leftNumber < rightNumber }
+                return left.episodeTitle.localizedStandardCompare(right.episodeTitle) == .orderedAscending
+            }
+        var episodes: [OfflineEpisode] = []
+        var start = -1
+        for candidate in ordered {
+            guard let url = resolvedFileURL(for: candidate) else { continue }
+            if candidate.id == item.id && candidate.showId == item.showId && candidate.epKey == item.epKey {
+                start = episodes.count
+            }
+            episodes.append(OfflineEpisode(
+                showId: candidate.showId,
+                epKey: candidate.epKey,
+                epLabel: candidate.episodeTitle,
+                fileURL: url
+            ))
+        }
+        guard start >= 0, !episodes.isEmpty else {
+            alert("这一集的文件已经不在了，请重新下载")
+            return
+        }
+        onPlay(OfflinePlaylist(showTitle: show.title, episodes: episodes), start)
     }
 
     private func share(_ item: DownloadLibraryItem, at indexPath: IndexPath) {
@@ -817,17 +874,23 @@ final class DownloadEpisodesViewController: UITableViewController {
 
 // MARK: - 集行
 
-/// 一集的样式：集名 + 状态/进度；正在传的集在下面多一条进度条。
+/// 一集的样式：本剧封面小图 + 集名 + 状态/进度；正在传的集在下面多一条进度条。
 final class DownloadEpisodeCell: UITableViewCell {
+    private let coverView = UIImageView()
     private let titleLabel = UILabel()
     private let detailLabel = UILabel()
     private let progressView = UIProgressView(progressViewStyle: .bar)
     private let stack = UIStackView()
+    private let textStack = UIStackView()
 
     override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
         super.init(style: style, reuseIdentifier: reuseIdentifier)
         backgroundColor = UIColor(white: 0.11, alpha: 1)
         selectionStyle = .default
+        coverView.contentMode = .scaleAspectFill
+        coverView.clipsToBounds = true
+        coverView.layer.cornerRadius = 4
+        coverView.translatesAutoresizingMaskIntoConstraints = false
         titleLabel.font = .preferredFont(forTextStyle: .body)
         titleLabel.textColor = .white
         detailLabel.font = .preferredFont(forTextStyle: .footnote)
@@ -837,14 +900,22 @@ final class DownloadEpisodeCell: UITableViewCell {
         progressView.trackTintColor = UIColor(white: 0.25, alpha: 1)
         progressView.isHidden = true
 
-        stack.axis = .vertical
-        stack.spacing = 4
-        stack.addArrangedSubview(titleLabel)
-        stack.addArrangedSubview(detailLabel)
-        stack.addArrangedSubview(progressView)
+        textStack.axis = .vertical
+        textStack.spacing = 4
+        textStack.addArrangedSubview(titleLabel)
+        textStack.addArrangedSubview(detailLabel)
+        textStack.addArrangedSubview(progressView)
+
+        stack.axis = .horizontal
+        stack.spacing = 10
+        stack.alignment = .center
+        stack.addArrangedSubview(coverView)
+        stack.addArrangedSubview(textStack)
         stack.translatesAutoresizingMaskIntoConstraints = false
         contentView.addSubview(stack)
         NSLayoutConstraint.activate([
+            coverView.widthAnchor.constraint(equalToConstant: 28),
+            coverView.heightAnchor.constraint(equalToConstant: 38),
             stack.leadingAnchor.constraint(equalTo: contentView.layoutMarginsGuide.leadingAnchor),
             stack.trailingAnchor.constraint(equalTo: contentView.layoutMarginsGuide.trailingAnchor),
             stack.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 10),
@@ -857,7 +928,8 @@ final class DownloadEpisodeCell: UITableViewCell {
         fatalError("init(coder:) is not supported")
     }
 
-    func configure(_ item: DownloadLibraryItem) {
+    func configure(_ item: DownloadLibraryItem, cover: UIImage?) {
+        coverView.image = cover
         titleLabel.text = item.episodeTitle
         detailLabel.text = item.statusText
         if item.status == "running" || item.status == "paused", let progress = item.fraction {

@@ -1,4 +1,5 @@
 import Foundation
+import UIKit
 import UserNotifications
 
 /// 持久下载队列：单集和批量走同一条队列。
@@ -79,6 +80,9 @@ final class MediaDownloader: NSObject {
         /// 用户显式删除的时间戳（墓碑）。墓碑只留在原生记录里，不会进快照，
         /// 因此晚到的完成回调、重启、重新进页都不可能把这一集带回来。
         var deletedAt: Double? = nil
+        /// 这部剧封面在本机的相对路径（相对 Documents，形如 `DownloadCovers/cover-1a2b.img`）。
+        /// 同一部剧的每一集写的是同一份，旧记录没有这个字段，解码时按缺省处理。
+        var coverPath: String? = nil
     }
 
     /// 同一时刻最多跑几条：用户要的是「两集一起下」，不是把整部剧一起拉满。
@@ -444,9 +448,263 @@ final class MediaDownloader: NSObject {
         return true
     }
 
+    // MARK: - 封面（这部剧的封面图单独落盘）
+
+    /// 封面单独放一个目录，**不进** `Documents/Downloads`：
+    /// 下载目录里每一个直接子项都是「可播放 / 可分享 / 可删除」的整集文件，
+    /// 封面混进去会被当成一集，也会把「本 App 下载占用」算歪。
+    static let coverFolderName = "DownloadCovers"
+    /// 明确取不到封面（远端没这张图 / 已经 404）的剧：只记这一类结论。
+    /// 临时断网、超时**不能**写进这里，否则一次地铁进隧道就永远不再补。
+    private static let coverMissingKey = "kj-ios-cover-missing"
+
+    static func coverDirectory() -> URL? {
+        guard let base = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else { return nil }
+        let directory = base.appendingPathComponent(coverFolderName, isDirectory: true)
+        let manager = FileManager.default
+        if !manager.fileExists(atPath: directory.path) {
+            try? manager.createDirectory(at: directory, withIntermediateDirectories: true)
+        }
+        return directory
+    }
+
+    /// 一部剧的封面文件名：由稳定的剧标识算出来（showId 优先，没有就用剧名）。
+    /// 同一部剧的每一集都指向同一个文件，不按集分别存一张图。
+    static func coverFileName(showId: String, title: String) -> String {
+        let seed = !showId.isEmpty ? showId : "title:" + title
+        var hash: UInt64 = 0xcbf2_9ce4_8422_2325
+        for byte in seed.utf8 {
+            hash = (hash ^ UInt64(byte)) &* 0x0000_0100_0000_01b3
+        }
+        return "cover-" + String(hash, radix: 16) + ".img"
+    }
+
+    static func coverRelativePath(showId: String, title: String) -> String {
+        coverFolderName + "/" + coverFileName(showId: showId, title: title)
+    }
+
+    /// 记录里的封面相对路径 → 磁盘位置。
+    /// 只认 `DownloadCovers` 的**直接子项**；越界、目录、解析符号链接后跑到别处的路径一律拒绝。
+    /// 删封面也走这一条，保证不会误删到别的剧或用户其它文件。
+    static func coverURL(forStoredPath raw: String?) -> URL? {
+        guard let text = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty else { return nil }
+        guard text.hasPrefix(coverFolderName + "/") else { return nil }
+        let name = (text as NSString).lastPathComponent
+        guard !name.isEmpty, name != ".", name != ".." else { return nil }
+        guard let directory = coverDirectory() else { return nil }
+        let root = directory.standardizedFileURL.resolvingSymlinksInPath()
+        let target = directory.appendingPathComponent(name).standardizedFileURL.resolvingSymlinksInPath()
+        let rootComponents = root.pathComponents
+        let targetComponents = target.pathComponents
+        guard targetComponents.count == rootComponents.count + 1,
+              Array(targetComponents.prefix(rootComponents.count)) == rootComponents else {
+            NSLog("refuse cover path outside the cover directory: %@", raw ?? "")
+            return nil
+        }
+        return target
+    }
+
+    /// 这部剧已经落盘的封面相对路径（磁盘上真有这个文件才算）。
+    static func localCoverPath(showId: String, title: String) -> String? {
+        let relative = coverRelativePath(showId: showId, title: title)
+        guard let url = coverURL(forStoredPath: relative) else { return nil }
+        return FileManager.default.fileExists(atPath: url.path) ? relative : nil
+    }
+
+    private static func coverMissing() -> Set<String> {
+        let list = UserDefaults.standard.stringArray(forKey: coverMissingKey) ?? []
+        return Set(list)
+    }
+
+    private static func coverKey(showId: String, title: String) -> String {
+        !showId.isEmpty ? showId : "title:" + title
+    }
+
+    private static func markCoverMissing(showId: String, title: String) {
+        var list = UserDefaults.standard.stringArray(forKey: coverMissingKey) ?? []
+        let keyText = coverKey(showId: showId, title: title)
+        guard !list.contains(keyText) else { return }
+        list.append(keyText)
+        /* 有界：只留最近 2000 条结论，正常用量远远用不到。 */
+        if list.count > 2000 { list = Array(list.suffix(2000)) }
+        UserDefaults.standard.set(list, forKey: coverMissingKey)
+    }
+
+    private static func clearCoverMissing(showId: String, title: String) {
+        var list = UserDefaults.standard.stringArray(forKey: coverMissingKey) ?? []
+        let keyText = coverKey(showId: showId, title: title)
+        guard list.contains(keyText) else { return }
+        list.removeAll { $0 == keyText }
+        UserDefaults.standard.set(list, forKey: coverMissingKey)
+    }
+
+    /// 封面拿的是另一套会话：后台会话不支持 data task，封面也不需要后台续传。
+    private static var coverSession: URLSession?
+
+    private static func coverSessionInstance() -> URLSession {
+        if let session = coverSession { return session }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 15
+        configuration.timeoutIntervalForResource = 30
+        let session = URLSession(configuration: configuration)
+        coverSession = session
+        return session
+    }
+
+    /// 给还没有封面的剧补图：只用记录里已经带上的远端封面地址，不猜也不编。
+    /// - 成功一次：落盘 + 写回记录，之后离线也能看；
+    /// - 远端明确没有这张图（404/410）：记进缺图名单，不再反复请求；
+    /// - 断网 / 超时 / 其它错误：只是这次没取到，下次打开片库还会再试。
+    func backfillCovers(completion: @escaping () -> Void) {
+        Self.backfillCovers(completion: completion)
+    }
+
+    private static func backfillCovers(completion: @escaping () -> Void) {
+        records = loadRecords()
+        let missing = coverMissing()
+        var wanted: [(showId: String, title: String, remote: String, referer: String)] = []
+        var seen = Set<String>()
+        for record in records where !Self.isDeleted(record) {
+            let showId = record.showId ?? ""
+            let title = record.title
+            let keyText = coverKey(showId: showId, title: title)
+            guard !seen.contains(keyText) else { continue }
+            guard localCoverPath(showId: showId, title: title) == nil else { continue }
+            guard !missing.contains(keyText) else { continue }
+            let remote = (record.meta["cover"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !remote.isEmpty else { continue }
+            seen.insert(keyText)
+            wanted.append((showId, title, remote, record.meta["referer"] ?? ""))
+        }
+        guard !wanted.isEmpty else {
+            completion()
+            return
+        }
+        let group = DispatchGroup()
+        for item in wanted {
+            group.enter()
+            fetchCover(showId: item.showId, title: item.title, remote: item.remote, referer: item.referer) {
+                group.leave()
+            }
+        }
+        group.notify(queue: .main) { completion() }
+    }
+
+    /// 开始下载时就把这一部剧的封面存下来：之后飞行模式打开片库也能看到同一张图。
+    private static func captureCovers(for records: [Record]) {
+        var seen = Set<String>()
+        for record in records where !Self.isDeleted(record) {
+            let showId = record.showId ?? ""
+            let title = record.title
+            let keyText = coverKey(showId: showId, title: title)
+            guard !seen.contains(keyText) else { continue }
+            seen.insert(keyText)
+            guard localCoverPath(showId: showId, title: title) == nil else { continue }
+            let remote = (record.meta["cover"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !remote.isEmpty else { continue }
+            fetchCover(showId: showId, title: title, remote: remote, referer: record.meta["referer"] ?? "") {}
+        }
+    }
+
+    private static func fetchCover(
+        showId: String,
+        title: String,
+        remote: String,
+        referer: String,
+        completion: @escaping () -> Void
+    ) {
+        guard let url = URL(string: remote), let scheme = url.scheme?.lowercased(),
+              scheme == "https" || scheme == "http" else {
+            /* 地址本身不可用：不写成「没有封面」，下次有真实地址时还要能补。 */
+            completion()
+            return
+        }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 15
+        for (name, value) in mediaRequestHeaders(from: ["referer": referer]) {
+            request.setValue(value, forHTTPHeaderField: name)
+        }
+        let task = coverSessionInstance().dataTask(with: request) { data, response, error in
+            let http = response as? HTTPURLResponse
+            DispatchQueue.main.async {
+                defer { completion() }
+                if let error = error {
+                    /* 断网 / 超时：只是这次没取到，不能当「这部剧没有封面」。 */
+                    NSLog("cover fetch failed: %@", String(describing: error))
+                    return
+                }
+                guard let http = http else { return }
+                if http.statusCode == 404 || http.statusCode == 410 {
+                    markCoverMissing(showId: showId, title: title)
+                    return
+                }
+                guard http.statusCode == 200, let data = data, !data.isEmpty else {
+                    NSLog("cover fetch http %d", http.statusCode)
+                    return
+                }
+                storeCover(data, showId: showId, title: title)
+            }
+        }
+        task.resume()
+    }
+
+    private static func storeCover(_ data: Data, showId: String, title: String) {
+        /* 解不出来的字节不落盘：坏图在界面上就是一块空白，比占位图更难解释。 */
+        guard UIImage(data: data) != nil else {
+            NSLog("cover data is not an image: %@", showId)
+            return
+        }
+        let relative = coverRelativePath(showId: showId, title: title)
+        guard let target = coverURL(forStoredPath: relative) else { return }
+        do {
+            try data.write(to: target, options: .atomic)
+        } catch {
+            NSLog("cover write failed: %@", String(describing: error))
+            return
+        }
+        clearCoverMissing(showId: showId, title: title)
+        applyCoverPath(relative, showId: showId, title: title)
+    }
+
+    /// 把相对路径写进这部剧的每一条记录（同一部剧共用一张封面）。
+    private static func applyCoverPath(_ relative: String, showId: String, title: String) {
+        records = loadRecords()
+        var changed = false
+        for index in records.indices {
+            let sameShow = !showId.isEmpty
+                ? (records[index].showId ?? "") == showId
+                : records[index].title == title
+            guard sameShow, records[index].coverPath != relative else { continue }
+            records[index].coverPath = relative
+            changed = true
+        }
+        if changed { persist(force: true) }
+        NotificationCenter.default.post(name: .downloadLibraryDidChange, object: nil)
+    }
+
+    /// 删到这一部剧一集不剩时，封面也删掉；还有别的集在就留着（共享引用不能误删）。
+    private static func removeCoverIfUnused(showId: String, title: String) {
+        let list = loadRecords().filter { !Self.isDeleted($0) }
+        let stillUsed = list.contains { record in
+            let sameShow = !showId.isEmpty
+                ? (record.showId ?? "") == showId
+                : record.title == title
+            return sameShow
+        }
+        guard !stillUsed else { return }
+        let relative = coverRelativePath(showId: showId, title: title)
+        if let url = coverURL(forStoredPath: relative),
+           FileManager.default.fileExists(atPath: url.path) {
+            try? FileManager.default.removeItem(at: url)
+        }
+        clearCoverMissing(showId: showId, title: title)
+    }
+
     private static func deleteEpisode(id: String?, showId: String, epKey: String) {
         records = loadRecords()
         var changed = false
+        /* 这一集的剧名先记下来：删掉记录之后再判断这部剧是不是一集都不剩。 */
+        var touchedShows: [(showId: String, title: String)] = []
         let deletedAt = Date().timeIntervalSince1970
         /* 墓碑独立落库，不依赖这条记录还在不在：记录被 400 条上限裁掉，删除结论也不会丢。 */
         rememberTombstone(showId: showId, epKey: epKey, at: deletedAt)
@@ -469,10 +727,15 @@ final class MediaDownloader: NSObject {
             HLSDownloader.discard(id: record.id)
             progressHandlers.removeValue(forKey: record.id)
             finishHandlers.removeValue(forKey: record.id)
+            touchedShows.append((records[index].showId ?? "", records[index].title))
             changed = true
         }
         if changed {
             persist(force: true)
+            /* 整剧删到一集不剩时，这部剧的封面也一起清掉；还有别的集在就留着。 */
+            for show in touchedShows {
+                removeCoverIfUnused(showId: show.showId, title: show.title)
+            }
             emitStateEvents()
             pump()
         }
@@ -496,6 +759,11 @@ final class MediaDownloader: NSObject {
 
     func eventsForPage() -> [[String: Any]] {
         Self.pageEvents()
+    }
+
+    /// 这部剧在本机的封面相对路径（没有就是空串，界面自己画带剧名的占位）。
+    func coverPath(showId: String, title: String) -> String {
+        Self.localCoverPath(showId: showId, title: title) ?? ""
     }
 
     /// 队列快照：网页侧据此算「按剧总体进度」和每条任务的状态，重启后也能对齐。
@@ -626,6 +894,9 @@ final class MediaDownloader: NSObject {
         persist(force: true)
         pump()
         emitStateEvents()
+        /* 开始下载就把封面存下来：之后飞行模式打开片库也能看到同一张图，
+           不必等这次下载真的完成。 */
+        captureCovers(for: accepted.compactMap { id in records.first { $0.id == id } })
         return accepted
     }
 
@@ -925,12 +1196,15 @@ final class MediaDownloader: NSObject {
     }
 
     /// 队列快照：所有任务的真实状态（含排队/暂停），网页据此算整剧进度。
+    /// `coverPath` / `showTotal` 只给原生片库用：`coverPath` 是本机落盘的相对路径，
+    /// 不把远端地址当成「本地封面」传给界面。
     private static func snapshot() -> [[String: Any]] {
         records = loadRecords()
         return records.filter { !Self.isDeleted($0) }.map { record in
+            let showId = record.showId ?? ""
             [
                 "id": record.id,
-                "showId": record.showId ?? "",
+                "showId": showId,
                 "epKey": record.epKey ?? "",
                 "epLabel": record.ep,
                 "title": record.title,
@@ -941,6 +1215,8 @@ final class MediaDownloader: NSObject {
                 "path": record.path,
                 "size": record.size,
                 "reason": record.reason,
+                "coverPath": record.coverPath ?? localCoverPath(showId: showId, title: record.title) ?? "",
+                "showTotal": record.meta["total"] ?? "",
             ]
         }
     }

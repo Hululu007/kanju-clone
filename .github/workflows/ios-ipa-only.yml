@@ -59,7 +59,7 @@ jobs:
           VERSION=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Info.plist")
           BUILD=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP/Info.plist")
           test "$VERSION" = "0.1.19"
-          test "$BUILD" = "29"
+          test "$BUILD" = "30"
           NAME="ZhuijuAI-${VERSION}-build${BUILD}-unsigned"
           mkdir Payload
           cp -R "$APP" Payload/

@@ -273,8 +273,21 @@ final class WebViewController: UIViewController, UIDocumentInteractionController
     /// 界面和 AppDelegate 共用同一份判断：网页全屏是 WebKit 自己弹的控制器，
     /// 它不看我们 VC 的 supportedInterfaceOrientations，只认 AppDelegate 返回的全局掩码。
     static var supportedOrientations: UIInterfaceOrientationMask {
-        interfaceOrientations(forFullscreen: playerFullscreenActive)
+        /* 原生离线播放器在场：竖屏看列表、横拿自动进全屏（全屏时锁横屏）。
+           其他页面仍然是只竖屏。 */
+        if offlinePlayerActive {
+            if offlineFullscreen { return .landscape }
+            if offlineRotationLocked { return .portrait }
+            return .allButUpsideDown
+        }
+        return interfaceOrientations(forFullscreen: playerFullscreenActive)
     }
+
+    /// 离线播放器在场 / 处于全屏 / 刚主动退出全屏（先锁竖屏）。
+    static var offlinePlayerActive = false
+    static var offlineFullscreen = false
+    static var offlineRotationLocked = false
+    private weak var offlinePlayerController: OfflinePlayerViewController?
 
     override var supportedInterfaceOrientations: UIInterfaceOrientationMask {
         Self.supportedOrientations
@@ -649,8 +662,8 @@ final class WebViewController: UIViewController, UIDocumentInteractionController
     fileprivate func presentDownloadLibrary() {
         let library = DownloadLibraryViewController(downloader: downloader)
         /* 播放和停播仍交给本类：它已经管着离线播放器的生命周期（同一集删之前先停播）。 */
-        library.onPlay = { [weak self] path in
-            self?.presentLocalPlayback(path: path)
+        library.onPlay = { [weak self] playlist, startIndex in
+            self?.presentOfflinePlayer(playlist, startIndex: startIndex)
         }
         library.onStopPlayback = { [weak self] path in
             self?.stopLibraryPlayback(path: path)
@@ -661,10 +674,64 @@ final class WebViewController: UIViewController, UIDocumentInteractionController
         (presentedViewController ?? self).present(navigation, animated: true)
     }
 
+    // MARK: - 离线播放器
+
+    /// 真正的离线播放：片源是本机已下载完成的文件，控件和在线播放同一套。
+    /// 方向只在这里统一切，其他页面（网页、片库）始终只竖屏。
+    fileprivate func presentOfflinePlayer(_ playlist: OfflinePlaylist, startIndex: Int) {
+        guard !playlist.episodes.isEmpty else {
+            notifyPlayerNotice("这一部剧还没有下载完成的集")
+            return
+        }
+        let player = OfflinePlayerViewController(playlist: playlist, startIndex: startIndex)
+        player.owner = self
+        Self.offlinePlayerActive = true
+        Self.offlineFullscreen = false
+        Self.offlineRotationLocked = false
+        player.onFullscreenChange = { [weak self] fullscreen, explicit in
+            Self.offlineFullscreen = fullscreen
+            /* 只有用户自己点「退出全屏」才锁竖屏；旋转导致的切换不反向抢方向。 */
+            Self.offlineRotationLocked = explicit && !fullscreen
+            self?.applyOfflineOrientation()
+        }
+        player.onClose = { [weak self] in
+            self?.finishOfflinePlayer()
+        }
+        offlinePlayerController = player
+        (presentedViewController ?? self).present(player, animated: true)
+    }
+
+    /// 离线播放器收回：方向状态全部复位，回到只竖屏。
+    fileprivate func finishOfflinePlayer() {
+        Self.offlinePlayerActive = false
+        Self.offlineFullscreen = false
+        Self.offlineRotationLocked = false
+        offlinePlayerController = nil
+        applyOfflineOrientation()
+    }
+
+    /// 设备真的回到竖屏了，放开自动旋转（否则手还横着会立刻又进全屏）。
+    fileprivate func unlockOfflineRotation() {
+        guard Self.offlineRotationLocked else { return }
+        Self.offlineRotationLocked = false
+        applyOfflineOrientation()
+    }
+
+    private func applyOfflineOrientation() {
+        setNeedsUpdateOfSupportedInterfaceOrientations()
+        if #available(iOS 16.0, *) {
+            let mask = Self.supportedOrientations
+            view.window?.windowScene?.requestGeometryUpdate(.iOS(interfaceOrientations: mask)) { _ in }
+        } else {
+            UIViewController.attemptRotationToDeviceOrientation()
+        }
+    }
+
     /// 片库删文件前停播：只处理路径真的指向同一个文件的情况。
     fileprivate func stopLibraryPlayback(path: String?) {
         guard let fileURL = MediaDownloader.fileURL(forStoredPath: path) else { return }
         stopLocalPlayback(of: fileURL)
+        offlinePlayerController?.stopIfPlaying(fileURL)
     }
 
     /// 停掉正在播的这个离线文件：只处理同一个文件，别的播放页面不动。
