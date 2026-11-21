@@ -103,6 +103,8 @@ final class OfflinePlayerViewController: UIViewController {
     private var isScrubbing = false
     private var didSeekForResume = false
     private var videoMode: VideoMode = .fit
+    /// 当前倍速：`AVPlayer.rate` 在暂停时读回来是 0，所以档位自己记一份。
+    private var speed: Double = 1
 
     init(playlist: OfflinePlaylist, startIndex: Int) {
         self.playlist = playlist
@@ -439,13 +441,21 @@ final class OfflinePlayerViewController: UIViewController {
         didSeekForResume = false
         let item = AVPlayerItem(url: episode.fileURL)
         player.replaceCurrentItem(with: item)
-        player.playbackRate = Float(Self.savedSpeed())
-        speedButton.setTitle(Self.speedText(Self.savedSpeed()), for: .normal)
+        speed = Self.savedSpeed()
+        speedButton.setTitle(Self.speedText(speed), for: .normal)
         observePlayback()
         syncEpisodeChrome()
-        if autoplay { player.play() }
+        if autoplay { playWithRate() }
         startTimers()
         updatePlayButton()
+    }
+
+    /// `AVPlayer` 没有单独的 playbackRate：率就是 `rate`，设了就等于开始播。
+    private func playWithRate() {
+        player.play()
+        if abs(speed - 1) > 0.001 {
+            player.rate = Float(speed)
+        }
     }
 
     private func observePlayback() {
@@ -609,7 +619,7 @@ final class OfflinePlayerViewController: UIViewController {
             player.pause()
             saveProgress()
         } else {
-            player.play()
+            playWithRate()
             setControlsHidden(false)
             startTimers()
         }
@@ -634,15 +644,19 @@ final class OfflinePlayerViewController: UIViewController {
 
     @objc private func speedTapped() {
         let sheet = UIAlertController(title: "播放倍速", message: nil, preferredStyle: .actionSheet)
-        let currentSpeed = Double(player.playbackRate)
-        for speed in Self.speeds {
-            let mark = abs(currentSpeed - speed) < 0.01 ? "✓ " : ""
-            let title = mark + Self.speedText(speed)
+        let currentSpeed = speed
+        for candidate in Self.speeds {
+            let mark = abs(currentSpeed - candidate) < 0.01 ? "✓ " : ""
+            let title = mark + Self.speedText(candidate)
             sheet.addAction(UIAlertAction(title: title, style: .default) { [weak self] _ in
                 guard let self = self else { return }
-                self.player.playbackRate = Float(speed)
-                UserDefaults.standard.set(speed, forKey: "kj-speed")
-                self.speedButton.setTitle(Self.speedText(speed), for: .normal)
+                self.speed = candidate
+                /* 暂停时只记下档位，不把暂停中的片改回播放。 */
+                if self.player.timeControlStatus == .playing {
+                    self.player.rate = Float(candidate)
+                }
+                UserDefaults.standard.set(candidate, forKey: "kj-speed")
+                self.speedButton.setTitle(Self.speedText(candidate), for: .normal)
             })
         }
         sheet.addAction(UIAlertAction(title: "取消", style: .cancel))

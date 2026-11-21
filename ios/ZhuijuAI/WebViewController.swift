@@ -711,15 +711,15 @@ final class WebViewController: UIViewController, UIDocumentInteractionController
     }
 
     /// 设备真的回到竖屏了，放开自动旋转（否则手还横着会立刻又进全屏）。
-    fileprivate func unlockOfflineRotation() {
+    func unlockOfflineRotation() {
         guard Self.offlineRotationLocked else { return }
         Self.offlineRotationLocked = false
         applyOfflineOrientation()
     }
 
     private func applyOfflineOrientation() {
-        setNeedsUpdateOfSupportedInterfaceOrientations()
         if #available(iOS 16.0, *) {
+            setNeedsUpdateOfSupportedInterfaceOrientations()
             let mask = Self.supportedOrientations
             view.window?.windowScene?.requestGeometryUpdate(.iOS(interfaceOrientations: mask)) { _ in }
         } else {
