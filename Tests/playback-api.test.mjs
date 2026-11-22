@@ -3,11 +3,12 @@ import test from 'node:test'
 import { readFileSync } from 'node:fs'
 import { DatabaseSync } from 'node:sqlite'
 import worker from '../worker/api/src/index.js'
+import { remainingProbeBudget } from '../worker/api/src/source-selection.js'
 
 const schema = readFileSync(new URL('../worker/api/schema.sql', import.meta.url), 'utf8')
 const segments = [720, 1080].map((height) => readFileSync(new URL(`./fixtures/avc-${height}.ts`, import.meta.url)))
 
-function fixture(t, { media = 'hls', sameContent = false, lines = ['bad', 'good'] } = {}) {
+function fixture(t, { media = 'hls', sameContent = false, lines = ['bad', 'good'], heights = {}, delays = {} } = {}) {
   const fetchLog = []
   const sqlite = new DatabaseSync(':memory:')
   sqlite.exec(schema)
@@ -27,17 +28,27 @@ function fixture(t, { media = 'hls', sameContent = false, lines = ['bad', 'good'
     if (show) {
       const [, id, ep] = show
       const lineUrl = (provider) => {
+        const heightTag = heights[provider] ? `-${heights[provider]}` : ''
         if (provider === 'bad') return `https://media.example/${id}/broken.m3u8`
-        if (provider === 'good') return `https://media.example/${id}/${sameContent ? 1 : ep}.${media === 'mp4' ? 'mp4' : 'm3u8'}`
-        return `https://media.example/${id}/${provider}.${media === 'mp4' ? 'mp4' : 'm3u8'}`
+        if (provider === 'good') return `https://media.example/${id}/${sameContent ? 1 : ep}${heightTag}.${media === 'mp4' ? 'mp4' : 'm3u8'}`
+        return `https://media.example/${id}/${provider}${heightTag}.${media === 'mp4' ? 'mp4' : 'm3u8'}`
       }
       return Response.json({ current_episode: { episode_number: Number(ep) }, line_options: lines.map((provider) => ({ provider_id: provider, url: lineUrl(provider) })) })
     }
     if (url.hostname !== 'media.example' || url.pathname.includes('broken')) return new Response(null, { status: 404 })
+    // 按线路指定响应延迟，模拟慢线路（例如手选线路 6.25 秒才返回）。
+    const slowProvider = Object.keys(delays).find((provider) => url.pathname.includes(`/${provider}.`) || url.pathname.includes(`/${provider}-`))
+    if (slowProvider) await new Promise((resolve) => setTimeout(resolve, delays[slowProvider]))
     const second = /2\.(m3u8|ts)$/.test(url.pathname)
+    // 线路名带清晰度后缀（如 sd-720.m3u8）时用它决定分片内容，655 与 1080 各自一段。
+    const name = url.pathname.split('/').pop()
+    const heightHit = name.match(/-(720|1080)\.(?:m3u8|ts)$/)
     const mp4 = new Uint8Array(2048)
     mp4.set(new TextEncoder().encode('ftyp'), 4)
-    const response = new Response(url.pathname.endsWith('.mp4') ? mp4 : url.pathname.endsWith('.m3u8') ? `#EXTM3U\n#EXTINF:4,\n${second ? 2 : 1}.ts` : segments[Number(second)], { headers })
+    const body = url.pathname.endsWith('.mp4') ? mp4
+      : url.pathname.endsWith('.m3u8') ? `#EXTM3U\n#EXTINF:4,\n${heightHit ? name.replace(/\.m3u8$/, '.ts') : `${second ? 2 : 1}.ts`}`
+        : segments[heightHit ? (heightHit[1] === '1080' ? 1 : 0) : Number(second)]
+    const response = new Response(body, { headers })
     Object.defineProperty(response, 'url', { value: url.href })
     return response
   })
@@ -171,8 +182,9 @@ test('probe failures do not contribute to browser playback history', async (t) =
 })
 
 test('默认线路探测成功后不再为换源列表等其余候选（长嵌套请求会被平台按 CPU 上限掐断）', async (t) => {
-  const { seed, request, fetchLog } = fixture(t, { lines: ['good', 'bad', 'spare'] })
+  const { seed, request, sqlite, fetchLog } = fixture(t, { lines: ['good', 'bad', 'spare'] })
   seed('lead-fast')
+  sqlite.prepare("INSERT INTO origin_defaults(show_id,provider,label) VALUES('lead-fast','good','')").run()
   const play = await (await request('/api/play?show=lead-fast&ep=0')).json()
   assert.equal(play.provider, 'good')
   assert.ok(!fetchLog.includes('/lead-fast/broken.m3u8'), `已成功就不该再探后面的死线：${fetchLog.join(',')}`)
@@ -180,4 +192,36 @@ test('默认线路探测成功后不再为换源列表等其余候选（长嵌�
   const spare = play.options.find(({ provider }) => provider === 'spare')
   assert.ok(spare, '没探过的线路仍要出现在换源列表里')
   assert.equal(spare.status, 'unknown', '没探过不等于死线')
+})
+
+test('没有原站默认记录时先探到 720 不能把 quality=1080 降级', async (t) => {
+  const { seed, request } = fixture(t, { lines: ['sd', 'hd'], heights: { sd: 720, hd: 1080 } })
+  seed('quality-order')
+  const play = await (await request('/api/play?show=quality-order&ep=0&quality=1080')).json()
+  assert.equal(play.provider, 'hd', '列表第一条只是上游顺序，不能当成默认项抢先返回')
+  assert.equal(play.quality, 1080)
+})
+
+test('手选线路 6.25 秒才响应仍然可播（首条提前返回不能缩短它的超时）', async (t) => {
+  const { seed, request } = fixture(t, { media: 'mp4', lines: ['slowline'], delays: { slowline: 6250 } })
+  seed('slow-manual')
+  const response = await request('/api/play?show=slow-manual&ep=0&line=slowline&strict=1')
+  const play = await response.json()
+  assert.equal(response.status, 200, JSON.stringify(play))
+  assert.equal(play.provider, 'slowline')
+})
+
+test('权威首条失败后备用线路照旧接上，两段探测共享原版 20 秒预算', async (t) => {
+  const { seed, request, sqlite } = fixture(t, { lines: ['bad', 'good'] })
+  seed('lead-fail')
+  // 对照表说原站默认是 bad，首条因此走提前返回的分支；它不可播时必须照旧接备用线。
+  sqlite.prepare("INSERT INTO origin_defaults(show_id,provider,label) VALUES('lead-fail','bad','')").run()
+  const started = Date.now()
+  const play = await (await request('/api/play?show=lead-fail&ep=0')).json()
+  const elapsed = Date.now() - started
+  assert.equal(play.provider, 'good')
+  assert.ok(elapsed < 20000, `不能重新领一份预算：${elapsed}ms`)
+  // 其余候选只能拿到 20 秒扣掉首条已用时间，且不能为负。
+  assert.equal(remainingProbeBudget(Date.now() - 7000), 13000)
+  assert.equal(remainingProbeBudget(Date.now() - 30000), 1000)
 })

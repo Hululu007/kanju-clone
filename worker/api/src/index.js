@@ -3,7 +3,7 @@ import { syncOnce } from './sync.js'
 import { syncHomeFeed, syncHotRanks } from './feed-sync.js'
 import { createCountedFetch, inspectHlsResource } from './playback-probe.js'
 import { mediaDimensions, readBounded } from './media-dimensions.js'
-import { isSoftProbeFailure, probeCandidates, probeStatus, selectPlayable } from './source-selection.js'
+import { isSoftProbeFailure, probeCandidates, probeStatus, remainingProbeBudget, selectPlayable } from './source-selection.js'
 import { createProbeBudget } from './probe-budget.js'
 import { orderLines } from './line-order.js'
 import { issuePlaybackAttempt, verifyPlaybackAttempt } from './playback-attempt.js'
@@ -504,18 +504,32 @@ async function playUrl(env, showId, idx, requestedLine = '', targetQuality = 0, 
   // 不再固定只探前 8 条：前 8 条全失败时第 9 条可能正好能播。
   // 真正的上限是子请求预算；预算用完的线路由 probeOne 标成「未探测」，绝不标 dead。
   const allCandidates = candidates.filter(Boolean)
-  // 先单独探第一条（原站默认线路，或用户手动选的线路）。它一旦可播就立刻返回，
-  // 不必再等其余候选里最慢的那次探测：正式站是 zhuiju-web 经 service binding 嵌套调用，
-  // 十几秒的重请求会被平台按 CPU 上限终止（2026-11-22 事故），而未探测的线路记为
-  // 「预算用尽/状态未知」，绝不标成死线。第一条不成功时，其余候选照旧并发全量探测。
+  // 先单独探第一条，成功后立刻返回，不必再等其余候选里最慢的那次探测：正式站是
+  // zhuiju-web 经 service binding 嵌套调用，十几秒的重请求会被平台按 CPU 上限终止
+  // （2026-11-22 事故），而未探测的线路记为「预算用尽/状态未知」，绝不标成死线。
+  //
+  // 只有「权威首条」才能这样提前返回：
+  //   1) 用户手动选的线路（请求带 line 参数），原版本也是选中它就直接用；
+  //   2) 原站默认对照表命中的线路，selectPlayable 本来也优先它。
+  // 对照表没命中时，列表第一条只是上游顺序（可能是 720P），先探它就返回会把
+  // quality=1080 的请求降级；这种情况必须照旧全量探测后按清晰度/可信历史选线。
+  // 首条失败时其余候选照旧并发探测，且总预算与原版本一致（20 秒共享，
+  // 扣掉首条已经花掉的时间），不能因为分两段执行就重新领一份预算。
   const lead = allCandidates[0]
-  const leadProbe = lead ? (await probeCandidates([lead], probeOne, { concurrency: 1, timeoutMs: 6000, budgetMs: 6500 }))[0] : null
+  const leadAuthoritative = !!lead && (Boolean(requestedLine) || Boolean(lead.originDefault))
   let probed
-  if (leadProbe?.ok) {
-    probed = [leadProbe, ...allCandidates.slice(1).map((line) => ({ line, ok: false, deferred: true, error: 'probe_budget_exceeded' }))]
+  if (leadAuthoritative) {
+    const leadStartedAt = Date.now()
+    // 超时沿用原来的 7 秒：手选线路 6.25 秒才响应时旧版能播，不能因为提前返回优化把它变成超时。
+    const leadProbe = await probeCandidates([lead], probeOne, { concurrency: 1, timeoutMs: 7000, budgetMs: 7500 })
+    if (leadProbe[0]?.ok) {
+      probed = [leadProbe[0], ...allCandidates.slice(1).map((line) => ({ line, ok: false, deferred: true, error: 'probe_budget_exceeded' }))]
+    } else {
+      const rest = await probeCandidates(allCandidates.slice(1), probeOne, { concurrency: 4, timeoutMs: 7000, budgetMs: remainingProbeBudget(leadStartedAt) })
+      probed = [leadProbe[0], ...rest]
+    }
   } else {
-    const rest = await probeCandidates(allCandidates.slice(1), probeOne, { concurrency: 4, timeoutMs: 7000, budgetMs: 20000 })
-    probed = leadProbe ? [leadProbe, ...rest] : rest
+    probed = await probeCandidates(allCandidates, probeOne, { concurrency: 4, timeoutMs: 7000, budgetMs: 20000 })
   }
 
   // 原站默认线路只有「超时/预算不足」这类软失败时单独再试一次：
