@@ -1,0 +1,12 @@
+0|尚公主|expected=1080P-官方Z|actual_line=1080P-官方Z|provider=bytevod-lv2|1080p|host=p6-heycan-sign.byteimg.com|MATCH
+1|嫁金钗|expected=1080P-官方Z|actual_line=1080P-官方Z|provider=bytevod-lv2|1080p|host=p6-heycan-sign.byteimg.com|MATCH
+2|走马上任|expected=1080P-官方Z|actual_line=1080P-官方Z|provider=bytevod-lv2|1080p|host=p6-heycan-sign.byteimg.com|MATCH
+3|折月亮|expected=高清-官方B|actual_line=高清-官方B|provider=bytedance|720p|host=v26-default.365yg.com|MATCH
+4|后会友期|expected=高清-官方B|actual_line=None|provider=None|Nonep|host=|NO_PLAY
+5|现在就出发 第4季|expected=高清-官方B|actual_line=iqiyi资源|provider=iqiyi|1080p|host=play.ly166.com:65|MISMATCH
+6|音乐缘计划 第3季|expected=高清-官方B|actual_line=非凡资源|provider=ffzy|720p|host=vod.ffzy-bofang.com|MISMATCH
+7|现在就出发 第3季|expected=1080zyk|actual_line=iqiyi资源|provider=iqiyi|1080p|host=play.ly166.com:65|MISMATCH
+8|八仙|expected=1080P-官方V|actual_line=1080P-官方V · 普通话|provider=official-v|0p|host=p6-volc-community-sign.byteimg.com|MISMATCH
+9|蜘蛛侠:崭新之日|expected=1080P-官方Z|actual_line=红牛资源 · 普通话|provider=hongniu|808p|host=hn.bfvvs.com|MISMATCH
+10|空枪|expected=1080P-官方Z|actual_line=魔都资源|provider=mdzy|804p|host=play.modujx17.com|MISMATCH
+11|奥德赛|expected=高清-官方B|actual_line=红牛资源 · 英语|provider=hongniu|1080p|host=hn.bfvvs.com|MISMATCH

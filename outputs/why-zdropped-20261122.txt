@@ -1,0 +1,4 @@
+== 0 chosen=1080P-官方R provider=official-r
+  tried: 1080P-官方Z=probe_timeout; 1080P-官方S=probe_timeout; 1080P-官方V=probe_timeout; 专享4K-Y=http_403; 1080P-专享U=http_403; 腾讯视频=http_403; 红牛资源=first_segment_unavailable; 新浪资源=http_444
+== 2 chosen=1080P-官方S provider=bytevod-lv3
+  tried: 1080P-官方Z=probe_timeout; 1080P-官方V=probe_timeout; 专享4K-Y=http_403; 1080P-专享U=http_403; 腾讯视频=http_403; 新浪资源=fetch_failed; 豪华资源=fetch_failed; 速播资源=http_444

@@ -182,3 +182,13 @@ CREATE INDEX IF NOT EXISTS idx_health_verdict ON provider_health(verdict);
 CREATE INDEX IF NOT EXISTS idx_auth_sessions_user ON auth_sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_auth_sessions_expiry ON auth_sessions(expires_at);
 CREATE INDEX IF NOT EXISTS idx_user_progress_updated ON user_progress(user_id, updated_at DESC);
+
+-- 原站默认线路对照：逐部实测原站播放页的默认线路，默认播放跟随它（见 src/origin-default.js）
+CREATE TABLE IF NOT EXISTS origin_defaults (
+  show_id TEXT PRIMARY KEY,
+  provider TEXT NOT NULL,
+  label TEXT,
+  title TEXT,
+  source TEXT,
+  observed_at TEXT
+);

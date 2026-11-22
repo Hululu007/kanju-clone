@@ -6,6 +6,7 @@ import { mediaDimensions, readBounded } from './media-dimensions.js'
 import { probeCandidates, selectPlayable } from './source-selection.js'
 import { orderLines } from './line-order.js'
 import { issuePlaybackAttempt, verifyPlaybackAttempt } from './playback-attempt.js'
+import { applyOriginDefault } from './origin-default.js'
 // 契约与本地 server/proxy.mjs 一致：/api/health /api/list /api/show /api/lines /api/play /api/audit /api/progress
 const SITE = 'https://kanju32.com'
 const BUILD = 'dianyingtiantang-v2026.11.12.3-worker-flag-fix-46f791897b69-web'
@@ -368,7 +369,7 @@ async function playUrl(env, showId, idx, requestedLine = '', targetQuality = 0, 
     /* 拿不到就不显示跳过按钮 */
   }
 
-  const lines = orderLines(lineOptions(rv).map((line) => ({
+  const lines = orderLines((await applyOriginDefault(env, showId, lineOptions(rv))).map((line) => ({
     ...line,
     quality: 0,
     stats: successfulProviders.get(line.provider),
@@ -385,7 +386,7 @@ async function playUrl(env, showId, idx, requestedLine = '', targetQuality = 0, 
     ? strictLine ? [lines.find((line) => line.provider === requestedLine)] : [lines.find((line) => line.provider === requestedLine), ...lines.filter((line) => line.provider !== requestedLine)]
     : lines
   const tried = []
-  const probed = await probeCandidates(candidates.filter(Boolean), async (line, signal) => {
+  const probeOne = async (line, signal) => {
     let url = line.url
     if (!url && line.ticket) {
       try { url = await resolveTicket(env, line.ticket, signal) } catch (error) {
@@ -420,7 +421,17 @@ async function playUrl(env, showId, idx, requestedLine = '', targetQuality = 0, 
       }
     }
     return { line, url, ...info, ok: true }
-  }, { concurrency: 4, timeoutMs: 7000, budgetMs: 20000 })
+  }
+  let probed = await probeCandidates(candidates.filter(Boolean), probeOne, { concurrency: 4, timeoutMs: 7000, budgetMs: 20000 })
+
+  // 原站默认线路只有「超时/预算不足」这类软失败时单独再试一次：
+  // 并发探测会把它挤到超时，导致默认线路被换成别的线路，与原站不一致。
+  const wantedAt = probed.findIndex((item) => item.line.selected)
+  const softFail = ['probe_timeout', 'probe_budget_exceeded', 'probe_aborted']
+  if (!requestedLine && wantedAt >= 0 && !probed[wantedAt].ok && softFail.includes(probed[wantedAt].error)) {
+    const retried = await probeCandidates([probed[wantedAt].line], probeOne, { concurrency: 1, timeoutMs: 12000, budgetMs: 13000 })
+    if (retried[0]?.ok) probed = probed.map((item, index) => (index === wantedAt ? retried[0] : item))
+  }
 
   for (const item of probed) {
     if (!item.ok) {
@@ -1145,7 +1156,7 @@ export default {
           showId,
           idx,
           episodeNumber: rv?.current_episode?.episode_number ?? ep.number,
-          options: orderLines(lineOptions(rv), successfulProviders).map((l) => ({
+          options: orderLines(await applyOriginDefault(env, showId, lineOptions(rv)), successfulProviders).map((l) => ({
             provider: l.provider,
             label: l.label,
             group: l.group,

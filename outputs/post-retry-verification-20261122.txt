@@ -1,0 +1,10 @@
+0-1: provider=official-r line=1080P-官方R q=1080 url=yes err=None host=sign.site.zshtys888.com
+0-2: provider=official-r line=1080P-官方R q=1080 url=yes err=None host=sign.site.zshtys888.com
+1-1: provider=bytevod-lv2 line=1080P-官方Z q=1080 url=yes err=None host=p9-heycan-sign.byteimg.com
+1-2: provider=bytevod-lv2 line=1080P-官方Z q=1080 url=yes err=None host=p9-heycan-sign.byteimg.com
+2-1: provider=bytevod-lv3 line=1080P-官方S q=1080 url=yes err=None host=lf3-csp-sign.bytetos.com
+2-2: provider=bytevod-lv3 line=1080P-官方S q=1080 url=yes err=None host=lf3-csp-sign.bytetos.com
+3-1: provider=bytedance line=高清-官方B q=720 url=yes err=None host=v26-default.365yg.com
+3-2: provider=bytedance line=高清-官方B q=720 url=yes err=None host=v26-default.365yg.com
+8-1: provider=official-v line=1080P-官方V · 普通话 q=0 url=yes err=None host=p6-volc-community-sign.byteimg.com
+8-2: provider=official-v line=1080P-官方V · 普通话 q=0 url=yes err=None host=p6-volc-community-sign.byteimg.com

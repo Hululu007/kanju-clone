@@ -1,0 +1,18 @@
+{
+  "checkedAt": "2026-11-22T03:05:00Z",
+  "method": "Isolated automation browser, muted, no login, original site kanju17.com -> kanju12.com. Default observed on the player the site itself opens from a title search (no manual line switching).",
+  "rows": [
+    {"no":1,"title":"尚公主","kind":"剧集","originEpisode":"第1集","originLineLabel":"1080P-官方Z","video":{"w":1920,"h":1080,"duration":2753.33,"currentTime":112.0}},
+    {"no":2,"title":"嫁金钗","kind":"剧集","originEpisode":"第1集","originLineLabel":"1080P-官方Z","video":{"w":1920,"h":1080,"duration":2890.12,"currentTime":98.6}},
+    {"no":3,"title":"走马上任","kind":"剧集","originEpisode":"第1集","originLineLabel":"1080P-官方Z","video":{"w":1920,"h":1080,"duration":1948.33,"currentTime":118.4}},
+    {"no":4,"title":"折月亮","kind":"剧集","originEpisode":"第1集","originLineLabel":"高清-官方B","video":{"w":1728,"h":720,"duration":2727.16,"currentTime":109.8}},
+    {"no":5,"title":"后会友期","kind":"综艺","originEpisode":"2026-11-20 抢鲜版","originLineLabel":"高清-官方B","video":{"w":1280,"h":720,"duration":2034.32,"currentTime":8.9}},
+    {"no":6,"title":"现在就出发 第4季","kind":"综艺","originEpisode":"2026-11-21 第7期 上 情境伪装者纯享","originLineLabel":"高清-官方B","video":{"w":1280,"h":720,"duration":2288.48,"currentTime":5.6}},
+    {"no":7,"title":"音乐缘计划 第3季","kind":"综艺","originEpisode":"20261121 纯享","originLineLabel":"高清-官方B","video":{"w":1280,"h":720,"duration":2799.6,"currentTime":5.1}},
+    {"no":8,"title":"现在就出发 第3季","kind":"综艺","originEpisode":"2026-02-01 名场面特辑","originLineLabel":"1080zyk","video":{"w":1920,"h":1080,"duration":1972.45,"currentTime":2.1}},
+    {"no":9,"title":"八仙","kind":"电影","originEpisode":"正片","originLineLabel":"1080P-官方V","video":{"w":1280,"h":536,"duration":8596.48,"currentTime":81.1}},
+    {"no":10,"title":"蜘蛛侠:崭新之日","kind":"电影","originEpisode":"正片","originLineLabel":"1080P-官方Z","video":{"w":1280,"h":720,"duration":8700.75,"currentTime":54.2}},
+    {"no":11,"title":"空枪","kind":"电影","originEpisode":"正片","originLineLabel":"1080P-官方Z","video":{"w":1920,"h":804,"duration":9625.08,"currentTime":4.2}},
+    {"no":12,"title":"奥德赛","kind":"电影","originEpisode":"正片","originLineLabel":"高清-官方B","video":{"w":1280,"h":720,"duration":10355.73,"currentTime":7.9}}
+  ]
+}
