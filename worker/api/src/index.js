@@ -3,7 +3,8 @@ import { syncOnce } from './sync.js'
 import { syncHomeFeed, syncHotRanks } from './feed-sync.js'
 import { inspectHlsResource } from './playback-probe.js'
 import { mediaDimensions, readBounded } from './media-dimensions.js'
-import { probeCandidates, selectPlayable } from './source-selection.js'
+import { isSoftProbeFailure, probeCandidates, probeStatus, selectPlayable } from './source-selection.js'
+import { createProbeBudget } from './probe-budget.js'
 import { orderLines } from './line-order.js'
 import { issuePlaybackAttempt, verifyPlaybackAttempt } from './playback-attempt.js'
 import { applyOriginDefault, loadOriginDefault, markOriginDefault, mergeOriginRetry, pickOriginDefaultEpisode, planOriginRetry } from './origin-default.js'
@@ -60,7 +61,7 @@ function throttle() {
   return p
 }
 
-async function signedFetch(env, path, { method = 'GET', body, cookie = '', timeout = 20000, signal } = {}) {
+async function signedFetch(env, path, { method = 'GET', body, cookie = '', timeout = 20000, signal, budget } = {}) {
   const u = new URL(path, SITE)
   const ts = String(Date.now())
   const nonce = [...crypto.getRandomValues(new Uint8Array(16))].map((b) => b.toString(16).padStart(2, '0')).join('')
@@ -77,6 +78,8 @@ async function signedFetch(env, path, { method = 'GET', body, cookie = '', timeo
   }
   if (body !== undefined) headers['content-type'] = 'application/json'
   if (cookie) headers.cookie = cookie
+  if (budget && !budget.canSpend(1)) throw new Error('probe_budget_exceeded')
+  if (budget) budget.spend(1)
   const res = await fetch(u, {
     method,
     headers,
@@ -109,7 +112,7 @@ async function dbRun(env, sql, ...args) {
   return env.DB.prepare(sql).bind(...args).run()
 }
 
-async function getGuest(env, force = false, immediate = false) {
+async function getGuest(env, force = false, immediate = false, budget) {
   if (guest && !force) return guest
   if (!immediate && guestForceAt && Date.now() - guestForceAt < 300_000) return guest
   if (!force) {
@@ -124,7 +127,7 @@ async function getGuest(env, force = false, immediate = false) {
     anon = 'web_' + crypto.randomUUID()
     await dbRun(env, "INSERT INTO meta(key,value,updated_at) VALUES('anon_id',?,datetime('now')) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at", anon).catch(() => {})
   }
-  const res = await signedFetch(env, '/v1/users/anonymous', { method: 'POST', body: { anonymous_id: anon } })
+  const res = await signedFetch(env, '/v1/users/anonymous', { method: 'POST', body: { anonymous_id: anon }, budget })
   if (res.status < 200 || res.status >= 300) throw new Error(`访客会话失败 HTTP ${res.status}`)
   const pick = res.cookies.map((c) => c.split(';')[0]).find((c) => c.startsWith('ai_movie_session=') && c.length > 18)
   if (!pick) throw new Error('访客会话失败：没有 cookie')
@@ -135,15 +138,15 @@ async function getGuest(env, force = false, immediate = false) {
 }
 
 const resolveCache = new Map()
-async function resolveEpisode(env, ep) {
+async function resolveEpisode(env, ep, budget) {
   const hit = resolveCache.get(ep.token)
   if (hit && Date.now() - hit.at < 60_000) return hit.value
   await throttle()
-  const cookie = await getGuest(env).catch(() => '')
-  let r = await signedFetch(env, `/v1/playback/resolve/${ep.token}?view=compact`, { cookie })
+  const cookie = await getGuest(env, false, false, budget).catch(() => '')
+  let r = await signedFetch(env, `/v1/playback/resolve/${ep.token}?view=compact`, { cookie, budget })
   if (r.status === 401 && /playback_user_session_required/.test(r.text)) {
-    const fresh = await getGuest(env, true, true).catch(() => '')
-    r = await signedFetch(env, `/v1/playback/resolve/${ep.token}?view=compact`, { cookie: fresh })
+    const fresh = await getGuest(env, true, true, budget).catch(() => '')
+    r = await signedFetch(env, `/v1/playback/resolve/${ep.token}?view=compact`, { cookie: fresh, budget })
   }
   if (r.status < 200 || r.status >= 300) {
     const err = new Error(`HTTP ${r.status} ${r.text.slice(0, 140)}`)
@@ -158,14 +161,14 @@ async function resolveEpisode(env, ep) {
 // 原站对 resolve-line 会按会话/IP 限流（实测 Worker 侧曾返回 429），
 // 本地客户端有重试，Worker 旧实现一次失败就丢掉整条官方线。这里补上有界重试。
 const RESOLVE_RETRY_STATUS = new Set([403, 429, 500, 502, 503, 504])
-async function resolveTicket(env, ticket, signal, retries = 1) {
+async function resolveTicket(env, ticket, signal, retries = 1, budget) {
   await throttle()
   if (signal?.aborted) throw new Error('probe_aborted')
-  let cookie = await getGuest(env).catch(() => '')
+  let cookie = await getGuest(env, false, false, budget).catch(() => '')
   let last
   for (let attempt = 0; attempt <= retries; attempt++) {
     if (signal?.aborted) throw new Error('probe_aborted')
-    const r = await signedFetch(env, '/v1/playback/resolve-line', { method: 'POST', body: { ticket }, cookie, timeout: 7000, signal })
+    const r = await signedFetch(env, '/v1/playback/resolve-line', { method: 'POST', body: { ticket }, cookie, timeout: 7000, signal, budget })
     if (r.status >= 200 && r.status < 300) return JSON.parse(r.text)?.line?.url || ''
     const code = (() => { try { return JSON.parse(r.text)?.code || '' } catch { return '' } })()
     last = { status: r.status, body: r.text, code }
@@ -173,7 +176,7 @@ async function resolveTicket(env, ticket, signal, retries = 1) {
     if (/too many subrequests/i.test(r.text)) break
     const sessionExpired = (r.status === 401 || r.status === 403) && /playback_user_session_required|login_required|session/i.test(r.text)
     if (attempt === 0 && sessionExpired) {
-      cookie = await getGuest(env, true, true).catch(() => '')
+      cookie = await getGuest(env, true, true, budget).catch(() => '')
       continue
     }
     if (attempt < retries && (RESOLVE_RETRY_STATUS.has(r.status) || sessionExpired)) {
@@ -182,7 +185,8 @@ async function resolveTicket(env, ticket, signal, retries = 1) {
     }
     break
   }
-  const err = new Error(`HTTP ${last.status} ${last.body.slice(0, 120)}`)
+  const budgetExceeded = /too many subrequests|probe_budget_exceeded/i.test(last.body)
+  const err = new Error(budgetExceeded ? 'probe_budget_exceeded' : `HTTP ${last.status} ${last.body.slice(0, 120)}`)
   err.body = last.body
   err.status = last.status
   err.code = last.code
@@ -225,11 +229,12 @@ function sniff(buf, contentType = '') {
   return 'unknown'
 }
 
-async function inspectHls(url, signal) {
+async function inspectHls(url, signal, budget) {
   const result = await inspectHlsResource(url, {
     fetchImpl: (resource, options) => fetch(resource, { ...options, headers: { ...options.headers, 'user-agent': UA } }),
     timeoutMs: 5000,
     signal,
+    budget,
   })
   if (!result.ok) return result
   const first = result.firstSegment
@@ -241,8 +246,10 @@ async function inspectHls(url, signal) {
   }
 }
 
-async function inspectMp4(url, signal) {
+async function inspectMp4(url, signal, budget) {
   try {
+    if (budget && !budget.canSpend(1)) return { ok: false, kind: 'mp4', error: 'probe_budget_exceeded' }
+    if (budget) budget.spend(1)
     const r = await fetch(url, {
       headers: { 'user-agent': UA, range: 'bytes=0-8388607' },
       redirect: 'follow',
@@ -253,7 +260,7 @@ async function inspectMp4(url, signal) {
     const len = r.headers.get('content-range') || r.headers.get('content-length') || ''
     const buf = await readBounded(r, 8 * 1024 * 1024)
     const kind = sniff(buf, ct)
-    if (kind === 'hls') return inspectHls(url, signal)
+    if (kind === 'hls') return inspectHls(url, signal, budget)
     if (kind === 'image') return { ok: false, kind: 'image', error: 'placeholder_image' }
     if (kind === 'html') return { ok: false, kind: 'page', error: 'not_video' }
     if (kind !== 'mp4') return { ok: false, kind, error: 'not_video' }
@@ -265,17 +272,18 @@ async function inspectMp4(url, signal) {
   }
 }
 
-async function inspectSource(url, signal) {
+async function inspectSource(url, signal, budget) {
   if (/\.m3u8(\?|$)/i.test(url)) return inspectHlsResource(url, {
     fetchImpl: (resource, options) => fetch(resource, { ...options, headers: { ...options.headers, 'user-agent': UA } }),
     timeoutMs: 5000,
     signal,
+    budget,
   }).then(async (result) => {
     if (!result.ok) return result
     const fingerprint = result.firstBytes.byteLength > 1024 ? `hls-bytes:${await sha(result.firstBytes)}` : null
     return { ...result, fingerprint }
   })
-  return inspectMp4(url, signal)
+  return inspectMp4(url, signal, budget)
 }
 
 // ---------- 播放 ----------
@@ -304,7 +312,9 @@ async function cachedSourceUrl(env, showId, epIdx, line) {
   const rows = await dbAll(env, `SELECT url,label,checked_at FROM sources
     WHERE show_id=? AND ep_idx=? AND provider=? AND status='ok' AND url IS NOT NULL AND url<>''
     ORDER BY checked_at DESC`, showId, Number(epIdx), line.provider).catch(() => [])
-  const hit = rows.find((row) => !row.label || String(row.label) === String(line.label))
+  // 空标签的旧记录不能冒充任何语言版本：必须标签完全一致才复用，否则可能把
+  // 普通话直链当成粤语默认线返回。
+  const hit = rows.find((row) => String(row.label || '') === String(line.label || ''))
   if (!hit) return ''
   const checkedAt = Date.parse(String(hit.checked_at).replace(' ', 'T') + 'Z')
   const age = Date.now() - checkedAt
@@ -341,6 +351,7 @@ async function saveSource(env, showId, epIdx, s) {
 }
 
 async function playUrl(env, showId, idx, requestedLine = '', targetQuality = 0, preferred = '', strictLine = false) {
+  const budget = createProbeBudget()
   const requestedQuality = Number(targetQuality) || 0
   const key = `${showId}#${idx}#${requestedLine}#${requestedQuality}#${preferred}`
   const hit = playCache.get(key)
@@ -361,7 +372,7 @@ async function playUrl(env, showId, idx, requestedLine = '', targetQuality = 0, 
 
   let rv
   try {
-    rv = await resolveEpisode(env, ep)
+    rv = await resolveEpisode(env, ep, budget)
   } catch (e) {
     const msg = String(e.body || e.message || '')
     if (/playback_line_level_required|level_required|等级不足/.test(msg)) throw new Error('该集需要更高等级或会员，匿名无法播放')
@@ -428,31 +439,37 @@ async function playUrl(env, showId, idx, requestedLine = '', targetQuality = 0, 
     : lines
   const tried = []
   const probeOne = async (line, signal) => {
+    if (!budget.canSpend(1)) return { line, ok: false, deferred: true, error: 'probe_budget_exceeded' }
     let url = line.url
     let fromCache = false
     if (!url && line.ticket) {
-      try { url = await resolveTicket(env, line.ticket, signal, line.originDefault ? 2 : 1) } catch (error) {
+      try { url = await resolveTicket(env, line.ticket, signal, line.originDefault ? 2 : 1, budget) } catch (error) {
         const body = String(error.body || error.message || '')
         const member = /playback_user_session_required|login_required/.test(body)
         if (member) {
           await setHealth(env, showId, line.provider, 'member', '需要登录/会员')
           return { line, ok: false, url: '', kind: '', error: 'member' }
         }
-        const cached = (error.status === 429 || /too many subrequests/i.test(body))
-          ? await cachedSourceUrl(env, showId, idx, line)
-          : ''
-        if (cached) { url = cached; fromCache = true } else {
+        const budgetHit = /too many subrequests|probe_budget_exceeded/i.test(body)
+        const rateLimited = error.status === 429 || budgetHit
+        if (rateLimited) {
+          const cached = await cachedSourceUrl(env, showId, idx, line)
+          if (cached) { url = cached; fromCache = true } else {
+            // 限流不是死线：没有缓存就如实标「未知」，不能把默认线路标 dead 后换别家。
+            return { line, ok: false, url: '', kind: '', error: budgetHit ? 'probe_budget_exceeded' : 'rate_limited', deferred: true }
+          }
+        } else {
           const detail = error.status ? `resolve_http_${error.status}${error.code ? `_${error.code}` : ''}` : `resolve_${String(error.message).slice(0, 40)}`
           return { line, ok: false, url: '', kind: '', error: detail }
         }
       }
     }
     if (!url) return { line, ok: false, url: '', kind: '', error: 'no_url' }
-    const info = await inspectSource(url, signal)
+    const info = await inspectSource(url, signal, budget)
     if (!info.ok) {
       // 线路已经解析出真实地址，但 Worker 自己的出口拿不到媒体。
       // 这是探测器的网络限制，不等于浏览器也拿不到；留给选线阶段做未验证兜底。
-      const soft = ['probe_timeout', 'probe_budget_exceeded', 'probe_aborted', 'fetch_failed'].includes(info.error)
+      const soft = isSoftProbeFailure(info.error)
       return { line, ok: false, url, ...info, tentative: soft || undefined }
     }
     const rows = await dbAll(env, 'SELECT ep_idx, kind, fingerprint FROM sources WHERE show_id=? AND provider=? AND fingerprint IS NOT NULL', showId, line.provider).catch(() => [])
@@ -478,13 +495,10 @@ async function playUrl(env, showId, idx, requestedLine = '', targetQuality = 0, 
     }
     return { line, url, ...info, ok: true, fromCache }
   }
-  // Cloudflare 免费版一次调用最多 50 个子请求：20 多条线全解析+探测必然撞限。
-  // 原站默认线路已排在最前，只探前 8 条；其余保留为「未探测」，不当成死线。
-  const MAX_PROBE_LINES = 8
+  // 不再固定只探前 8 条：前 8 条全失败时第 9 条可能正好能播。
+  // 真正的上限是子请求预算；预算用完的线路由 probeOne 标成「未探测」，绝不标 dead。
   const allCandidates = candidates.filter(Boolean)
-  const probeTargets = allCandidates.slice(0, MAX_PROBE_LINES)
-  const deferredLines = allCandidates.slice(MAX_PROBE_LINES).map((line) => ({ line, ok: false, deferred: true, error: 'probe_budget_exceeded' }))
-  let probed = (await probeCandidates(probeTargets, probeOne, { concurrency: 4, timeoutMs: 7000, budgetMs: 20000 })).concat(deferredLines)
+  let probed = await probeCandidates(allCandidates, probeOne, { concurrency: 4, timeoutMs: 7000, budgetMs: 20000 })
 
   // 原站默认线路只有「超时/预算不足」这类软失败时单独再试一次：
   // 并发探测会把它挤到超时，导致默认线路被换成别的线路，与原站不一致。
@@ -499,7 +513,9 @@ async function playUrl(env, showId, idx, requestedLine = '', targetQuality = 0, 
   for (const item of probed) {
     if (!item.ok) {
       tried.push({ label: item.line.label, provider: item.line.provider, reason: item.error || 'unavailable', quality: Number(item.height || item.variantHeight) || 0 })
-      if (item.url && !['member', 'resolve_failed', 'probe_budget_exceeded', 'probe_timeout', 'probe_aborted'].includes(item.error)) {
+      // 软失败（Worker 出口拿不到媒体、限流、预算不足）不能写回 sources：
+      // 否则一次 fetch_failed 就会把之前已验证的直链和指纹清掉，之后连缓存也没得复用。
+      if (item.url && !item.tentative && !isSoftProbeFailure(item.error, item) && !['member', 'resolve_failed'].includes(item.error)) {
         await saveSource(env, showId, Number(idx), { provider: item.line.provider, label: item.line.label, url: item.url, kind: item.kind, quality: Number(item.height) || null, status: item.error || 'dead' })
       }
     }
@@ -515,6 +531,13 @@ async function playUrl(env, showId, idx, requestedLine = '', targetQuality = 0, 
     : tentativeDefault
       ? { ...tentativeDefault, ok: true, kind: tentativeDefault.kind || (/\.m3u8(\?|$)/i.test(tentativeDefault.url) ? 'hls' : 'mp4'), mediaUrl: tentativeDefault.url, quality: 0 }
       : selectPlayable(mediaCandidates, { preferred, targetQuality: requestedQuality })
+  // 原站默认线路到底怎么了，要明确告诉前端：限流/出口探测失败不是「线路死了」。
+  const defaultItem = mediaCandidates.find((item) => item.originDefault)
+  const defaultUnverified = !!defaultItem && !defaultItem.ok && isSoftProbeFailure(defaultItem.error, defaultItem)
+  const originDefaultStatus = !defaultItem ? 'not_in_lines'
+    : defaultItem.ok ? 'ok'
+      : defaultUnverified ? (defaultItem.error || 'unknown')
+        : 'unavailable'
   if (chosen) {
     const { line, mediaUrl, fingerprint: fp, kind, segments, duration, height = 0, width = 0 } = chosen
     const quality = Number(height || chosen.variantHeight) || 0
@@ -537,7 +560,8 @@ async function playUrl(env, showId, idx, requestedLine = '', targetQuality = 0, 
       firstSegmentMs: chosen.firstSegmentMs ?? null,
       fingerprint: fp,
       verified: !chosen.tentative,
-      probeDegraded: !!chosen.tentative,
+      probeDegraded: !!chosen.tentative || (defaultUnverified && chosen.line.provider !== defaultItem.line.provider),
+      originDefaultStatus,
       sourceFromCache: !!chosen.fromCache,
       skip,
       options: probed.map((item) => ({
@@ -546,7 +570,7 @@ async function playUrl(env, showId, idx, requestedLine = '', targetQuality = 0, 
         key: lineKey(item.line.provider, item.line.label),
         group: item.line.group,
         mode: item.line.ticket ? 'ticket' : 'direct',
-        status: item.ok ? 'ok' : item.error === 'member' ? 'member' : item.deferred || ['probe_timeout', 'probe_budget_exceeded', 'resolve_failed', 'probe_aborted'].includes(item.error) ? 'unknown' : 'dead',
+        status: probeStatus(item),
         quality: Number(item.height || item.variantHeight) || 0,
         successRate: item.line.stats?.total >= 2 ? item.line.stats.successes / item.line.stats.total : null,
         selected: item.line.provider === line.provider && String(item.line.label) === String(line.label),

@@ -1,3 +1,5 @@
+import { RETRYABLE_PROBE_FAILURES } from './source-selection.js'
+
 // 原站默认线路与默认集对照表。
 //
 // 上游 line_options 里的 selected 只表示「原站线路列表第一条」，不是原站播放页
@@ -53,8 +55,6 @@ export async function applyOriginDefault(env, showId, lines) {
 }
 
 // 软失败（并发探测把默认线路挤到超时）才值得单独重试一次；会员、HTTP 硬失败不重试。
-const SOFT_PROBE_FAILURES = ['probe_timeout', 'probe_budget_exceeded', 'probe_aborted']
-
 // 只对对照表命中的线路重试，上游 selected（列表第一条）不触发重试。
 export function planOriginRetry(probed, originDefault = {}) {
   const provider = String(originDefault?.provider || '')
@@ -63,7 +63,7 @@ export function planOriginRetry(probed, originDefault = {}) {
   const index = findOriginDefaultIndex(probed.map((item) => item.line), provider, label)
   if (index < 0) return { index, retry: false }
   const item = probed[index]
-  return { index, retry: !item.ok && SOFT_PROBE_FAILURES.includes(item.error) }
+  return { index, retry: !item.ok && RETRYABLE_PROBE_FAILURES.has(item.error) }
 }
 
 // 重试结果不论成功还是明确失败（会员/403 等）都替换原结果，

@@ -18,6 +18,17 @@ function byteRange(spec) {
   return { start, end: start + length - 1 }
 }
 
+// Cloudflare 免费版一次 Worker 调用最多 50 个子请求。媒体探测的每个请求都从这里过，
+// 计数用完就把线路留成「未探测」，不能让它变成死线或继续发请求。
+function countedFetch(fetchImpl, budget) {
+  if (!budget) return fetchImpl
+  return (resource, options) => {
+    if (!budget.canSpend(1)) throw new Error('probe_budget_exceeded')
+    budget.spend(1)
+    return fetchImpl(resource, options)
+  }
+}
+
 function corsAllowsPlayer(response) {
   let sameOrigin = false
   try { sameOrigin = new URL(response.url).origin === PLAYER_ORIGIN } catch { return false }
@@ -77,8 +88,9 @@ async function fetchPart(fetchImpl, url, signal, range, limit) {
   return body
 }
 
-export async function inspectHlsResource(url, { fetchImpl = fetch, timeoutMs = 5000, signal, depth = 0, maxDepth = 3 } = {}) {
+export async function inspectHlsResource(url, { fetchImpl = fetch, timeoutMs = 5000, signal, depth = 0, maxDepth = 3, budget } = {}) {
   if (depth > maxDepth) return { ok: false, kind: 'hls', error: 'variant_depth_exceeded' }
+  fetchImpl = countedFetch(fetchImpl, budget)
   if (depth === 0) signal = signal ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs)
   const probeStarted = Date.now()
   let response
@@ -89,8 +101,8 @@ export async function inspectHlsResource(url, { fetchImpl = fetch, timeoutMs = 5
     if (!corsAllowsPlayer(response)) return { ok: false, kind: 'hls', error: 'playlist_cors_blocked' }
     if (response.body?.getReader) text = new TextDecoder().decode(await readBounded(response, 1024 * 1024, { requireComplete: true }))
     else text = await response.text()
-  } catch {
-    return { ok: false, kind: 'hls', error: 'fetch_failed' }
+  } catch (error) {
+    return { ok: false, kind: 'hls', error: error?.message === 'probe_budget_exceeded' ? 'probe_budget_exceeded' : 'fetch_failed' }
   }
   if (!text.trimStart().startsWith('#EXTM3U')) return { ok: false, kind: 'hls', error: 'not_m3u8' }
   if (depth === 0 && Date.now() - probeStarted >= timeoutMs) return { ok: false, kind: 'hls', error: 'probe_timeout' }
@@ -152,6 +164,7 @@ export async function inspectHlsResource(url, { fetchImpl = fetch, timeoutMs = 5
     firstSegment = mediaResource(segments[0], base)
     segment = await fetchPart(fetchImpl, firstSegment, signal, byteRange(lastTag('#EXT-X-BYTERANGE:')), 8 * 1024 * 1024)
   } catch (error) {
+    if (error?.message === 'probe_budget_exceeded') return { ok: false, kind: 'hls', error: 'probe_budget_exceeded' }
     const reason = /^(http_\d+|incomplete|cors_blocked)$/.test(error.message) ? error.message : 'unavailable'
     return { ok: false, kind: 'hls', error: `first_segment_${reason}` }
   }

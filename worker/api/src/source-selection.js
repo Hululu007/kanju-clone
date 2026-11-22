@@ -1,3 +1,32 @@
+// 这些失败只说明 Worker 自己的出口/预算不够，不代表线路不可播：
+// 地址已经拿到，浏览器在用户网络里仍可能正常起播。一律按「未验证/状态未知」处理。
+export const SOFT_PROBE_FAILURES = new Set([
+  'probe_timeout',
+  'probe_budget_exceeded',
+  'probe_aborted',
+  'fetch_failed',
+  'rate_limited',
+])
+
+// 只有确实可能因并发挤压而变好的失败才值得再探一次；限流和出口网络失败重试只会浪费子请求。
+export const RETRYABLE_PROBE_FAILURES = new Set(['probe_timeout', 'probe_budget_exceeded', 'probe_aborted'])
+
+export function isSoftProbeFailure(error, item) {
+  const code = String(error || '')
+  if (item?.tentative) return true
+  return SOFT_PROBE_FAILURES.has(code)
+    || /^first_segment_/.test(code)
+    || /^resolve_http_(429|500|502|503|504)/.test(code)
+    || /^resolve_(too_many_subrequests|probe_budget_exceeded)/.test(code)
+}
+
+export function probeStatus(item) {
+  if (item.ok) return 'ok'
+  if (item.error === 'member') return 'member'
+  if (item.deferred || isSoftProbeFailure(item.error, item) || item.error === 'resolve_failed') return 'unknown'
+  return 'dead'
+}
+
 // Keep the network work bounded; an untested line is never advertised as playable.
 export async function probeCandidates(lines, probe, { concurrency = 4, timeoutMs = 7000, budgetMs = 20000 } = {}) {
   const results = new Array(lines.length)

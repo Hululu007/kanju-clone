@@ -27,7 +27,9 @@ function fixture(t, { officialMedia = 'ok', lineAttempts = [], cachedUrl = '', a
     } } } },
   }
   t.after(() => sqlite.close())
+  let fetchCount = 0
   t.mock.method(globalThis, 'fetch', async (input, options = {}) => {
+    fetchCount++
     const url = new URL(input)
     if (url.pathname === '/v1/users/anonymous') {
       return new Response('{}', { status: 201, headers: { 'set-cookie': 'ai_movie_session=test-guest-session-value-1234567890; Path=/' } })
@@ -73,7 +75,7 @@ function fixture(t, { officialMedia = 'ok', lineAttempts = [], cachedUrl = '', a
   sqlite.prepare('INSERT INTO origin_defaults(show_id,provider,label) VALUES(?,?,?)').run(id, 'official-z', '1080P-官方Z')
   if (cachedUrl) sqlite.prepare("INSERT INTO sources(show_id,ep_idx,provider,label,url,kind,status,checked_at) VALUES(?,?,?,?,?,?,?,datetime('now'))").run(id, 0, 'official-z', '1080P-官方Z', cachedUrl, 'mp4', 'ok')
   const request = (path) => worker.fetch(new Request(`https://worker.example${path}`), env)
-  return { request, lineAttempts, id }
+  return { request, lineAttempts, id, fetchCount: () => fetchCount }
 }
 
 test('a 429 from resolve-line is retried instead of losing the official line', async (t) => {
@@ -108,10 +110,11 @@ test('the subrequest limit reuses the last verified url instead of losing the of
   assert.equal(play.url, 'https://media.example/cached.mp4')
 })
 
-test('a long line list never probes more lines than the worker subrequest budget allows', async (t) => {
-  const { request, id, lineAttempts } = fixture(t, { extraLines: 18 })
+test('a long line list never spends more than the worker subrequest budget', async (t) => {
+  const { request, id, fetchCount } = fixture(t, { extraLines: 18 })
   const play = await (await request(`/api/play?show=${id}&ep=0`)).json()
-  assert.ok(lineAttempts.length <= 8, `too many resolve-line calls: ${lineAttempts.length}`)
+  // 统计所有 fetch（解析、媒体、会话），不能只数官方线的解析请求。
+  assert.ok(fetchCount() <= 50, `worker spent ${fetchCount()} subrequests`)
   assert.equal(play.options.length, 20, JSON.stringify(play.options.length))
   assert.ok(play.options.every((option) => option.status !== 'dead'), 'unprobed lines must stay unknown, not dead')
 })

@@ -1433,3 +1433,34 @@ testToolbarDownloadButtonReplacesTheDanmakuSlot → missing-button
 - **结果**：旧实现 5 红 1 绿；修复后全套 `node --test Tests/*.test.mjs` 82 通过 / 0 失败 / 0 跳过。
   诊断实例 `kanju-api-diag-ken` 上线后抽查对照表前 14 部：10 部有响应的全部命中原站默认线路
   （其中 3 部为未验证候选），未再出现「换到别家线路」。
+
+## WEB-REG-002 审核返修：限流被判死线、空标签缓存冒充语言版本、软失败清空已验证记录、固定探 8 条（Web/Worker，非 iOS）
+
+- **现象**（审核开发二在 `dc462b2` 上复现的四条 P1）：
+  1. 默认线持续 429 / 撞子请求上限且无缓存时被标 `dead` 并换成别家；HLS 已拿到播放地址、
+     只是首片请求超时（`first_segment_*`）也算硬失败。
+  2. 同 show+集+provider 下一条**空标签**旧直链，会被当成带标签默认线的缓存复用，语言无法保证。
+  3. 默认线已有 `ok` + 指纹，新地址探测 `fetch_failed` 时失败分支把旧记录改成 `fetch_failed` 并清空指纹。
+  4. 固定只探前 8 条：前 8 条全失败、第 9 条可播时接口直接 500。
+- **根因**：上一版用「固定 8 条」代替真实子请求预算；软/硬失败共用一张判定表；
+  缓存命中允许空标签通配；写失败的 `saveSource` 没排除软失败。
+- **修复**（`Tests/worker-egress-review.test.mjs` 的复现用例先红后绿）：
+  - 新增 `probe-budget.js`：按真实 fetch 计数，上限 44（Cloudflare 免费版 50 留余量）。
+    `signedFetch`、HLS/MP4 探测都过这个计数；用完的线路是「未探测/状态未知」，绝不标 dead。
+    取消固定 8 条，前 8 条失败时会继续探第 9 条及之后。
+  - 限流/预算不足/首片不可达统一归为软失败：默认线不再被标 dead；回退别家时响应带
+    `originDefaultStatus:'rate_limited'` 与 `probeDegraded:true`，说明不是线路本身死了。
+  - `cachedSourceUrl` 必须标签完全一致，空标签旧记录不能再冒充粤语/普通话版本。
+  - 软失败一律不写 `sources`，已验证直链和指纹不会被一次 `fetch_failed` 清掉。
+  - `Tests/worker-egress.test.mjs` 的预算用例改为统计**所有** fetch，不再只数官方线解析请求。
+- **复现测试**（`Tests/worker-egress-review.test.mjs`，Node）：
+  - `a rate-limited origin default is unknown, not dead, and the fallback is flagged`
+  - `an HLS default with an unreachable first segment stays an unverified candidate`
+  - `an unlabelled cached source cannot stand in for a labelled origin default`
+  - `a soft probe failure never overwrites a previously verified source`
+  - `probing continues past eight failed lines when a later line is playable`
+  - `the worker never spends more than the Cloudflare subrequest budget`
+- **结果**：在 `dc462b2` 上新增 6 条中 5 红 1 绿（预算守卫绿）；修复后全套
+  `node --test Tests/*.test.mjs` 88 通过 / 0 失败 / 0 跳过，`node --check` 全过。
+- **验证边界**：Node 夹具 + 真实调用链，未做生产部署或浏览器实播。
+  4 部综艺缺集（第 1 项）按用户要求未处理。
