@@ -5,6 +5,7 @@ import { DatabaseSync } from 'node:sqlite'
 import worker from '../worker/api/src/index.js'
 import { inspectHlsResource } from '../worker/api/src/playback-probe.js'
 import { createProbeBudget } from '../worker/api/src/probe-budget.js'
+import { mergeOriginRetry } from '../worker/api/src/origin-default.js'
 
 const schema = readFileSync(new URL('../worker/api/schema.sql', import.meta.url), 'utf8')
 const mp4Bytes = () => {
@@ -92,6 +93,7 @@ function fixture(t, options = {}) {
     if (url.hostname === 'media.example') {
       const custom = mediaPolicy?.(url.pathname)
       if (custom === 'throw') throw new Error('connect timeout from worker egress')
+      if (custom === 'budget') throw new Error('probe_budget_exceeded')
       if (custom) return custom
       if (url.pathname === '/cached.mp4' || url.pathname === '/official.mp4'
         || url.pathname === '/official-new.mp4' || url.pathname === '/other.mp4' || url.pathname === '/late.mp4') return mp4Response()
@@ -288,4 +290,46 @@ test('every redirect hop is charged to the probe budget', async () => {
   const out = await inspectHlsResource('https://media.example/redirect.m3u8', { fetchImpl, budget: createProbeBudget(1) })
   assert.equal(out.ok, false, JSON.stringify(out))
   assert.equal(out.error, 'probe_budget_exceeded', JSON.stringify(out))
+})
+
+test('an HLS key with a definite HTTP 404 is dead, not an unverified default', async (t) => {
+  const f = fixture(t, {
+    extraLines: 0,
+    resolvePolicy: (ticket) => ticket === 'official-ticket'
+      ? { status: 201, text: JSON.stringify({ line: { url: 'https://media.example/official.m3u8' } }) }
+      : null,
+    mediaPolicy: (path) => {
+      if (path === '/official.m3u8') return new FixtureResponse('#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI="key.bin"\n#EXTINF:2,\nseg1.ts\n', { status: 200, headers: { 'content-type': 'application/vnd.apple.mpegurl', 'access-control-allow-origin': '*' } }, 'https://media.example/official.m3u8')
+      if (path === '/key.bin') return new Response('', { status: 404 })
+      return null
+    },
+  })
+  const out = await play(f)
+  assert.equal(out.provider, 'other', JSON.stringify(out))
+  assert.equal(out.verified, true, JSON.stringify(out))
+  const def = out.options.find((o) => o.label === '1080P-官方Z')
+  assert.equal(def.status, 'dead', JSON.stringify(out.options))
+  assert.equal(out.probeDegraded, false, JSON.stringify(out))
+})
+
+test('an origin-default retry with no address keeps the first resolved URL', async (t) => {
+  const f = fixture(t, {
+    extraLines: 0,
+    resolvePolicy: (ticket, count) => ticket === 'official-ticket' && count > 1 ? { status: 429, text: 'rate_limited' } : null,
+    mediaPolicy: (path) => path === '/official.mp4' ? 'budget' : null,
+  })
+  const out = await play(f)
+  assert.equal(out.provider, 'official-z', JSON.stringify(out))
+  assert.equal(out.url, 'https://media.example/official.mp4', JSON.stringify(out))
+  assert.equal(out.verified, false, JSON.stringify(out))
+})
+
+test('mergeOriginRetry only replaces the first probe when the retry has an address or a definite failure', () => {
+  const line = { provider: 'official-z', label: '1080P-官方Z' }
+  const first = { line, ok: false, url: 'https://media.example/official.m3u8', error: 'probe_budget_exceeded', tentative: true }
+  const preserved = mergeOriginRetry([first], 0, { line, ok: false, deferred: true, error: 'probe_budget_exceeded' })
+  assert.equal(preserved[0].url, first.url)
+  assert.equal(preserved[0].tentative, true)
+  const replaced = mergeOriginRetry([first], 0, { line, ok: false, url: '', error: 'member' })
+  assert.equal(replaced[0].error, 'member')
 })

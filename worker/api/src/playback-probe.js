@@ -190,7 +190,9 @@ export async function inspectHlsResource(url, { fetchImpl = fetch, timeoutMs = 5
     const message = String(error?.message || '')
     if (message === 'probe_budget_exceeded') return { ok: false, kind: 'hls', error: 'probe_budget_exceeded' }
     if (message === 'cors_blocked') return { ok: false, kind: 'hls', error: 'playlist_dependencies_cors_blocked' }
-    if (/^http_(429|5\d\d)$/.test(message)) return { ok: false, kind: 'hls', error: `playlist_dependencies_${message}` }
+    // 明确的 HTTP 状态码要原样带出去：429/5xx 是 Worker 出口或限流问题（软失败），
+    // 404/403 这类是密钥/初始化片段真的拿不到（硬失败），不能被折叠成 unavailable 去抢备用线。
+    if (/^http_\d{3}$/.test(message)) return { ok: false, kind: 'hls', error: `playlist_dependencies_${message}` }
     return { ok: false, kind: 'hls', error: 'playlist_dependencies_unavailable' }
   }
   let firstSegment

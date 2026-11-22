@@ -14,6 +14,8 @@ export const RETRYABLE_PROBE_FAILURES = new Set(['probe_timeout', 'probe_budget_
 // 明确证明浏览器也拿不到媒体的失败，不能当成「Worker 出口问题」去抢可播备用线。
 function isHardProbeFailure(code) {
   if (/(^|_)cors_blocked$/.test(code)) return true
+  // 依赖资源明确返回 4xx（密钥 404、鉴权 403 等）是线路自己的问题，不是 Worker 出口问题。
+  if (/^playlist_dependencies_http_4\d\d$/.test(code) && code !== 'playlist_dependencies_http_429') return true
   return /^first_segment_(not_media|empty|decryption_failed|invalid_byte_range|placeholder_image)$/.test(code)
     || code === 'no_playable_variant'
 }

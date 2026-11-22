@@ -1491,3 +1491,19 @@ testToolbarDownloadButtonReplacesTheDanmakuSlot → missing-button
 - **结果**：修复后全套 `node --test Tests/*.test.mjs` **95 通过 / 0 失败 / 0 跳过**；
   `node --check`、`npm run build` 全过。Cloudflare 官方口径（Context7）确认免费版 50 个子请求、重定向每跳计数。
 - **验证边界**：Node 夹具 + 真实调用链，未做生产部署或浏览器实播；4 部综艺缺集（第 1 项）继续按用户要求不处理。
+
+## WEB-REG-004 第四轮返修：HLS 密钥明确 404、重试丢地址（Web/Worker，非 iOS）
+
+- **现象**（审核开发二在 `2341950` 上复现的两条 P1）：
+  1. HLS 密钥明确返回 404，仍被归为软失败，未验证的官方线抢占已验证备用线。
+  2. 首次探测已拿到官方地址，重试因预算耗尽/限流没拿到地址时，空结果覆盖首次结果，官方线被当成「没地址」换成别家。
+- **根因**：密钥/初始化片段 catch 把 `http_404` 折叠为 `playlist_dependencies_unavailable`（软失败）；`mergeOriginRetry` 无条件用重试结果替换首次结果。
+- **修复**：
+  - `playback-probe.js` 原样带出明确 HTTP 状态码为 `playlist_dependencies_http_<status>`；`source-selection.js` 把 4xx（除 429）列为硬失败。
+  - `origin-default.js` 的 `mergeOriginRetry`：重试无地址且只是软失败/未知、首次有地址时保留首次；明确失败（会员/403）仍替换。
+- **复现测试**（`Tests/worker-egress-review.test.mjs`，3 条均在 `2341950` 上先红）：
+  - `an HLS key with a definite HTTP 404 is dead, not an unverified default`
+  - `an origin-default retry with no address keeps the first resolved URL`
+  - `mergeOriginRetry only replaces the first probe when the retry has an address or a definite failure`
+- **结果**：修复后全套 `node --test Tests/*.test.mjs` **98 通过 / 0 失败 / 0 跳过**；`node --check`、`npm run build` 全过。
+- **验证边界**：Node 夹具 + 真实调用链，未做生产部署或浏览器实播；4 部综艺缺集（第 1 项）继续按用户要求不处理。
