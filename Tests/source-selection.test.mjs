@@ -40,6 +40,23 @@ test('measured quality wins over labels, and remembered source wins only equal q
   assert.equal(selectPlayable(lines.map((line) => ({ ...line, ok: false }))), null)
 })
 
+test('用户没手动选过线路时，原站默认线路优先于更高清晰度线路', () => {
+  const lines = [
+    { provider: 'uhd', label: '4K', ok: true, quality: 2160, selected: false },
+    { provider: 'origin', label: '高清', ok: true, quality: 720, selected: true },
+  ]
+  assert.equal(selectPlayable(lines).provider, 'origin')
+  assert.equal(selectPlayable(lines, { preferred: 'uhd' }).provider, 'uhd')
+})
+
+test('原站默认线路探测失败时回退到原有清晰度选线', () => {
+  const lines = [
+    { provider: 'origin', label: '高清', ok: false, quality: 720, selected: true },
+    { provider: 'hd', label: '1080P', ok: true, quality: 1080, selected: false },
+  ]
+  assert.equal(selectPlayable(lines).provider, 'hd')
+})
+
 test('successful preference applies inside the same measured quality tier', () => {
   const lines = [{ provider: 'a', ok: true, quality: 1080 }, { provider: 'b', ok: true, quality: 1080 }]
   assert.equal(selectPlayable(lines, { preferred: 'b' }).provider, 'b')

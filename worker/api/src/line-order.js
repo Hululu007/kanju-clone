@@ -11,6 +11,9 @@ export const qualityRank = qualityRankValue
 
 export function orderLines(lines, successfulProviders = new Map()) {
   return [...lines].sort((a, b) => {
+    // 原站播放页当前选中的线路就是这一轮要对齐的默认项，排在最前。
+    if (a.selected !== b.selected) return a.selected ? -1 : 1
+
     const rankA = Number(a.quality) || 0
     const rankB = Number(b.quality) || 0
     if ((rankA === 1080) !== (rankB === 1080)) return rankA === 1080 ? -1 : 1
@@ -28,7 +31,6 @@ export function orderLines(lines, successfulProviders = new Map()) {
       const rateB = Number(scoreB.successes || 0) / totalB
       if (rateA !== rateB) return rateB - rateA
     }
-    if (a.selected !== b.selected) return a.selected ? -1 : 1
     if (a.group !== b.group) return a.group === 'official' ? -1 : 1
     if (a.group === 'official') return a.index - b.index
     return a.priority - b.priority
