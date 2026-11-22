@@ -257,6 +257,11 @@ test('被判为串集或需会员的线路不会从已验证直链快取里返�
   const full = await (await request('/api/play?show=verified-dup&ep=0&quality=1080')).json()
   assert.notEqual(full.verifiedSourceCache, true, '高清晰度记录全废时必须回完整路径')
   assert.notEqual(full.provider, 'hd', '串集线路不能被当成可用线路返回')
+  // 完整路径必须真的解析成功并给出可播线路：只断言「不是 hd」的话，接口报错也能过（2026-11-22 审核）。
+  assert.equal(full.error, undefined, `完整解析不能报错：${JSON.stringify(full)}`)
+  assert.ok(full.url, `完整解析必须返回可用线路：${JSON.stringify(full)}`)
+  const playable = (full.options || []).find((option) => option.provider === full.provider)
+  assert.equal(playable?.status, 'ok', `返回的线路必须是实际可播的那条：${JSON.stringify(full)}`)
 })
 
 test('手选线路不吃已验证直链快取，仍走完整解析', async (t) => {

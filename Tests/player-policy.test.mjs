@@ -6,7 +6,7 @@ test('next episode follows actual episode number rather than API row index or or
   assert.equal(nextEpisodeAfter(episodes, 8)?.idx, 1)
   assert.equal(nextEpisodeAfter(episodes, 2), null)
 })
-import { allowsAutoSwitchTo, autoSwitchCandidates, autoSwitchPlan, lineLabelOfKey, lineRequestOptions, needsFullLineList, nextEpisodeAfter, qualityRank, rankPlayableLines, shouldRetrySwitchAfterRefresh, shouldShowNextCue } from '../src/player-policy.js'
+import { allowsAutoSwitchTo, autoSwitchCandidates, autoSwitchPlan, lineLabelOfKey, lineRequestOptions, needsFullLineList, nextEpisodeAfter, playbackResumed, qualityRank, rankPlayableLines, shouldRetrySwitchAfterRefresh, shouldScheduleRefreshRetry, shouldShowNextCue } from '../src/player-policy.js'
 
 test('quality labels rank 1080p above 720p and recognize UHD', () => {
   assert.equal(qualityRank('720P-普通'), 720)
@@ -155,4 +155,40 @@ test('快取起播的部分线路列表必须补拉完整清单，完整列表�
   assert.equal(needsFullLineList({ options: [] }), true)
   assert.equal(needsFullLineList(null), true)
   assert.equal(needsFullLineList({ options: [{ provider: 'good' }, { provider: 'spare' }] }), false)
+})
+
+test('快取备用线先失败时，补拉回来必须再试一次，不能直接放弃（审核 P1-1）', () => {
+  // 起初手上有快取里的备用线（partial=true），计划是立刻换线；
+  // 这条也失败后，只要补拉还在跑，就要登记一次「补拉回来再试」。
+  assert.equal(shouldScheduleRefreshRetry({ partial: true, afterRefresh: false }), true)
+  // 补拉等到窗口过去仍没回来时，也走同一条续接；afterRefresh 只允许再试一次。
+  assert.equal(shouldScheduleRefreshRetry({ partial: true, afterRefresh: true }), false)
+  // 完整清单没有「还没看过的新线路」，不用再试。
+  assert.equal(shouldScheduleRefreshRetry({ partial: false, afterRefresh: false }), false)
+  // 序列：登记 -> 补拉回来 -> 没播起来就进第二次换线。
+  assert.equal(shouldRetrySwitchAfterRefresh({
+    wanted: true,
+    switching: false,
+    playing: playbackResumed({ paused: false, ended: false, advancing: false }),
+  }), true)
+})
+
+test('缓冲卡死时 paused=false 但进度不动，不能被当成已恢复而漏掉换线（审核 P1-2）', () => {
+  // 缓冲卡死：没有 paused、没有 ended，但 currentTime 不再前进。
+  assert.equal(playbackResumed({ paused: false, ended: false, advancing: false }), false)
+  assert.equal(shouldRetrySwitchAfterRefresh({
+    wanted: true,
+    switching: false,
+    playing: playbackResumed({ paused: false, ended: false, advancing: false }),
+  }), true)
+  // 真的在播（进度在推进）才拦下重入。
+  assert.equal(playbackResumed({ paused: false, ended: false, advancing: true }), true)
+  assert.equal(shouldRetrySwitchAfterRefresh({
+    wanted: true,
+    switching: false,
+    playing: playbackResumed({ paused: false, ended: false, advancing: true }),
+  }), false)
+  // 暂停或播完都不算恢复播放。
+  assert.equal(playbackResumed({ paused: true, ended: false, advancing: true }), false)
+  assert.equal(playbackResumed({ paused: false, ended: true, advancing: true }), false)
 })
