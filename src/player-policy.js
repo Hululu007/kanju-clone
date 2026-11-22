@@ -115,6 +115,22 @@ export function needsFullLineList(result) {
   return !result?.options?.length
 }
 
+// 自动换线的等待策略（2026-11-22 审核 P1-2）。
+// 快取起播带回的线路列表只是库内已验证的那几条，不是整集清单。只有「手上一个可用
+// 备用线都没有」时才值得有界等待补拉；已经有候选就立刻换线，不能被补拉拖慢。
+export function autoSwitchPlan({ candidateCount = 0, partial = false, afterRefresh = false } = {}) {
+  if (candidateCount > 0) return 'switch'
+  if (!partial) return 'give-up'
+  if (afterRefresh) return 'give-up'
+  return 'await-refresh'
+}
+
+// 补拉在等待窗口（8 秒）之后才回来时，播放器可能已经提示过「没有可用线路」。
+// 只要还没播起来、也没有另一次换线在跑，就要用补到的列表再试一次，不能提示完就放弃。
+export function shouldRetrySwitchAfterRefresh({ wanted = true, switching = false, playing = false } = {}) {
+  return Boolean(wanted && !switching && !playing)
+}
+
 export function sampleStall(previous, { now, position, suspended }) {
   if (suspended) return null
   const since = !previous || Math.abs(position - previous.position) >= 0.05 ? now : previous.since

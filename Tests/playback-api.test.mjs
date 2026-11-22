@@ -186,9 +186,12 @@ test('probe failures do not contribute to browser playback history', async (t) =
   assert.equal(lines.options.find(({ provider }) => provider === 'bad').successRate, null)
 })
 
-const insertSource = (sqlite, showId, epIdx, provider, { label = provider, quality = 0, checkedAt = new Date().toISOString().slice(0, 19).replace('T', ' ') } = {}) => {
+// checkedAt 一律按「当前时间之前」算：写死日期会让用例随系统时钟失效（2026-11-22 审核 P2）。
+const sqlTimestamp = (ms) => new Date(ms).toISOString().slice(0, 19).replace('T', ' ')
+
+const insertSource = (sqlite, showId, epIdx, provider, { label = provider, quality = 0, status = 'ok', checkedAt = sqlTimestamp(Date.now()) } = {}) => {
   sqlite.prepare(`INSERT INTO sources(show_id,ep_idx,provider,label,url,kind,segments,duration,quality,status,checked_at)
-    VALUES(?,?,?,?,?,'hls',1,4,?,'ok',?)`).run(showId, epIdx, provider, label, `https://media.example/${showId}/${epIdx}-${provider}.m3u8`, quality, checkedAt)
+    VALUES(?,?,?,?,?,'hls',1,4,?,?,?)`).run(showId, epIdx, provider, label, `https://media.example/${showId}/${epIdx}-${provider}.m3u8`, quality, status, checkedAt)
 }
 
 test('命中已验证直链时不再解析上游、也不再探测候选（长嵌套请求会被平台按 CPU 上限掐断）', async (t) => {
@@ -218,6 +221,18 @@ test('已验证直链快取也按清晰度选线，不会因为上次成功的 7
   assert.ok(!fetchLog.some((path) => path.startsWith('/verified-quality/')), `不该探测候选：${fetchLog.join(',')}`)
 })
 
+test('库里高清晰度记录都是 dead 时，不能把 1080 请求降成 720（审核 P1-1）', async (t) => {
+  const { seed, request, sqlite } = fixture(t, { lines: ['sd', 'hd'], heights: { sd: 720, hd: 1080 } })
+  seed('verified-dead-hd')
+  insertSource(sqlite, 'verified-dead-hd', 0, 'sd', { quality: 720 })
+  // 这条 1080 已经判定失效：不能拿它当「库里已有 1080」的理由把请求降级成 720。
+  insertSource(sqlite, 'verified-dead-hd', 0, 'hd', { quality: 1080, status: 'dead' })
+  const play = await (await request('/api/play?show=verified-dead-hd&ep=0&preferred=sd&quality=1080')).json()
+  assert.equal(play.verifiedSourceCache, undefined, `dead 记录不能让快取降级返回：${JSON.stringify(play.options)}`)
+  assert.equal(play.provider, 'hd')
+  assert.equal(play.quality, 1080)
+})
+
 test('过期直链不复用，回到完整解析', async (t) => {
   const { seed, request, sqlite, fetchLog } = fixture(t)
   seed('verified-stale')
@@ -233,9 +248,15 @@ test('被判为串集或需会员的线路不会从已验证直链快取里返�
   insertSource(sqlite, 'verified-dup', 0, 'sd', { quality: 720 })
   insertSource(sqlite, 'verified-dup', 0, 'hd', { quality: 1080 })
   sqlite.prepare("INSERT INTO provider_health(show_id,provider,verdict,detail) VALUES('verified-dup','hd','dup','fingerprint-v2:第1集与第2集同内容')").run()
-  const play = await (await request('/api/play?show=verified-dup&ep=0&quality=1080')).json()
-  assert.equal(play.provider, 'sd', JSON.stringify(play.options))
+  // 没有更高的清晰度要求：快取按库里剩下的可用线路返回 sd，绝不返回被判串集的 hd。
+  const cached = await (await request('/api/play?show=verified-dup&ep=0&quality=720')).json()
+  assert.equal(cached.provider, 'sd', JSON.stringify(cached.options))
+  assert.ok(!cached.options.some((option) => option.provider === 'hd'), '串集线路不能出现在换源列表')
   assert.ok(!fetchLog.some((path) => path.startsWith('/verified-dup/')), `不该探测候选：${fetchLog.join(',')}`)
+  // 请求 1080 时不能拿那条已废的 1080 记录当「库里已有 1080」的理由降级成 720，要回完整路径重新验证。
+  const full = await (await request('/api/play?show=verified-dup&ep=0&quality=1080')).json()
+  assert.notEqual(full.verifiedSourceCache, true, '高清晰度记录全废时必须回完整路径')
+  assert.notEqual(full.provider, 'hd', '串集线路不能被当成可用线路返回')
 })
 
 test('手选线路不吃已验证直链快取，仍走完整解析', async (t) => {
@@ -297,8 +318,8 @@ test('只带 strict=1 也不能吃已验证直链快取', async (t) => {
 test('快取命中后线路被判为需要会员，90 秒内存快取也不能再返回它', async (t) => {
   const { seed, request, sqlite } = fixture(t, { lines: ['good', 'spare'], heights: { good: 1080, spare: 1080 } })
   seed('verified-member')
-  insertSource(sqlite, 'verified-member', 0, 'good', { quality: 1080, checkedAt: '2026-11-22 09:00:00' })
-  insertSource(sqlite, 'verified-member', 0, 'spare', { quality: 1080, checkedAt: '2026-11-22 08:00:00' })
+  insertSource(sqlite, 'verified-member', 0, 'good', { quality: 1080, checkedAt: sqlTimestamp(Date.now() - 60_000) })
+  insertSource(sqlite, 'verified-member', 0, 'spare', { quality: 1080, checkedAt: sqlTimestamp(Date.now() - 3_600_000) })
   const first = await (await request('/api/play?show=verified-member&ep=0&quality=1080')).json()
   assert.equal(first.provider, 'good', JSON.stringify(first.options))
   sqlite.prepare("INSERT INTO provider_health(show_id,provider,verdict,detail) VALUES('verified-member','good','member','需要登录/会员')").run()

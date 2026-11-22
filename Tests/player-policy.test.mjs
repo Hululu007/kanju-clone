@@ -6,7 +6,7 @@ test('next episode follows actual episode number rather than API row index or or
   assert.equal(nextEpisodeAfter(episodes, 8)?.idx, 1)
   assert.equal(nextEpisodeAfter(episodes, 2), null)
 })
-import { allowsAutoSwitchTo, autoSwitchCandidates, lineLabelOfKey, lineRequestOptions, needsFullLineList, nextEpisodeAfter, qualityRank, rankPlayableLines, shouldShowNextCue } from '../src/player-policy.js'
+import { allowsAutoSwitchTo, autoSwitchCandidates, autoSwitchPlan, lineLabelOfKey, lineRequestOptions, needsFullLineList, nextEpisodeAfter, qualityRank, rankPlayableLines, shouldRetrySwitchAfterRefresh, shouldShowNextCue } from '../src/player-policy.js'
 
 test('quality labels rank 1080p above 720p and recognize UHD', () => {
   assert.equal(qualityRank('720P-普通'), 720)
@@ -128,6 +128,26 @@ test('没手选线路时自动换线行为不变，仍可换到其他线路', ()
   ]
   const candidates = autoSwitchCandidates(options, { currentKey: 'zdfy|1080P-官方Z', currentProvider: 'zdfy', manualKey: '' })
   assert.deepEqual(candidates.map(lineKeyOfOption), ['zdfy|1080P-官方Z · 粤语'])
+})
+
+test('已经有可用备用线时立刻换线，不为补拉完整列表等待（审核 P1-2）', () => {
+  assert.equal(autoSwitchPlan({ candidateCount: 1, partial: true }), 'switch')
+  assert.equal(autoSwitchPlan({ candidateCount: 2, partial: true }), 'switch')
+})
+
+test('一个候选都没有时才等补拉，且只等一次（审核 P1-2）', () => {
+  assert.equal(autoSwitchPlan({ candidateCount: 0, partial: true }), 'await-refresh')
+  // 补拉已经等过一轮还是没候选：不再重复等，避免反复卡 8 秒。
+  assert.equal(autoSwitchPlan({ candidateCount: 0, partial: true, afterRefresh: true }), 'give-up')
+  assert.equal(autoSwitchPlan({ candidateCount: 0, partial: false }), 'give-up')
+})
+
+test('补拉在等待窗口之后才回来时，没播起来就再试一次换线（审核 P1-2）', () => {
+  assert.equal(shouldRetrySwitchAfterRefresh({ wanted: true, switching: false, playing: false }), true)
+  // 已经在播、或另一次换线正在跑，都不该重入。
+  assert.equal(shouldRetrySwitchAfterRefresh({ wanted: true, switching: true, playing: false }), false)
+  assert.equal(shouldRetrySwitchAfterRefresh({ wanted: true, switching: false, playing: true }), false)
+  assert.equal(shouldRetrySwitchAfterRefresh({ wanted: false, switching: false, playing: false }), false)
 })
 
 test('快取起播的部分线路列表必须补拉完整清单，完整列表不用重复拉', () => {

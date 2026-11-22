@@ -438,7 +438,9 @@ async function playFromVerifiedSources(env, showId, idx, targetQuality, preferre
   // 例外：没有任何手选/上次成功线路时，原版就是用对照表的原站默认线路，不管它清晰度多少；
   // 这时库里那条默认线路就是原版会选的，按原版语义直接返回。
   const target = Number(targetQuality) || 0
-  const bestKnown = rows.reduce((best, row) => Math.max(best, Number(row.quality) || 0), 0)
+  // 只算「可用」记录的清晰度（非 dead/dup/member、标签非空）：一条 dead 的 1080 不能证明
+  // 库里已有 1080，否则 1080 请求会被降成只剩下的 720（2026-11-22 审核 P1-1）。
+  const bestKnown = candidates.reduce((best, line) => Math.max(best, Number(line.quality) || 0), 0)
   const defaultDecides = !preferred && candidates.some((line) => line.originDefault)
   if (!defaultDecides && target > 0 && bestKnown < target) return null
   const chosen = selectPlayable(candidates, { preferred, targetQuality: target })
