@@ -1,0 +1,20 @@
+import { chromium } from 'file:///C:/Users/kenzh/AppData/Roaming/npm/node_modules/rea-agents/node_modules/playwright-core/index.mjs'
+const b = await chromium.launch({ executablePath: 'C:/Program Files/Google/Chrome/Application/chrome.exe', headless: true, args: ['--mute-audio','--no-first-run'] })
+const ctx = await b.newContext({ viewport: { width: 1400, height: 900 }, locale: 'zh-CN' })
+const p = await ctx.newPage()
+await p.goto('https://kanju17.com/', { waitUntil: 'domcontentloaded', timeout: 60000 })
+await p.waitForTimeout(15000)
+await p.getByLabel('影视搜索输入').fill('嫁金钗')
+await p.keyboard.press('Enter')
+await p.waitForTimeout(12000)
+// 打开播放详情
+const detail = p.getByText('播放详情', { exact: true }).first()
+console.log('detailcount', await detail.count())
+if (await detail.count()) { await detail.click(); await p.waitForTimeout(10000) }
+console.log('URL', p.url())
+const vids = await p.evaluate(() => [...document.querySelectorAll('video')].map(v => ({w:v.videoWidth,h:v.videoHeight,t:v.currentTime,d:v.duration,paused:v.paused,ready:v.readyState})))
+console.log('VIDEOS', JSON.stringify(vids))
+const txt = await p.locator('body').innerText()
+console.log('TAIL', txt.slice(-2500).replace(/\n+/g,' | '))
+await p.screenshot({ path: 'outputs/acceptance-100/raw/origin-detail.png', fullPage: false })
+await b.close()
