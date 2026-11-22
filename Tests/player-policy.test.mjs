@@ -6,7 +6,7 @@ test('next episode follows actual episode number rather than API row index or or
   assert.equal(nextEpisodeAfter(episodes, 8)?.idx, 1)
   assert.equal(nextEpisodeAfter(episodes, 2), null)
 })
-import { lineRequestOptions, nextEpisodeAfter, qualityRank, rankPlayableLines, shouldShowNextCue } from '../src/player-policy.js'
+import { allowsAutoSwitchTo, autoSwitchCandidates, lineLabelOfKey, lineRequestOptions, nextEpisodeAfter, qualityRank, rankPlayableLines, shouldShowNextCue } from '../src/player-policy.js'
 
 test('quality labels rank 1080p above 720p and recognize UHD', () => {
   assert.equal(qualityRank('720P-普通'), 720)
@@ -92,4 +92,40 @@ test('有续播记录时优先续播集', () => {
 test('手选线路必须严格解析，不能回退到同 provider 的另一语言版本', () => {
   assert.deepEqual(lineRequestOptions('official-z|1080P-官方Z · 粤语'), { strict: true })
   assert.deepEqual(lineRequestOptions(''), { strict: false })
+})
+
+test('手选粤语后起播失败，自动换线不能换成同源的普通话', () => {
+  // 粤语线路拿到地址后起播超时/致命错误会调用自动换线；这里检查真实候选函数。
+  const manualKey = 'zdfy|1080P-官方Z · 粤语'
+  const options = [
+    { provider: 'zdfy', label: '1080P-官方Z · 粤语', quality: 1080 },
+    { provider: 'zdfy', label: '1080P-官方Z', quality: 1080 },
+    { provider: 'other', label: '1080P-其他', quality: 1080 },
+    { provider: 'other2', label: '1080P-官方Z · 粤语', quality: 1080 },
+  ]
+  const candidates = autoSwitchCandidates(options, { currentKey: manualKey, currentProvider: 'zdfy', manualKey })
+  // 只允许换到标签完全相同的另一条线（同语言同清晰度）；不同标签一律不自动换。
+  assert.deepEqual(candidates.map(lineKeyOfOption), ['other2|1080P-官方Z · 粤语'])
+  assert.equal(allowsAutoSwitchTo(manualKey, options[1]), false)
+  assert.equal(lineLabelOfKey(manualKey), '1080P-官方Z · 粤语')
+})
+
+test('手选粤语且没有别的粤语版本时，自动换线候选为空，由页面提示用户重选', () => {
+  const manualKey = 'zdfy|1080P-官方Z · 粤语'
+  const options = [
+    { provider: 'zdfy', label: '1080P-官方Z · 粤语', quality: 1080 },
+    { provider: 'zdfy', label: '1080P-官方Z', quality: 1080 },
+  ]
+  const candidates = autoSwitchCandidates(options, { currentKey: manualKey, currentProvider: 'zdfy', manualKey })
+  assert.equal(candidates.length, 0)
+})
+
+test('没手选线路时自动换线行为不变，仍可换到其他线路', () => {
+  const options = [
+    { provider: 'zdfy', label: '1080P-官方Z', quality: 1080 },
+    { provider: 'zdfy', label: '1080P-官方Z · 粤语', quality: 1080 },
+    { provider: 'other', label: '1080P-其他', quality: 1080, status: 'dead' },
+  ]
+  const candidates = autoSwitchCandidates(options, { currentKey: 'zdfy|1080P-官方Z', currentProvider: 'zdfy', manualKey: '' })
+  assert.deepEqual(candidates.map(lineKeyOfOption), ['zdfy|1080P-官方Z · 粤语'])
 })

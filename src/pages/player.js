@@ -8,7 +8,7 @@ import { proxyReady, proxyShowFresh, resolvePlay, reportPlaybackResult, fetchLin
 import { authReady, fetchShowProgress, flushSavedProgress, saveProgress } from '../auth.js'
 import { openSettings } from '../settings-panel.js'
 import { createPictureClickHandlers, didTouchMove } from '../player-gestures.js'
-import { nextEpisodeAfter, rankPlayableLines, sampleStall, shouldHandlePlaybackShortcut, shouldShowNextCue, lineKeyOfOption, lineRequestOptions, mergeLineOptionsList, pickStartEpisode } from '../player-policy.js'
+import { nextEpisodeAfter, rankPlayableLines, sampleStall, shouldHandlePlaybackShortcut, shouldShowNextCue, lineKeyOfOption, lineRequestOptions, mergeLineOptionsList, pickStartEpisode, autoSwitchCandidates, lineLabelOfKey } from '../player-policy.js'
 import {
   FILL_MODES,
   clampRate,
@@ -901,6 +901,8 @@ function renderSpeedList() {
 let linesByEp = new Map()
 let currentProvider = ''
 let currentLineKey = ''
+// 用户手选的线路（provider|label）。为空表示这次播放不是手选的，允许自动换线。
+let manualLineKey = ''
 let lastSuccessfulProvider = ''
 const STATUS_TIP = { dup: '该线路串集，已停用', dead: '线路不可用', empty: '线路为空', member: '需要会员或更高等级', unknown: '', ok: '' }
 
@@ -1316,11 +1318,21 @@ async function switchToNextLine(generation = playGeneration) {
       document.visibilityState === 'hidden' || video.seeking || dragging || document.pictureInPictureElement) return
   pending = false
   // 只排除「当前这一条线」（provider|label），同 provider 的其他语言版本仍可尝试。
-  const isCurrentLine = (option) => (currentLineKey ? lineKeyOf(option) === currentLineKey : option.provider === currentProvider)
   failedLines.add(currentLineKey || `${currentProvider}|`)
-  const candidates = lineOptions(currentEpIdx()).filter((option) => option.provider && !isCurrentLine(option) && !failedLines.has(lineKeyOf(option)) && option.status !== 'dead' && option.status !== 'dup' && option.status !== 'member')
+  // 候选规则（含「手选后不换语言」）放在 player-policy 里，单测覆盖同一条调用链。
+  const candidates = autoSwitchCandidates(lineOptions(currentEpIdx()), {
+    currentKey: currentLineKey,
+    currentProvider,
+    failed: failedLines,
+    manualKey: manualLineKey,
+  })
   if (!candidates.length) {
-    sayPlayStatus('当前集的其他线路也不可用，请手动选择线路。')
+    if (manualLineKey) {
+      const failedLabel = lineLabelOfKey(manualLineKey) || '所选'
+      sayPlayStatus(`所选线路「${failedLabel}」播放失败，不会自动换成其他语言版本，请手动选择其他线路。`)
+    } else {
+      sayPlayStatus('当前集的其他线路也不可用，请手动选择线路。')
+    }
     return
   }
   switchingAutomatically = true
@@ -1427,6 +1439,8 @@ async function play(idx, autoplay = true, requestedLine = '', { fromEpisode = nu
   const ep = eps.find((e) => Number(e.idx) === Number(idx)) || eps[0]
   if (!ep) return
   const sameEpisode = Number(ep.idx) === activeEpisode
+  // 手选线路只在这一次播放内生效；换集或普通播放时清空，恢复自动选线。
+  manualLineKey = requestedLine ? String(requestedLine) : ''
   const resumeAt = sameEpisode ? video.currentTime : resumeIdx != null && Number(ep.idx) === Number(resumeIdx) ? resumeTime : 0
   if (video.currentTime > 0 && mediaStarted && activeEpisode != null) {
     void saveProgress({ showId: show.id, idx: activeEpisode, position: video.currentTime, duration: video.duration || null }, { force: true })

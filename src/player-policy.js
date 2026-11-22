@@ -27,6 +27,28 @@ export function mergeLineOptionsList(existing, incoming) {
   return [...options.values()]
 }
 
+// 手选线路后，自动换线不得换语言版本：用户点了粤语，粤语播不了就提示，
+// 不能悄悄切成同源的普通话。没有手选时返回 true，按原有规则自动换线。
+export function lineLabelOfKey(key = '') {
+  const parts = String(key).split('|')
+  return (parts.length > 1 ? parts.slice(1).join('|') : '').trim()
+}
+
+export function allowsAutoSwitchTo(manualKey, option) {
+  if (!String(manualKey || '')) return true
+  return lineLabelOfKey(lineKeyOfOption(option)) === lineLabelOfKey(manualKey)
+}
+
+// 自动换线候选：排除当前线路、已失败和不可用线路；手选过线路时只保留同一语言版本。
+export function autoSwitchCandidates(options, { currentKey = '', currentProvider = '', failed = new Set(), manualKey = '' } = {}) {
+  const isCurrent = (option) => (currentKey ? lineKeyOfOption(option) === currentKey : option.provider === currentProvider)
+  return (options || []).filter((option) => option.provider &&
+    !isCurrent(option) &&
+    !failed.has(lineKeyOfOption(option)) &&
+    !['dead', 'dup', 'member'].includes(option.status) &&
+    allowsAutoSwitchTo(manualKey, option))
+}
+
 // 手选线路：用户点了哪一条就只认哪一条，包括语言版本。
 // 粤语探测失败时应当提示「所选线路不可用」，不能回退到同 provider 的普通话。
 export function lineRequestOptions(requestedLine = '') {
