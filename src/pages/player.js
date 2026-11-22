@@ -9,7 +9,7 @@ import { proxyReady, proxyShowFresh, resolvePlay, reportPlaybackResult, fetchLin
 import { authReady, fetchShowProgress, flushSavedProgress, saveProgress } from '../auth.js'
 import { openSettings } from '../settings-panel.js'
 import { createPictureClickHandlers, didTouchMove } from '../player-gestures.js'
-import { nextEpisodeAfter, rankPlayableLines, sampleStall, shouldHandlePlaybackShortcut, shouldShowNextCue, lineKeyOfOption, lineRequestOptions, mergeLineOptionsList, pickStartEpisode, autoSwitchCandidates, lineLabelOfKey } from '../player-policy.js'
+import { nextEpisodeAfter, rankPlayableLines, sampleStall, shouldHandlePlaybackShortcut, shouldShowNextCue, lineKeyOfOption, lineRequestOptions, mergeLineOptionsList, pickStartEpisode, autoSwitchCandidates, lineLabelOfKey, needsFullLineList } from '../player-policy.js'
 import {
   FILL_MODES,
   clampRate,
@@ -1219,6 +1219,34 @@ async function ensureLines(epIdx) {
   if (j) mergeLineOptions(epIdx, j.options)
 }
 
+// 快取起播返回的线路列表只是「库里已验证的部分线路」：标记出来，
+// 换线前补拉一次完整列表，避免把「库里没有这条线」当成「这一集没有这条线」。
+const lineListState = new Map()
+
+function markLineListPartial(epIdx) {
+  const key = Number(epIdx)
+  const state = lineListState.get(key) || { partial: false, promise: null }
+  lineListState.set(key, { ...state, partial: true })
+}
+
+async function refreshLineList(epIdx) {
+  const key = Number(epIdx)
+  const state = lineListState.get(key) || { partial: false, promise: null }
+  if (state.promise) return state.promise
+  const promise = (async () => {
+    await proxyReady
+    const j = await fetchLines(show.id, key).catch(() => null)
+    if (j) {
+      mergeLineOptions(key, j.options)
+      lineListState.set(key, { partial: false, promise: null })
+    } else {
+      lineListState.set(key, { partial: true, promise: null })
+    }
+  })()
+  lineListState.set(key, { ...state, promise })
+  return promise
+}
+
 function currentEpIdx() {
   return Number(document.querySelector('.ep.on')?.dataset.ep ?? eps[0]?.idx ?? 0)
 }
@@ -1320,8 +1348,15 @@ async function switchToNextLine(generation = playGeneration) {
   pending = false
   // 只排除「当前这一条线」（provider|label），同 provider 的其他语言版本仍可尝试。
   failedLines.add(currentLineKey || `${currentProvider}|`)
+  // 快取起播时手上只有库里已验证的那几条线，换线前先补拉整集线路清单（最多等 8 秒，
+  // 补拉失败就用现有列表继续），否则会自动判定「没有候选」而直接放弃。
+  const epIdx = currentEpIdx()
+  if (lineListState.get(Number(epIdx))?.partial) {
+    await Promise.race([refreshLineList(epIdx), new Promise((resolve) => setTimeout(resolve, 8_000))])
+    if (generation !== playGeneration) return
+  }
   // 候选规则（含「手选后不换语言」）放在 player-policy 里，单测覆盖同一条调用链。
-  const candidates = autoSwitchCandidates(lineOptions(currentEpIdx()), {
+  const candidates = autoSwitchCandidates(lineOptions(epIdx), {
     currentKey: currentLineKey,
     currentProvider,
     failed: failedLines,
@@ -1341,7 +1376,6 @@ async function switchToNextLine(generation = playGeneration) {
   const oldTime = video.currentTime || 0
   const wasPlaying = playbackWanted
   const requestedProviders = new Set(candidates.map((option) => option.provider))
-  const epIdx = currentEpIdx()
   const ordered = rankPlayableLines(candidates, { preferred: lastSuccessfulProvider, targetQuality: actualQuality || 1080 })
   try {
     for (const candidate of ordered.slice(0, MAX_AUTO_ALTERNATIVES)) {
@@ -1484,9 +1518,14 @@ async function play(idx, autoplay = true, requestedLine = '', { fromEpisode = nu
   }).catch(() => null)
   if (generation !== playGeneration) return
   if (playRequest?.signal === requestSignal) playRequest = null
-  if (!fresh?.options?.length) void ensureLines(ep.idx).then(() => {
-    if (generation === playGeneration) renderLineList()
-  })
+  // 快取起播的线路列表可能只是库里已验证的那几条：先补拉一次完整列表（后台进行，不挡起播）。
+  if (needsFullLineList(fresh)) {
+    const partial = Boolean(fresh?.optionsPartial)
+    if (partial) markLineListPartial(ep.idx)
+    void (partial ? refreshLineList(ep.idx) : ensureLines(ep.idx)).then(() => {
+      if (generation === playGeneration) renderLineList()
+    })
+  }
   if (!fresh) {
     pending = false
     if (playRequest?.signal === requestSignal) playRequest = null

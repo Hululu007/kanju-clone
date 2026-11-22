@@ -6,7 +6,7 @@ test('next episode follows actual episode number rather than API row index or or
   assert.equal(nextEpisodeAfter(episodes, 8)?.idx, 1)
   assert.equal(nextEpisodeAfter(episodes, 2), null)
 })
-import { allowsAutoSwitchTo, autoSwitchCandidates, lineLabelOfKey, lineRequestOptions, nextEpisodeAfter, qualityRank, rankPlayableLines, shouldShowNextCue } from '../src/player-policy.js'
+import { allowsAutoSwitchTo, autoSwitchCandidates, lineLabelOfKey, lineRequestOptions, needsFullLineList, nextEpisodeAfter, qualityRank, rankPlayableLines, shouldShowNextCue } from '../src/player-policy.js'
 
 test('quality labels rank 1080p above 720p and recognize UHD', () => {
   assert.equal(qualityRank('720P-普通'), 720)
@@ -128,4 +128,11 @@ test('没手选线路时自动换线行为不变，仍可换到其他线路', ()
   ]
   const candidates = autoSwitchCandidates(options, { currentKey: 'zdfy|1080P-官方Z', currentProvider: 'zdfy', manualKey: '' })
   assert.deepEqual(candidates.map(lineKeyOfOption), ['zdfy|1080P-官方Z · 粤语'])
+})
+
+test('快取起播的部分线路列表必须补拉完整清单，完整列表不用重复拉', () => {
+  assert.equal(needsFullLineList({ options: [{ provider: 'good' }], optionsPartial: true }), true)
+  assert.equal(needsFullLineList({ options: [] }), true)
+  assert.equal(needsFullLineList(null), true)
+  assert.equal(needsFullLineList({ options: [{ provider: 'good' }, { provider: 'spare' }] }), false)
 })

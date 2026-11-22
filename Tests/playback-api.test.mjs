@@ -10,9 +10,11 @@ const segments = [720, 1080].map((height) => readFileSync(new URL(`./fixtures/av
 function fixture(t, { media = 'hls', sameContent = false, lines = ['bad', 'good'], heights = {}, delays = {} } = {}) {
   const fetchLog = []
   const fetchStarts = new Map()
+  // 记录这次请求实际打了多少次 D1，用来守住「快取命中只做有界读」。
+  const dbLog = []
   const sqlite = new DatabaseSync(':memory:')
   sqlite.exec(schema)
-  const env = { KJ_SECRET: 'test-only', DB: { prepare(sql) { return { bind(...args) {
+  const env = { KJ_SECRET: 'test-only', DB: { prepare(sql) { dbLog.push(sql); return { bind(...args) {
     return {
       first: async () => sqlite.prepare(sql).get(...args),
       all: async () => ({ results: sqlite.prepare(sql).all(...args) }),
@@ -68,7 +70,7 @@ function fixture(t, { media = 'hls', sameContent = false, lines = ['bad', 'good'
     sqlite.prepare('INSERT INTO auth_sessions(token_hash,user_id,created_at,expires_at,last_seen_at) VALUES(?,?,?,?,?)').run(hash, id, Date.now(), Date.now() + 3_600_000, Date.now())
     return { authorization: `Bearer ${token}` }
   }
-  return { seed, request, sqlite, fetchLog, fetchStarts, login }
+  return { seed, request, sqlite, fetchLog, fetchStarts, dbLog, login }
 }
 
 test('distinct HLS first segments do not disable a provider for the whole show', async (t) => {
@@ -261,6 +263,95 @@ test('播放器带上次成功线路时，原站默认的 720 也不能把 quali
   const play = await (await request('/api/play?show=preferred-quality&ep=0&preferred=sd&quality=1080')).json()
   assert.equal(play.provider, 'hd', JSON.stringify(play.options))
   assert.equal(play.quality, 1080)
+})
+
+test('快取只有 720P、请求 1080P 时不能降级：上游可能还有更高的一条', async (t) => {
+  const { seed, request, sqlite, fetchLog } = fixture(t, { lines: ['sd', 'hd'], heights: { sd: 720, hd: 1080 } })
+  seed('verified-lower-quality')
+  insertSource(sqlite, 'verified-lower-quality', 0, 'sd', { quality: 720 })
+  const play = await (await request('/api/play?show=verified-lower-quality&ep=0&preferred=sd&quality=1080')).json()
+  assert.equal(play.provider, 'hd', JSON.stringify(play.options))
+  assert.equal(play.quality, 1080)
+  assert.ok(fetchLog.some((path) => path.includes('/v1/playback/resolve/')), `库里没有 1080 时必须回完整解析：${fetchLog.join(',')}`)
+})
+
+test('原站默认线路不在快取里时回完整解析，不改默认线路', async (t) => {
+  const { seed, request, sqlite } = fixture(t, { lines: ['sd', 'hd'], heights: { sd: 1080, hd: 1080 } })
+  seed('verified-default-missing')
+  insertSource(sqlite, 'verified-default-missing', 0, 'sd', { quality: 1080 })
+  sqlite.prepare("INSERT INTO origin_defaults(show_id,provider,label) VALUES('verified-default-missing','hd','')").run()
+  const play = await (await request('/api/play?show=verified-default-missing&ep=0&quality=1080')).json()
+  assert.equal(play.provider, 'hd', `默认线路必须跟原站一致：${JSON.stringify(play.options)}`)
+})
+
+test('只带 strict=1 也不能吃已验证直链快取', async (t) => {
+  const { seed, request, sqlite, fetchLog } = fixture(t, { lines: ['good'], heights: { good: 1080 } })
+  seed('verified-strict')
+  insertSource(sqlite, 'verified-strict', 0, 'good', { quality: 1080 })
+  const play = await (await request('/api/play?show=verified-strict&ep=0&strict=1&quality=1080')).json()
+  assert.equal(play.provider, 'good')
+  assert.ok(fetchLog.some((path) => path.includes('/v1/playback/resolve/')), `strict=1 必须重新解析：${fetchLog.join(',')}`)
+  assert.equal(play.verifiedSourceCache, undefined)
+})
+
+test('快取命中后线路被判为需要会员，90 秒内存快取也不能再返回它', async (t) => {
+  const { seed, request, sqlite } = fixture(t, { lines: ['good', 'spare'], heights: { good: 1080, spare: 1080 } })
+  seed('verified-member')
+  insertSource(sqlite, 'verified-member', 0, 'good', { quality: 1080, checkedAt: '2026-11-22 09:00:00' })
+  insertSource(sqlite, 'verified-member', 0, 'spare', { quality: 1080, checkedAt: '2026-11-22 08:00:00' })
+  const first = await (await request('/api/play?show=verified-member&ep=0&quality=1080')).json()
+  assert.equal(first.provider, 'good', JSON.stringify(first.options))
+  sqlite.prepare("INSERT INTO provider_health(show_id,provider,verdict,detail) VALUES('verified-member','good','member','需要登录/会员')").run()
+  const second = await (await request('/api/play?show=verified-member&ep=0&quality=1080')).json()
+  assert.equal(second.provider, 'spare', `会员线路不能再从内存快取返回：${JSON.stringify(second.options)}`)
+})
+
+test('命中已验证直链时不等待 /v1/catalog，也不发任何上游请求', async (t) => {
+  const { seed, request, sqlite, fetchLog } = fixture(t, { lines: ['good'], heights: { good: 1080 } })
+  seed('verified-nocatalog')
+  insertSource(sqlite, 'verified-nocatalog', 0, 'good', { quality: 1080 })
+  const play = await (await request('/api/play?show=verified-nocatalog&ep=0&quality=1080')).json()
+  assert.equal(play.verifiedSourceCache, true)
+  assert.equal(play.skip, null, `缺片头设置时不能现拉 catalog：${JSON.stringify(play.skip)}`)
+  assert.ok(!fetchLog.some((path) => path.startsWith('/v1/catalog/')), `不能等 catalog：${fetchLog.join(',')}`)
+})
+
+test('已验证直链快取只做有界读取：命中路径 D1 查询不超过 4 次', async (t) => {
+  const { seed, request, sqlite, dbLog } = fixture(t, { lines: ['good'], heights: { good: 1080 } })
+  seed('verified-bounded')
+  insertSource(sqlite, 'verified-bounded', 0, 'good', { quality: 1080 })
+  dbLog.length = 0
+  const play = await (await request('/api/play?show=verified-bounded&ep=0&quality=1080')).json()
+  assert.equal(play.verifiedSourceCache, true)
+  assert.ok(dbLog.length <= 4, `命中路径 D1 查询 ${dbLog.length} 次：${dbLog.join(' | ')}`)
+})
+
+test('命中快取要标明线路列表只是库内已验证的部分，播放器必须补拉完整列表', async (t) => {
+  const { seed, request, sqlite } = fixture(t, { lines: ['good', 'spare'], heights: { good: 1080 } })
+  seed('verified-partial')
+  insertSource(sqlite, 'verified-partial', 0, 'good', { quality: 1080 })
+  const play = await (await request('/api/play?show=verified-partial&ep=0&quality=1080')).json()
+  assert.equal(play.verifiedSourceCache, true)
+  assert.equal(play.optionsPartial, true, '快取列表不是整集线路清单，必须让播放器补拉')
+})
+
+test('原站默认线路低于请求清晰度时，快取与原版一样返回默认线路（不算降级）', async (t) => {
+  const { seed, request, sqlite } = fixture(t, { lines: ['official', 'other'], heights: { official: 720, other: 1080 } })
+  seed('verified-default-quality')
+  insertSource(sqlite, 'verified-default-quality', 0, 'official', { quality: 720 })
+  sqlite.prepare("INSERT INTO origin_defaults(show_id,provider,label) VALUES('verified-default-quality','official','')").run()
+  const fast = await (await request('/api/play?show=verified-default-quality&ep=0&quality=1080')).json()
+  // 带 strict=1 的那次强制走完整解析，就是原版的答案（也不能吃 90 秒内存快取）。
+  const full = await (await request('/api/play?show=verified-default-quality&ep=0&strict=1&quality=1080')).json()
+  assert.equal(fast.verifiedSourceCache, true)
+  assert.equal(full.verifiedSourceCache, undefined)
+  assert.equal(fast.provider, full.provider)
+  assert.equal(fast.quality, full.quality)
+  // 带上次成功线路（preferred）时原版按清晰度选，快取不能拿 720 顶替：两边都必须给 1080 那条。
+  const fullPreferred = await (await request('/api/play?show=verified-default-quality&ep=0&strict=1&preferred=official&quality=1080')).json()
+  const fastPreferred = await (await request('/api/play?show=verified-default-quality&ep=0&preferred=official&quality=1080')).json()
+  assert.equal(fastPreferred.provider, fullPreferred.provider)
+  assert.equal(fastPreferred.quality, 1080)
 })
 
 test('手选线路 6.25 秒才响应仍然可播（首条提前返回不能缩短它的超时）', async (t) => {

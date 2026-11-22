@@ -5,7 +5,7 @@ import { createCountedFetch, inspectHlsResource } from './playback-probe.js'
 import { mediaDimensions, readBounded } from './media-dimensions.js'
 import { isSoftProbeFailure, probeCandidates, probeStatus, selectPlayable } from './source-selection.js'
 import { createProbeBudget } from './probe-budget.js'
-import { orderLines } from './line-order.js'
+import { orderLines, qualityRank } from './line-order.js'
 import { issuePlaybackAttempt, verifyPlaybackAttempt } from './playback-attempt.js'
 import { applyOriginDefault, loadOriginDefault, markOriginDefault, mergeOriginRetry, pickOriginDefaultEpisode, planOriginRetry } from './origin-default.js'
 import { lineKey, matchesLineKey } from './line-key.js'
@@ -395,24 +395,28 @@ async function loadSkipSettings(env, showId) {
 // 重新解析，结果与旧版一致。
 const VERIFIED_SOURCE_MAX_AGE_MS = 7 * 86_400_000
 
+// 一条 D1 记录能不能直接拿来起播：checked_at 必须可解析、不在未来一小时以外、不超过 7 天。
+function freshVerifiedRow(row) {
+  const checkedAt = Date.parse(String(row.checked_at || '').replace(' ', 'T') + 'Z')
+  if (!Number.isFinite(checkedAt)) return false
+  const age = Date.now() - checkedAt
+  return age > -3_600_000 && age <= VERIFIED_SOURCE_MAX_AGE_MS
+}
+
 async function playFromVerifiedSources(env, showId, idx, targetQuality, preferred = '') {
   if (!showId) return null
-  const rows = await dbAll(env, `SELECT provider,label,url,kind,segments,duration,quality,checked_at FROM sources
-    WHERE show_id=? AND ep_idx=? AND status='ok' AND url IS NOT NULL AND url<>''
-    ORDER BY checked_at DESC`, showId, Number(idx)).catch(() => [])
-  if (!rows.length) return null
-  const fresh = rows.filter((row) => {
-    const checkedAt = Date.parse(String(row.checked_at || '').replace(' ', 'T') + 'Z')
-    if (!Number.isFinite(checkedAt)) return false
-    const age = Date.now() - checkedAt
-    return age > -3_600_000 && age <= VERIFIED_SOURCE_MAX_AGE_MS
-  })
+  // 有界读取：这一集最多 40 条记录、一次查完；命中路径总共不超过 4 次 D1 查询、0 次上游请求。
+  const rows = await dbAll(env, `SELECT provider,label,url,kind,segments,duration,quality,status,checked_at FROM sources
+    WHERE show_id=? AND ep_idx=? AND url IS NOT NULL AND url<>''
+    ORDER BY checked_at DESC LIMIT 40`, showId, Number(idx)).catch(() => [])
+  const fresh = rows.filter(freshVerifiedRow)
   if (!fresh.length) return null
   const health = await healthMap(env, showId)
   // 被判为串集（dup）或需要会员的线路不得从快取里返回；
   // 空标签的旧记录同样不能冒充任何语言版本（与 cachedSourceUrl 的规则一致），
   // 否则可能把普通话直链当成粤语默认线返回。
   const usable = fresh.filter((row) => String(row.label || '').trim() !== ''
+    && String(row.status || 'ok') === 'ok'
     && !['dup', 'member'].includes(String(health.get(row.provider)?.verdict || '')))
   if (!usable.length) return null
   const originDefault = await loadOriginDefault(env, showId)
@@ -423,21 +427,37 @@ async function playFromVerifiedSources(env, showId, idx, targetQuality, preferre
     kind: row.kind || (/\.m3u8(\?|$)/i.test(row.url) ? 'hls' : 'mp4'),
     segments: row.segments ?? null,
     duration: row.duration ?? null,
-    quality: Number(row.quality) || 0,
+    // 只在这一集没有实测清晰度时按线路标签兜底（例如 1080P-官方V），不覆盖实测值。
+    quality: Number(row.quality) || qualityRank(row.label),
     ok: true,
   })), originDefault.provider, originDefault.label)
-  const chosen = selectPlayable(candidates, { preferred, targetQuality: Number(targetQuality) || 0 })
+  // 原站默认线路这一集没有已验证直链时不能吃快取：否则默认线路会被换成别家，与原站不一致。
+  if (originDefault.provider && !candidates.some((line) => line.originDefault)) return null
+  // 不能降清晰度：库里这一集从未记录过请求的清晰度时，上游可能还有一条更高的线路，
+  // 只按库里现有记录选就会降级（2026-11-22 审核 P1-1）。这种情况回完整路径重新探测。
+  // 例外：没有任何手选/上次成功线路时，原版就是用对照表的原站默认线路，不管它清晰度多少；
+  // 这时库里那条默认线路就是原版会选的，按原版语义直接返回。
+  const target = Number(targetQuality) || 0
+  const bestKnown = rows.reduce((best, row) => Math.max(best, Number(row.quality) || 0), 0)
+  const defaultDecides = !preferred && candidates.some((line) => line.originDefault)
+  if (!defaultDecides && target > 0 && bestKnown < target) return null
+  const chosen = selectPlayable(candidates, { preferred, targetQuality: target })
   if (!chosen) return null
   // 选中的线路排到换源列表最前，前端按顺序换源时先试它。
   const ordered = [chosen, ...candidates.filter((item) => item !== chosen)]
-  const skip = await loadSkipSettings(env, showId)
-  const ep = await dbFirst(env, 'SELECT number FROM episodes WHERE show_id=? AND idx=?', showId, Number(idx)).catch(() => null)
+  // 片头片尾只用库里已有的设置；缺了就不显示跳过按钮，绝不在命中路径上等 /v1/catalog。
+  const local = await dbFirst(env, `SELECT e.number AS number, s.intro_end AS intro_end, s.outro_from AS outro_from
+    FROM episodes e LEFT JOIN shows s ON s.id=e.show_id
+    WHERE e.show_id=? AND e.idx=?`, showId, Number(idx)).catch(() => null)
+  const skip = local && local.intro_end != null
+    ? { introEnd: Number(local.intro_end), outroFrom: local.outro_from == null ? null : Number(local.outro_from) }
+    : null
   return {
     showId,
     idx: Number(idx),
     url: chosen.url,
     kind: chosen.kind,
-    episodeNumber: Number(ep?.number ?? Number(idx) + 1),
+    episodeNumber: Number(local?.number ?? Number(idx) + 1),
     line: chosen.label,
     provider: chosen.provider,
     segments: chosen.segments,
@@ -452,6 +472,9 @@ async function playFromVerifiedSources(env, showId, idx, targetQuality, preferre
     originDefaultStatus: !originDefault.provider ? 'not_in_lines' : chosen.originDefault ? 'ok' : 'unknown',
     sourceFromCache: true,
     verifiedSourceCache: true,
+    // 这里的 options 只是库里已验证过的线路，不是这一集的完整线路清单：
+    // 播放器必须据此再补拉一次完整列表，否则自动换线会以为没有候选。
+    optionsPartial: true,
     skip,
     options: ordered.map((item) => ({
       provider: item.provider,
@@ -474,13 +497,16 @@ async function playUrl(env, showId, idx, requestedLine = '', targetQuality = 0, 
   const requestedQuality = Number(targetQuality) || 0
   const key = `${showId}#${idx}#${requestedLine}#${requestedQuality}#${preferred}`
   const hit = playCache.get(key)
-  if (!requestedLine && hit && Date.now() - hit.at < 90_000) {
+  // strict=1 是调用方在说「先验证再回答」：这种请求连 90 秒内存快取也不吃。
+  if (!requestedLine && !strictLine && hit && Date.now() - hit.at < 90_000) {
     const health = await healthMap(env, showId)
-    if (health.get(hit.value.provider)?.verdict !== 'dup') return { ...hit.value, cached: true }
+    // 内存快取也要守住串集与会员：线路刚被判为这两种状态时不能再返回它。
+    if (!['dup', 'member'].includes(String(health.get(hit.value.provider)?.verdict || ''))) return { ...hit.value, cached: true }
     playCache.delete(key)
   }
 
-  if (!requestedLine) {
+  // strict=1 是调用方在说「先验证再回答」：这种请求不吃快取，照旧走完整解析与探测。
+  if (!requestedLine && !strictLine) {
     const fast = await playFromVerifiedSources(env, showId, idx, requestedQuality, preferred).catch(() => null)
     if (fast) {
       playCache.set(key, { at: Date.now(), value: fast })

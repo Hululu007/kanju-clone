@@ -108,6 +108,13 @@ export function shouldShowNextCue({ duration, currentTime, current, cancelled })
   return Number.isFinite(duration) && duration > 0 && duration - currentTime <= 10 && current !== cancelled
 }
 
+// 快取起播只带「库里已验证过的线路」，不是这一集的完整线路清单：
+// 播放器必须再补拉一次 /api/lines，否则自动换线会以为没有候选、线路菜单也会少项。
+export function needsFullLineList(result) {
+  if (result?.optionsPartial) return true
+  return !result?.options?.length
+}
+
 export function sampleStall(previous, { now, position, suspended }) {
   if (suspended) return null
   const since = !previous || Math.abs(position - previous.position) >= 0.05 ? now : previous.since
