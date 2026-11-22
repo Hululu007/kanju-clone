@@ -1,3 +1,47 @@
+// 这些失败只说明 Worker 自己的出口/预算不够，不代表线路不可播：
+// 地址已经拿到，浏览器在用户网络里仍可能正常起播。按「未验证/状态未知」处理。
+export const SOFT_PROBE_FAILURES = new Set([
+  'probe_timeout',
+  'probe_budget_exceeded',
+  'probe_aborted',
+  'fetch_failed',
+  'rate_limited',
+])
+
+// 只有确实可能因并发挤压而变好的失败才值得再探一次；限流和出口网络失败重试只会浪费子请求。
+export const RETRYABLE_PROBE_FAILURES = new Set(['probe_timeout', 'probe_budget_exceeded', 'probe_aborted'])
+
+// 明确证明浏览器也拿不到媒体的失败，不能当成「Worker 出口问题」去抢可播备用线。
+function isHardProbeFailure(code) {
+  if (/(^|_)cors_blocked$/.test(code)) return true
+  // 依赖资源明确返回 4xx（密钥 404、鉴权 403 等）是线路自己的问题，不是 Worker 出口问题。
+  if (/^playlist_dependencies_http_4\d\d$/.test(code) && code !== 'playlist_dependencies_http_429') return true
+  return /^first_segment_(not_media|empty|decryption_failed|invalid_byte_range|placeholder_image)$/.test(code)
+    || code === 'no_playable_variant'
+}
+
+export function isSoftProbeFailure(error, item) {
+  const code = String(error || '')
+  if (item?.tentative) return true
+  if (isHardProbeFailure(code)) return false
+  return SOFT_PROBE_FAILURES.has(code)
+    || /^http_(429|5\d\d)$/.test(code)
+    || /^first_segment_(http_(429|5\d\d)|incomplete|unavailable|fetch_failed|timeout)$/.test(code)
+    || /^playlist_dependencies_(unavailable|fetch_failed|timeout|http_(429|5\d\d))$/.test(code)
+    || /^resolve_http_(429|5\d\d)/.test(code)
+    || /^resolve_(too_many_subrequests|probe_budget_exceeded)/.test(code)
+    // 解析请求自身的传输失败（超时、断网、连接重置、被中止）只是 Worker 出口没查成，
+    // 不等于线路不可播；解析接口明确返回 HTTP 4xx（鉴权/会员等）仍按硬失败处理。
+    || (/^resolve_/.test(code) && !/^resolve_http_4\d\d/.test(code))
+}
+
+export function probeStatus(item) {
+  if (item.ok) return 'ok'
+  if (item.error === 'member') return 'member'
+  if (item.deferred || isSoftProbeFailure(item.error, item) || item.error === 'resolve_failed') return 'unknown'
+  return 'dead'
+}
+
 // Keep the network work bounded; an untested line is never advertised as playable.
 export async function probeCandidates(lines, probe, { concurrency = 4, timeoutMs = 7000, budgetMs = 20000 } = {}) {
   const results = new Array(lines.length)

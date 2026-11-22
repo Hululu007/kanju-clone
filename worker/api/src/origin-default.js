@@ -1,3 +1,5 @@
+import { RETRYABLE_PROBE_FAILURES } from './source-selection.js'
+
 // 原站默认线路与默认集对照表。
 //
 // 上游 line_options 里的 selected 只表示「原站线路列表第一条」，不是原站播放页
@@ -53,8 +55,6 @@ export async function applyOriginDefault(env, showId, lines) {
 }
 
 // 软失败（并发探测把默认线路挤到超时）才值得单独重试一次；会员、HTTP 硬失败不重试。
-const SOFT_PROBE_FAILURES = ['probe_timeout', 'probe_budget_exceeded', 'probe_aborted']
-
 // 只对对照表命中的线路重试，上游 selected（列表第一条）不触发重试。
 export function planOriginRetry(probed, originDefault = {}) {
   const provider = String(originDefault?.provider || '')
@@ -63,13 +63,26 @@ export function planOriginRetry(probed, originDefault = {}) {
   const index = findOriginDefaultIndex(probed.map((item) => item.line), provider, label)
   if (index < 0) return { index, retry: false }
   const item = probed[index]
-  return { index, retry: !item.ok && SOFT_PROBE_FAILURES.includes(item.error) }
+  return { index, retry: !item.ok && RETRYABLE_PROBE_FAILURES.has(item.error) }
 }
 
 // 重试结果不论成功还是明确失败（会员/403 等）都替换原结果，
 // 否则响应会把已是会员限制的线路报成「超时、状态未知」。
 export function mergeOriginRetry(probed, index, attempt) {
   if (index < 0 || !attempt) return probed
+  const original = probed[index]
+  const hasAddress = (item) => !!(item?.url || item?.mediaUrl)
+  const code = String(attempt.error || '')
+  // 重试连地址都没拿到时，只有「线路本身明确不能用」才覆盖首次结果：
+  // 会员/登录限制、解析接口明确返回 HTTP 4xx（429 限流除外）。
+  // 超时、断网、连接重置、被中止、限流、预算耗尽都只是 Worker 出口没查成，
+  // 必须保留首次已经解析出的地址，不能把默认线路判成没地址后换成别家。
+  // 这里用「明确失败」黑名单而不是「已知软失败」白名单，避免每出现一种新的
+  // 传输异常就再漏一次（resolve_fetch failed、resolve_connect timeout 等）。
+  const definiteFailure = attempt.error === 'member'
+    || (/^resolve_http_4\d\d/.test(code) && !/^resolve_http_429/.test(code))
+  const retryOnlySaysUnknown = !hasAddress(attempt) && !definiteFailure
+  if (retryOnlySaysUnknown && hasAddress(original)) return probed
   return probed.map((item, at) => (at === index ? attempt : item))
 }
 

@@ -1406,3 +1406,117 @@ testToolbarDownloadButtonReplacesTheDanmakuSlot → missing-button
 - **修复版本**：0.1.19 build 30。
 - **验证边界**：同上，Swift 侧只到 packaging-only 能编出包；node 用例在真实文件系统上跑了 9 组对照（含旧实现确实误删 B 的演示）。
   **真机待验收**：①正常下载/补图后封面照常显示；②整剧删光后只删本剧封面，别的剧封面还在；③断网打开片库老记录照常补图。
+
+## WEB-REG-001 Worker 出口撞 Cloudflare 子请求上限，官方默认线被换掉（Web/Worker，非 iOS）
+
+- **现象**：`/api/play` 默认线路排序正确，但起播常回退别家；`tried` 里有 `resolve_failed`、
+  `resolve_Too many subrequests by single Worker in…`、`probe_timeout`。
+- **根因**（`worker/api/src/index.js`）：Cloudflare 免费版每次 Worker 调用最多 50 个子请求。
+  旧实现把 20 多条线路全部送去 resolve-line + 媒体探测；并发 4、7 秒超时，跑到后段就在
+  `getGuest` / `resolve-line` 处撞上限。撞限后统一报 `resolve_failed`，原站默认线路被判死，
+  `selectPlayable` 于是换到别家线路。另有：上游 429 不重试、会话过期强制刷新被 5 分钟节流挡住。
+- **修复**：
+  - 有界重试：非默认线 2 次尝试，原站默认线 3 次；429/403/5xx 退避；会话过期强制刷新不受节流挡；
+    撞到子请求上限立即停止重试。
+  - 有界探测：原站默认线路排到最前，只探测前 8 条；其余条目保留为「未探测/状态未知」，不标 dead。
+  - 兜底：429 或子请求上限时复用同一 show+集+provider+标签、7 天内验证过的直链。
+  - 默认线路拿到真实地址但 Worker 侧媒体探测超时/网络失败时，作为 `verified:false`、
+    `probeDegraded:true` 的候选交给浏览器（用户自己的网络仍可能可播），不再换成别家线路；
+    `sources` 表不写入未验证线路。
+- **复现测试**（`Tests/worker-egress.test.mjs`，Node，旧实现下先红）：
+  - `a 429 from resolve-line is retried instead of losing the official line`（红：选到备用线）
+  - `a resolved origin-default line survives a worker-side transport timeout as unverified`（红：选到备用线）
+  - `a rate-limited resolve reuses the last verified media url for the same episode`（红：选到备用线）
+  - `the subrequest limit reuses the last verified url instead of losing the official line`（红：选到备用线）
+  - `a long line list never probes more lines than the worker subrequest budget allows`（红：20 条全去解析）
+  - `a hard HTTP failure on the origin-default line still falls back to a verified line`（对照组，修复前后都绿）
+- **结果**：旧实现 5 红 1 绿；修复后全套 `node --test Tests/*.test.mjs` 82 通过 / 0 失败 / 0 跳过。
+  诊断实例 `kanju-api-diag-ken` 上线后抽查对照表前 14 部：10 部有响应的全部命中原站默认线路
+  （其中 3 部为未验证候选），未再出现「换到别家线路」。
+
+## WEB-REG-002 审核返修：限流被判死线、空标签缓存冒充语言版本、软失败清空已验证记录、固定探 8 条（Web/Worker，非 iOS）
+
+- **现象**（审核开发二在 `dc462b2` 上复现的四条 P1）：
+  1. 默认线持续 429 / 撞子请求上限且无缓存时被标 `dead` 并换成别家；HLS 已拿到播放地址、
+     只是首片请求超时（`first_segment_*`）也算硬失败。
+  2. 同 show+集+provider 下一条**空标签**旧直链，会被当成带标签默认线的缓存复用，语言无法保证。
+  3. 默认线已有 `ok` + 指纹，新地址探测 `fetch_failed` 时失败分支把旧记录改成 `fetch_failed` 并清空指纹。
+  4. 固定只探前 8 条：前 8 条全失败、第 9 条可播时接口直接 500。
+- **根因**：上一版用「固定 8 条」代替真实子请求预算；软/硬失败共用一张判定表；
+  缓存命中允许空标签通配；写失败的 `saveSource` 没排除软失败。
+- **修复**（`Tests/worker-egress-review.test.mjs` 的复现用例先红后绿）：
+  - 新增 `probe-budget.js`：按真实 fetch 计数，上限 44（Cloudflare 免费版 50 留余量）。
+    `signedFetch`、HLS/MP4 探测都过这个计数；用完的线路是「未探测/状态未知」，绝不标 dead。
+    取消固定 8 条，前 8 条失败时会继续探第 9 条及之后。
+  - 限流/预算不足/首片不可达统一归为软失败：默认线不再被标 dead；回退别家时响应带
+    `originDefaultStatus:'rate_limited'` 与 `probeDegraded:true`，说明不是线路本身死了。
+  - `cachedSourceUrl` 必须标签完全一致，空标签旧记录不能再冒充粤语/普通话版本。
+  - 软失败一律不写 `sources`，已验证直链和指纹不会被一次 `fetch_failed` 清掉。
+  - `Tests/worker-egress.test.mjs` 的预算用例改为统计**所有** fetch，不再只数官方线解析请求。
+- **复现测试**（`Tests/worker-egress-review.test.mjs`，Node）：
+  - `a rate-limited origin default is unknown, not dead, and the fallback is flagged`
+  - `an HLS default with an unreachable first segment stays an unverified candidate`
+  - `an unlabelled cached source cannot stand in for a labelled origin default`
+  - `a soft probe failure never overwrites a previously verified source`
+  - `probing continues past eight failed lines when a later line is playable`
+  - `the worker never spends more than the Cloudflare subrequest budget`
+- **结果**：在 `dc462b2` 上新增 6 条中 5 红 1 绿（预算守卫绿）；修复后全套
+  `node --test Tests/*.test.mjs` 88 通过 / 0 失败 / 0 跳过，`node --check` 全过。
+- **验证边界**：Node 夹具 + 真实调用链，未做生产部署或浏览器实播。
+  4 部综艺缺集（第 1 项）按用户要求未处理。
+
+## WEB-REG-003 第三轮返修：多层 HLS 软失败、CORS 误判、预算与重定向计数（Web/Worker，非 iOS）
+
+- **现象**（审核开发二在 `c26112a` 上复现的四条 P1）：
+  1. 默认线 MP4 地址返回 429，或主清单→子清单→首片断网，仍被标 `dead`；备用线降级没有标记。
+     反过来首片明确缺 CORS 时，又被当作未验证候选抢在可播备用线前。
+  2. 默认线已有 `ok` + 指纹时，多层 HLS 软失败仍把旧记录改成 `no_playable_variant`、清空指纹。
+  3. HLS 变体或初始化片段处预算耗尽，报成 `no_playable_variant` / `playlist_dependencies_unavailable`，最终标 `dead`。
+  4. 媒体请求自动跟随重定向，一个重定向链只记一次子请求。
+- **根因**：软失败分类用 `first_segment_` 一刀切且漏掉 429/5xx/多层 HLS；预算错误在 HLS 聚合和依赖 catch 里被改写；`fetch(redirect:'follow')` 让重定向链只扣一次预算。
+- **修复**：
+  - `source-selection.js`：`*_cors_blocked`、`first_segment_not_media/empty/decryption_failed` 明确为硬失败；
+    `http_429|5xx`、首片传输失败、`playlist_dependencies_unavailable` 归为软失败。
+  - `playback-probe.js`：主清单聚合子清单时保留首个软失败原因；依赖请求 catch 保留 `probe_budget_exceeded`，
+    CORS 单独报硬失败；新增 `createCountedFetch`，手动跟随重定向，每一跳都扣预算，并记录最终 URL。
+  - `index.js`：MP4 探测也走同一个计数 fetch，异常时保留 `probe_budget_exceeded`。
+- **复现测试**（`Tests/worker-egress-review.test.mjs`，7 条均在 `c26112a` 上确认先红）：
+  - `a rate-limited MP4 default stays unknown and the fallback is flagged`
+  - `an HLS master-to-segment transport failure stays an unverified default`
+  - `a first segment without browser CORS is a dead line, not an unverified candidate`
+  - `an HLS transport failure never clears a verified cached source`
+  - `an HLS variant stopped by the probe budget reports probe_budget_exceeded`
+  - `an HLS init segment stopped by the probe budget reports probe_budget_exceeded`
+  - `every redirect hop is charged to the probe budget`
+- **结果**：修复后全套 `node --test Tests/*.test.mjs` **95 通过 / 0 失败 / 0 跳过**；
+  `node --check`、`npm run build` 全过。Cloudflare 官方口径（Context7）确认免费版 50 个子请求、重定向每跳计数。
+- **验证边界**：Node 夹具 + 真实调用链，未做生产部署或浏览器实播；4 部综艺缺集（第 1 项）继续按用户要求不处理。
+
+## WEB-REG-004 第四轮返修：HLS 密钥明确 404、重试丢地址（Web/Worker，非 iOS）
+
+- **现象**（审核开发二在 `2341950` 上复现的两条 P1）：
+  1. HLS 密钥明确返回 404，仍被归为软失败，未验证的官方线抢占已验证备用线。
+  2. 首次探测已拿到官方地址，重试因预算耗尽/限流没拿到地址时，空结果覆盖首次结果，官方线被当成「没地址」换成别家。
+- **根因**：密钥/初始化片段 catch 把 `http_404` 折叠为 `playlist_dependencies_unavailable`（软失败）；`mergeOriginRetry` 无条件用重试结果替换首次结果。
+- **修复**：
+  - `playback-probe.js` 原样带出明确 HTTP 状态码为 `playlist_dependencies_http_<status>`；`source-selection.js` 把 4xx（除 429）列为硬失败。
+  - `origin-default.js` 的 `mergeOriginRetry`：重试无地址且只是软失败/未知、首次有地址时保留首次；明确失败（会员/403）仍替换。
+- **复现测试**（`Tests/worker-egress-review.test.mjs`，3 条均在 `2341950` 上先红）：
+  - `an HLS key with a definite HTTP 404 is dead, not an unverified default`
+  - `an origin-default retry with no address keeps the first resolved URL`
+  - `mergeOriginRetry only replaces the first probe when the retry has an address or a definite failure`
+- **结果**：修复后全套 `node --test Tests/*.test.mjs` **98 通过 / 0 失败 / 0 跳过**；`node --check`、`npm run build` 全过。
+- **验证边界**：Node 夹具 + 真实调用链，未做生产部署或浏览器实播；4 部综艺缺集（第 1 项）继续按用户要求不处理。
+
+## WEB-REG-005 第五轮返修：重试解析超时/断网丢地址（Web/Worker，非 iOS）
+
+- **现象**（审核开发二在 `838d751` 上复现的唯一残留 P1）：HLS 密钥 404 已通过；但重试解析请求超时或断网时，异常被包装成未识别的 `resolve_<message>`，空结果覆盖首次结果，官方线被误标 `dead`、`originDefaultStatus:'unavailable'` 并切到备用线。
+- **根因**：`mergeOriginRetry` 用「已知软失败白名单」判断能否保留首次地址，未识别的 `resolve_*`（`resolve_fetch failed`、`resolve_connect timeout…`、`resolve_probe_aborted`）不在白名单内；同一批错误在 `isSoftProbeFailure` 里也被判成硬失败。
+- **修复**：
+  - `origin-default.js` 的 `mergeOriginRetry` 改为「明确失败黑名单」：重试无地址时，只有会员/登录限制、解析接口明确 HTTP 4xx（429 除外）才替换首次结果，其余传输类失败一律保留首次已解析地址。
+  - `source-selection.js` 的 `isSoftProbeFailure` 把非 HTTP 4xx 的 `resolve_*` 归为软失败，明确 HTTP 4xx 仍按硬失败。
+- **复现测试**（`Tests/worker-egress-review.test.mjs`，2 条在 `838d751` 上先红）：
+  - `an origin-default retry whose resolve request times out keeps the first resolved URL`（真实 `/api/play` 调用链）
+  - `mergeOriginRetry only replaces the first probe when the retry has an address or a definite failure`（扩充三种未识别 `resolve_*` 与两种明确失败断言）
+- **结果**：修复后全套 `node --test Tests/*.test.mjs` **99 通过 / 0 失败 / 0 跳过**；`node --check`、`npm run build` 全过。证据：`outputs/worker-egress-review-fix-round5-20261122.md`。
+- **验证边界**：Node 夹具 + 真实调用链，未做生产部署或浏览器实播；4 部综艺缺集（第 1 项）继续按用户要求不处理。
