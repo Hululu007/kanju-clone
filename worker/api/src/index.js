@@ -6,7 +6,8 @@ import { mediaDimensions, readBounded } from './media-dimensions.js'
 import { probeCandidates, selectPlayable } from './source-selection.js'
 import { orderLines } from './line-order.js'
 import { issuePlaybackAttempt, verifyPlaybackAttempt } from './playback-attempt.js'
-import { applyOriginDefault } from './origin-default.js'
+import { applyOriginDefault, loadOriginDefault, markOriginDefault, mergeOriginRetry, pickOriginDefaultEpisode, planOriginRetry } from './origin-default.js'
+import { lineKey, matchesLineKey } from './line-key.js'
 // 契约与本地 server/proxy.mjs 一致：/api/health /api/list /api/show /api/lines /api/play /api/audit /api/progress
 const SITE = 'https://kanju32.com'
 const BUILD = 'dianyingtiantang-v2026.11.12.3-worker-flag-fix-46f791897b69-web'
@@ -369,21 +370,23 @@ async function playUrl(env, showId, idx, requestedLine = '', targetQuality = 0, 
     /* 拿不到就不显示跳过按钮 */
   }
 
-  const lines = orderLines((await applyOriginDefault(env, showId, lineOptions(rv))).map((line) => ({
+  const originDefault = await loadOriginDefault(env, showId)
+  const lines = orderLines(markOriginDefault(lineOptions(rv), originDefault.provider, originDefault.label).map((line) => ({
     ...line,
     quality: 0,
     stats: successfulProviders.get(line.provider),
   })), successfulProviders).filter((line) => health.get(line.provider)?.verdict !== 'dup')
+  const requestedHit = requestedLine ? lines.find((line) => matchesLineKey(line, requestedLine)) : null
   if (requestedLine) {
-    const at = lines.findIndex((line) => line.provider === requestedLine)
-    if (at < 0) throw new Error('所选线路在本集不可用')
+    if (!requestedHit) throw new Error('所选线路在本集不可用')
+    const at = lines.indexOf(requestedHit)
     if (at > 0) lines.unshift(lines.splice(at, 1)[0])
   } else if (preferred) {
     const at = lines.findIndex((line) => line.provider === preferred)
     if (at > 0) lines.unshift(lines.splice(at, 1)[0])
   }
   const candidates = requestedLine
-    ? strictLine ? [lines.find((line) => line.provider === requestedLine)] : [lines.find((line) => line.provider === requestedLine), ...lines.filter((line) => line.provider !== requestedLine)]
+    ? strictLine ? [requestedHit] : [requestedHit, ...lines.filter((line) => line !== requestedHit)]
     : lines
   const tried = []
   const probeOne = async (line, signal) => {
@@ -426,11 +429,12 @@ async function playUrl(env, showId, idx, requestedLine = '', targetQuality = 0, 
 
   // 原站默认线路只有「超时/预算不足」这类软失败时单独再试一次：
   // 并发探测会把它挤到超时，导致默认线路被换成别的线路，与原站不一致。
-  const wantedAt = probed.findIndex((item) => item.line.selected)
-  const softFail = ['probe_timeout', 'probe_budget_exceeded', 'probe_aborted']
-  if (!requestedLine && wantedAt >= 0 && !probed[wantedAt].ok && softFail.includes(probed[wantedAt].error)) {
-    const retried = await probeCandidates([probed[wantedAt].line], probeOne, { concurrency: 1, timeoutMs: 12000, budgetMs: 13000 })
-    if (retried[0]?.ok) probed = probed.map((item, index) => (index === wantedAt ? retried[0] : item))
+  // 只对对照表命中的线路重试，上游 selected（列表第一条）不算默认项。
+  const retryPlan = requestedLine ? { index: -1, retry: false } : planOriginRetry(probed, originDefault)
+  if (retryPlan.retry) {
+    const retried = await probeCandidates([probed[retryPlan.index].line], probeOne, { concurrency: 1, timeoutMs: 12000, budgetMs: 13000 })
+    // 重试如果给出明确失败（会员/HTTP 403 等），也要用它替换，避免把该线路报成「超时、状态未知」。
+    probed = mergeOriginRetry(probed, retryPlan.index, retried[0])
   }
 
   for (const item of probed) {
@@ -443,7 +447,7 @@ async function playUrl(env, showId, idx, requestedLine = '', targetQuality = 0, 
   }
   const mediaCandidates = probed.map((item) => ({ ...item.line, ...item, quality: Number(item.height || item.variantHeight) || 0 }))
   const chosen = requestedLine
-    ? mediaCandidates.find((item) => item.provider === requestedLine && item.ok) || selectPlayable(mediaCandidates.filter((item) => item.provider !== requestedLine), { preferred, targetQuality: requestedQuality })
+    ? mediaCandidates.find((item) => matchesLineKey(item, requestedLine) && item.ok) || selectPlayable(mediaCandidates.filter((item) => !matchesLineKey(item, requestedLine)), { preferred, targetQuality: requestedQuality })
     : selectPlayable(mediaCandidates, { preferred, targetQuality: requestedQuality })
   if (chosen) {
     const { line, mediaUrl, fingerprint: fp, kind, segments, duration, height = 0, width = 0 } = chosen
@@ -470,12 +474,13 @@ async function playUrl(env, showId, idx, requestedLine = '', targetQuality = 0, 
       options: probed.map((item) => ({
         provider: item.line.provider,
         label: item.line.label,
+        key: lineKey(item.line.provider, item.line.label),
         group: item.line.group,
         mode: item.line.ticket ? 'ticket' : 'direct',
         status: item.ok ? 'ok' : item.error === 'member' ? 'member' : item.deferred || ['probe_timeout', 'probe_budget_exceeded', 'resolve_failed', 'probe_aborted'].includes(item.error) ? 'unknown' : 'dead',
         quality: Number(item.height || item.variantHeight) || 0,
         successRate: item.line.stats?.total >= 2 ? item.line.stats.successes / item.line.stats.total : null,
-        selected: item.line.provider === line.provider,
+        selected: item.line.provider === line.provider && String(item.line.label) === String(line.label),
       })),
       candidateProviders: probed.filter((item) => item.ok).map((item) => item.line.provider),
       tried,
@@ -1083,6 +1088,8 @@ export default {
           const page = await fetchJson(env, `/v1/catalog/${id}/episodes?limit=48&offset=0`)
           const liveEps = page.episodes || []
           const c = d.catalog || d.card || d
+          const episodes = liveEps.map((e, i) => ({ idx: i, label: e.title || `第${e.number || i + 1}集`, playable: !!e.token }))
+          const defaultEpisode = pickOriginDefaultEpisode(episodes, await loadOriginDefault(env, id))
           return json({
             object: 'show',
             id,
@@ -1101,9 +1108,12 @@ export default {
             episodeCount: c.episode_count || liveEps.length,
             availableEpisodeCount: c.available_episode_count || liveEps.length,
             providers: health,
-            episodes: liveEps.map((e, i) => ({ idx: i, label: e.title || `第${e.number || i + 1}集`, playable: !!e.token })),
+            episodes,
+            defaultEpisode,
           })
         }
+        const episodes = eps.map((e) => ({ idx: e.idx, label: e.title || `第${e.number || e.idx + 1}集`, playable: !!e.token, quality: e.quality, line: e.line_label }))
+        const defaultEpisode = pickOriginDefaultEpisode(episodes, await loadOriginDefault(env, id))
         return json({
           object: 'show',
           id: s.id,
@@ -1124,7 +1134,8 @@ export default {
           heatValue: s.heat_value,
           updatedAt: textOf(s.updated_at),
           providers: health,
-          episodes: eps.map((e) => ({ idx: e.idx, label: e.title || `第${e.number || e.idx + 1}集`, playable: !!e.token, quality: e.quality, line: e.line_label })),
+          episodes,
+          defaultEpisode,
         })
       }
 
@@ -1159,6 +1170,7 @@ export default {
           options: orderLines(await applyOriginDefault(env, showId, lineOptions(rv)), successfulProviders).map((l) => ({
             provider: l.provider,
             label: l.label,
+            key: lineKey(l.provider, l.label),
             group: l.group,
             mode: l.ticket ? 'ticket' : 'direct',
             status: health.get(l.provider)?.verdict || 'unknown',

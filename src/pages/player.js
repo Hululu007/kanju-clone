@@ -34,6 +34,7 @@ async function loadRemoteShow(showId) {
   return {
     id: s.id,
     title: s.title,
+    defaultEpisode: s.defaultEpisode || null,
     originalTitle: '',
     year: s.year || '',
     cat: KIND_CAT[s.kind] || 'tv',
@@ -88,7 +89,10 @@ document.title = `${show.title} - 阿噗影视`
 const related = shows.filter((s) => s.id !== show.id && s.cat === show.cat).slice(0, 10)
 const rest = related.length >= 6 ? related : shows.slice(6, 16)
 const first = eps[0]
-const startIdx = eps.find((e) => Number(e.idx) === Number(resumeIdx))?.idx ?? first?.idx ?? 0
+// 没有续播记录时，优先打开原站默认集（对照表），其次才是列表第一集。
+const originDefaultIdx = show.defaultEpisode?.matched ? Number(show.defaultEpisode.idx) : null
+const resumedIdx = eps.find((e) => Number(e.idx) === Number(resumeIdx))?.idx
+const startIdx = resumedIdx ?? (originDefaultIdx != null && eps.some((e) => Number(e.idx) === originDefaultIdx) ? originDefaultIdx : first?.idx ?? 0)
 const epLabel = (idx) => eps.find((e) => Number(e.idx) === Number(idx))?.label || `第${Number(idx) + 1}集`
 const heatText = show.heat || (show.heatValue ? `热度 ${Math.round(show.heatValue / 1000)} 万` : '热播中')
 const metaText = [show.kindLabel, show.year, show.area].filter(Boolean).join(' · ')
@@ -898,8 +902,13 @@ function renderSpeedList() {
 
 let linesByEp = new Map()
 let currentProvider = ''
+let currentLineKey = ''
 let lastSuccessfulProvider = ''
 const STATUS_TIP = { dup: '该线路串集，已停用', dead: '线路不可用', empty: '线路为空', member: '需要会员或更高等级', unknown: '', ok: '' }
+
+function lineKeyOf(option) {
+  return option?.key || `${option?.provider || ''}|${option?.label ?? ''}`
+}
 
 function lineOptions(epIdx) {
   return linesByEp.get(Number(epIdx))?.options || []
@@ -918,7 +927,9 @@ function mergeLineOptions(epIdx, incoming) {
 
 function updateQuality() {
   const options = lineOptions(currentEpIdx())
-  const hit = options.find((option) => option.provider === currentProvider) || options[0]
+  const hit = options.find((option) => lineKeyOf(option) === currentLineKey)
+    || options.find((option) => option.provider === currentProvider)
+    || options[0]
   qualityButtons.forEach((button) => {
     const resolution = Number(hit?.quality || actualQuality) > 0 ? `${Number(hit?.quality || actualQuality)}P` : '清晰度未知'
     button.querySelector('[data-quality-text]').textContent = hit ? `${resolution} · ${hit.label}` : '清晰度未知'
@@ -935,7 +946,7 @@ function renderLineList() {
   const groups = { official: [], normal: [] }
   for (const o of options) (groups[o.group] || groups.normal).push(o)
   const row = (o) =>
-    `<button class="pl-line${o.provider === currentProvider ? ' on' : ''}" type="button" data-line="${esc(o.provider)}"${
+    `<button class="pl-line${lineKeyOf(o) === currentLineKey ? ' on' : ''}" type="button" data-line="${esc(lineKeyOf(o))}"${
       o.status === 'dup' || o.status === 'dead' ? ' disabled' : ''
     }><span>${esc(o.label)}</span>${o.status && o.status !== 'ok' ? `<em>${esc(STATUS_TIP[o.status] || '')}</em>` : ''}</button>`
   lineList.innerHTML = `
@@ -1330,7 +1341,7 @@ async function switchToNextLine(generation = playGeneration) {
       if (generation !== playGeneration || !playbackWanted) return
       const controller = new AbortController()
       playRequest = controller
-      const result = await resolvePlay(show.id, currentEpIdx(), candidate.provider, { quality: actualQuality, strict: true, signal: controller.signal }).catch(() => null)
+      const result = await resolvePlay(show.id, currentEpIdx(), candidate.key || candidate.provider, { quality: actualQuality, strict: true, signal: controller.signal }).catch(() => null)
       if (playRequest === controller) playRequest = null
       if (generation !== playGeneration || !playbackWanted) return
       if (!result?.url || result.error || result.provider !== candidate.provider || !requestedProviders.has(result.provider)) {
@@ -1338,6 +1349,7 @@ async function switchToNextLine(generation = playGeneration) {
         continue
       }
       currentProvider = candidate.provider
+      currentLineKey = candidate.key || lineKeyOf(candidate)
       const switched = await new Promise((resolve) => {
         let metadataReady = false
         let started = false
@@ -1492,6 +1504,7 @@ async function play(idx, autoplay = true, requestedLine = '', { fromEpisode = nu
   }
   activeEpisode = Number(ep.idx)
   if (fresh?.provider) currentProvider = fresh.provider
+  currentLineKey = fresh?.line != null ? `${fresh.provider}|${fresh.line}` : ''
   activeAttemptId = fresh.attemptId || ''
   actualQuality = Number(fresh.quality || 0)
   mergeLineOptions(ep.idx, fresh.options)
@@ -1697,7 +1710,7 @@ if (!eps.length) {
 }
 
 if (eps.length) {
-  const initialEp = eps.find((episode) => Number(episode.idx) === Number(resumeIdx)) || eps[0]
+  const initialEp = eps.find((episode) => Number(episode.idx) === Number(startIdx)) || eps[0]
   ensureLines(initialEp.idx).then(() => {
     updateQuality()
     renderLineList()

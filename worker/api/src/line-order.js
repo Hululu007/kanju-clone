@@ -11,8 +11,9 @@ export const qualityRank = qualityRankValue
 
 export function orderLines(lines, successfulProviders = new Map()) {
   return [...lines].sort((a, b) => {
-    // 原站播放页当前选中的线路就是这一轮要对齐的默认项，排在最前。
-    if (a.selected !== b.selected) return a.selected ? -1 : 1
+    // 只有对照表命中的原站默认线路（originDefault）排最前；
+    // 上游 selected 只是列表第一条，不可信，不参与排序。
+    if (a.originDefault !== b.originDefault) return a.originDefault ? -1 : 1
 
     const rankA = Number(a.quality) || 0
     const rankB = Number(b.quality) || 0

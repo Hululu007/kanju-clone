@@ -37,10 +37,10 @@ export async function probeCandidates(lines, probe, { concurrency = 4, timeoutMs
 
 export function selectPlayable(results, { preferred = '', targetQuality = 0 } = {}) {
   const candidates = results.filter((line) => line.ok)
-  // 用户没手动选过线路时，默认用原站播放页当前选中的那条，与原站保持一致。
-  // 原站默认线路在自己的播放器里能实播，所以这里只要求它通过首片探测。
+  // 用户没手动选过线路时，默认用对照表记录的原站默认线路，与原站保持一致。
+  // 只认 originDefault 标记（对照表命中），上游 selected 不参与。
   if (!preferred) {
-    const originDefault = candidates.find((line) => line.selected)
+    const originDefault = candidates.find((line) => line.originDefault)
     if (originDefault) return originDefault
   }
   candidates.sort((a, b) => {

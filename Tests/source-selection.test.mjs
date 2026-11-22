@@ -42,8 +42,8 @@ test('measured quality wins over labels, and remembered source wins only equal q
 
 test('用户没手动选过线路时，原站默认线路优先于更高清晰度线路', () => {
   const lines = [
-    { provider: 'uhd', label: '4K', ok: true, quality: 2160, selected: false },
-    { provider: 'origin', label: '高清', ok: true, quality: 720, selected: true },
+    { provider: 'uhd', label: '4K', ok: true, quality: 2160 },
+    { provider: 'origin', label: '高清', ok: true, quality: 720, originDefault: true },
   ]
   assert.equal(selectPlayable(lines).provider, 'origin')
   assert.equal(selectPlayable(lines, { preferred: 'uhd' }).provider, 'uhd')
@@ -51,8 +51,8 @@ test('用户没手动选过线路时，原站默认线路优先于更高清晰�
 
 test('原站默认线路探测失败时回退到原有清晰度选线', () => {
   const lines = [
-    { provider: 'origin', label: '高清', ok: false, quality: 720, selected: true },
-    { provider: 'hd', label: '1080P', ok: true, quality: 1080, selected: false },
+    { provider: 'origin', label: '高清', ok: false, quality: 720, originDefault: true },
+    { provider: 'hd', label: '1080P', ok: true, quality: 1080 },
   ]
   assert.equal(selectPlayable(lines).provider, 'hd')
 })

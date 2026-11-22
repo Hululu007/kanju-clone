@@ -188,6 +188,8 @@ CREATE TABLE IF NOT EXISTS origin_defaults (
   show_id TEXT PRIMARY KEY,
   provider TEXT NOT NULL,
   label TEXT,
+  ep_idx INTEGER,
+  ep_label TEXT,
   title TEXT,
   source TEXT,
   observed_at TEXT
