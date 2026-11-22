@@ -1507,3 +1507,16 @@ testToolbarDownloadButtonReplacesTheDanmakuSlot → missing-button
   - `mergeOriginRetry only replaces the first probe when the retry has an address or a definite failure`
 - **结果**：修复后全套 `node --test Tests/*.test.mjs` **98 通过 / 0 失败 / 0 跳过**；`node --check`、`npm run build` 全过。
 - **验证边界**：Node 夹具 + 真实调用链，未做生产部署或浏览器实播；4 部综艺缺集（第 1 项）继续按用户要求不处理。
+
+## WEB-REG-005 第五轮返修：重试解析超时/断网丢地址（Web/Worker，非 iOS）
+
+- **现象**（审核开发二在 `838d751` 上复现的唯一残留 P1）：HLS 密钥 404 已通过；但重试解析请求超时或断网时，异常被包装成未识别的 `resolve_<message>`，空结果覆盖首次结果，官方线被误标 `dead`、`originDefaultStatus:'unavailable'` 并切到备用线。
+- **根因**：`mergeOriginRetry` 用「已知软失败白名单」判断能否保留首次地址，未识别的 `resolve_*`（`resolve_fetch failed`、`resolve_connect timeout…`、`resolve_probe_aborted`）不在白名单内；同一批错误在 `isSoftProbeFailure` 里也被判成硬失败。
+- **修复**：
+  - `origin-default.js` 的 `mergeOriginRetry` 改为「明确失败黑名单」：重试无地址时，只有会员/登录限制、解析接口明确 HTTP 4xx（429 除外）才替换首次结果，其余传输类失败一律保留首次已解析地址。
+  - `source-selection.js` 的 `isSoftProbeFailure` 把非 HTTP 4xx 的 `resolve_*` 归为软失败，明确 HTTP 4xx 仍按硬失败。
+- **复现测试**（`Tests/worker-egress-review.test.mjs`，2 条在 `838d751` 上先红）：
+  - `an origin-default retry whose resolve request times out keeps the first resolved URL`（真实 `/api/play` 调用链）
+  - `mergeOriginRetry only replaces the first probe when the retry has an address or a definite failure`（扩充三种未识别 `resolve_*` 与两种明确失败断言）
+- **结果**：修复后全套 `node --test Tests/*.test.mjs` **99 通过 / 0 失败 / 0 跳过**；`node --check`、`npm run build` 全过。证据：`outputs/worker-egress-review-fix-round5-20261122.md`。
+- **验证边界**：Node 夹具 + 真实调用链，未做生产部署或浏览器实播；4 部综艺缺集（第 1 项）继续按用户要求不处理。

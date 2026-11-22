@@ -30,6 +30,9 @@ export function isSoftProbeFailure(error, item) {
     || /^playlist_dependencies_(unavailable|fetch_failed|timeout|http_(429|5\d\d))$/.test(code)
     || /^resolve_http_(429|5\d\d)/.test(code)
     || /^resolve_(too_many_subrequests|probe_budget_exceeded)/.test(code)
+    // 解析请求自身的传输失败（超时、断网、连接重置、被中止）只是 Worker 出口没查成，
+    // 不等于线路不可播；解析接口明确返回 HTTP 4xx（鉴权/会员等）仍按硬失败处理。
+    || (/^resolve_/.test(code) && !/^resolve_http_4\d\d/.test(code))
 }
 
 export function probeStatus(item) {

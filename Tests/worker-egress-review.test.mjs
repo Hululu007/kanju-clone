@@ -324,12 +324,38 @@ test('an origin-default retry with no address keeps the first resolved URL', asy
   assert.equal(out.verified, false, JSON.stringify(out))
 })
 
+test('an origin-default retry whose resolve request times out keeps the first resolved URL', async (t) => {
+  const f = fixture(t, {
+    extraLines: 0,
+    resolvePolicy: (ticket, count) => {
+      // 第一次解析拿到 official.mp4；重试（count>1）时 Worker 出口断网/超时，
+      // signedFetch 直接抛错，被 probeOne 包装成未识别的 resolve_<message>。
+      if (ticket === 'official-ticket' && count > 1) throw new Error('connect timeout from worker egress')
+      return null
+    },
+    mediaPolicy: (path) => path === '/official.mp4' ? 'budget' : null,
+  })
+  const out = await play(f)
+  assert.equal(out.provider, 'official-z', JSON.stringify(out))
+  assert.equal(out.url, 'https://media.example/official.mp4', JSON.stringify(out))
+  assert.equal(out.verified, false, JSON.stringify(out))
+})
+
 test('mergeOriginRetry only replaces the first probe when the retry has an address or a definite failure', () => {
   const line = { provider: 'official-z', label: '1080P-官方Z' }
   const first = { line, ok: false, url: 'https://media.example/official.m3u8', error: 'probe_budget_exceeded', tentative: true }
   const preserved = mergeOriginRetry([first], 0, { line, ok: false, deferred: true, error: 'probe_budget_exceeded' })
   assert.equal(preserved[0].url, first.url)
   assert.equal(preserved[0].tentative, true)
-  const replaced = mergeOriginRetry([first], 0, { line, ok: false, url: '', error: 'member' })
-  assert.equal(replaced[0].error, 'member')
+  // 重试连解析地址都没拿到、且原因是 Worker 出口的传输类失败（未识别的 resolve_*）时，
+  // 首次已解析出的地址必须保留，不能把默认线判成没地址后换成别家。
+  for (const unknown of ['resolve_fetch failed', 'resolve_connect timeout from worker egress', 'resolve_socket hang up']) {
+    const kept = mergeOriginRetry([first], 0, { line, ok: false, url: '', error: unknown })
+    assert.equal(kept[0].url, first.url, `${unknown} must not drop the first URL`)
+  }
+  // 明确失败（会员 / HTTP 403）仍要替换，避免把线路报成「超时、状态未知」。
+  const memberReplaced = mergeOriginRetry([first], 0, { line, ok: false, url: '', error: 'member' })
+  assert.equal(memberReplaced[0].error, 'member')
+  const forbiddenReplaced = mergeOriginRetry([first], 0, { line, ok: false, url: '', error: 'resolve_http_403' })
+  assert.equal(forbiddenReplaced[0].error, 'resolve_http_403')
 })

@@ -1,4 +1,4 @@
-import { RETRYABLE_PROBE_FAILURES, isSoftProbeFailure } from './source-selection.js'
+import { RETRYABLE_PROBE_FAILURES } from './source-selection.js'
 
 // 原站默认线路与默认集对照表。
 //
@@ -72,11 +72,16 @@ export function mergeOriginRetry(probed, index, attempt) {
   if (index < 0 || !attempt) return probed
   const original = probed[index]
   const hasAddress = (item) => !!(item?.url || item?.mediaUrl)
-  // 重试撞到预算耗尽/限流时，可能连解析地址都没拿到。这时不能用一个空结果覆盖首次
-  // 已经解析出的地址，否则默认线路会被误判成「没地址」而换成别家。
-  // 明确的失败（会员、403 等）仍然替换，避免把线路报成「超时、状态未知」。
-  const retryOnlySaysUnknown = !hasAddress(attempt)
-    && (attempt.deferred || attempt.error === 'no_url' || isSoftProbeFailure(attempt.error, attempt))
+  const code = String(attempt.error || '')
+  // 重试连地址都没拿到时，只有「线路本身明确不能用」才覆盖首次结果：
+  // 会员/登录限制、解析接口明确返回 HTTP 4xx（429 限流除外）。
+  // 超时、断网、连接重置、被中止、限流、预算耗尽都只是 Worker 出口没查成，
+  // 必须保留首次已经解析出的地址，不能把默认线路判成没地址后换成别家。
+  // 这里用「明确失败」黑名单而不是「已知软失败」白名单，避免每出现一种新的
+  // 传输异常就再漏一次（resolve_fetch failed、resolve_connect timeout 等）。
+  const definiteFailure = attempt.error === 'member'
+    || (/^resolve_http_4\d\d/.test(code) && !/^resolve_http_429/.test(code))
+  const retryOnlySaysUnknown = !hasAddress(attempt) && !definiteFailure
   if (retryOnlySaysUnknown && hasAddress(original)) return probed
   return probed.map((item, at) => (at === index ? attempt : item))
 }
