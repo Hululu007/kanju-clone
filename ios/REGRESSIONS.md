@@ -1464,3 +1464,30 @@ testToolbarDownloadButtonReplacesTheDanmakuSlot → missing-button
   `node --test Tests/*.test.mjs` 88 通过 / 0 失败 / 0 跳过，`node --check` 全过。
 - **验证边界**：Node 夹具 + 真实调用链，未做生产部署或浏览器实播。
   4 部综艺缺集（第 1 项）按用户要求未处理。
+
+## WEB-REG-003 第三轮返修：多层 HLS 软失败、CORS 误判、预算与重定向计数（Web/Worker，非 iOS）
+
+- **现象**（审核开发二在 `c26112a` 上复现的四条 P1）：
+  1. 默认线 MP4 地址返回 429，或主清单→子清单→首片断网，仍被标 `dead`；备用线降级没有标记。
+     反过来首片明确缺 CORS 时，又被当作未验证候选抢在可播备用线前。
+  2. 默认线已有 `ok` + 指纹时，多层 HLS 软失败仍把旧记录改成 `no_playable_variant`、清空指纹。
+  3. HLS 变体或初始化片段处预算耗尽，报成 `no_playable_variant` / `playlist_dependencies_unavailable`，最终标 `dead`。
+  4. 媒体请求自动跟随重定向，一个重定向链只记一次子请求。
+- **根因**：软失败分类用 `first_segment_` 一刀切且漏掉 429/5xx/多层 HLS；预算错误在 HLS 聚合和依赖 catch 里被改写；`fetch(redirect:'follow')` 让重定向链只扣一次预算。
+- **修复**：
+  - `source-selection.js`：`*_cors_blocked`、`first_segment_not_media/empty/decryption_failed` 明确为硬失败；
+    `http_429|5xx`、首片传输失败、`playlist_dependencies_unavailable` 归为软失败。
+  - `playback-probe.js`：主清单聚合子清单时保留首个软失败原因；依赖请求 catch 保留 `probe_budget_exceeded`，
+    CORS 单独报硬失败；新增 `createCountedFetch`，手动跟随重定向，每一跳都扣预算，并记录最终 URL。
+  - `index.js`：MP4 探测也走同一个计数 fetch，异常时保留 `probe_budget_exceeded`。
+- **复现测试**（`Tests/worker-egress-review.test.mjs`，7 条均在 `c26112a` 上确认先红）：
+  - `a rate-limited MP4 default stays unknown and the fallback is flagged`
+  - `an HLS master-to-segment transport failure stays an unverified default`
+  - `a first segment without browser CORS is a dead line, not an unverified candidate`
+  - `an HLS transport failure never clears a verified cached source`
+  - `an HLS variant stopped by the probe budget reports probe_budget_exceeded`
+  - `an HLS init segment stopped by the probe budget reports probe_budget_exceeded`
+  - `every redirect hop is charged to the probe budget`
+- **结果**：修复后全套 `node --test Tests/*.test.mjs` **95 通过 / 0 失败 / 0 跳过**；
+  `node --check`、`npm run build` 全过。Cloudflare 官方口径（Context7）确认免费版 50 个子请求、重定向每跳计数。
+- **验证边界**：Node 夹具 + 真实调用链，未做生产部署或浏览器实播；4 部综艺缺集（第 1 项）继续按用户要求不处理。

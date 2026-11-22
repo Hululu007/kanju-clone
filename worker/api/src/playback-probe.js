@@ -1,4 +1,5 @@
 import { mediaDimensions, readBounded } from './media-dimensions.js'
+import { isSoftProbeFailure } from './source-selection.js'
 
 const PLAYER_ORIGIN = 'https://zhuiju.dpdns.org'
 
@@ -18,20 +19,45 @@ function byteRange(spec) {
   return { start, end: start + length - 1 }
 }
 
-// Cloudflare 免费版一次 Worker 调用最多 50 个子请求。媒体探测的每个请求都从这里过，
-// 计数用完就把线路留成「未探测」，不能让它变成死线或继续发请求。
-function countedFetch(fetchImpl, budget) {
-  if (!budget) return fetchImpl
-  return (resource, options) => {
-    if (!budget.canSpend(1)) throw new Error('probe_budget_exceeded')
-    budget.spend(1)
-    return fetchImpl(resource, options)
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308])
+const MAX_REDIRECTS = 5
+
+function probeResponseUrl(response, fallback) {
+  return response?.probeFinalUrl || response?.url || fallback
+}
+
+// Cloudflare 免费版一次 Worker 调用最多 50 个子请求，重定向的每一跳都算一个。
+// 手动跟随重定向，保证每个实际请求都过预算；计数用完就把线路留成「未探测」。
+export function createCountedFetch(fetchImpl, budget) {
+  if (!budget || fetchImpl?.probeCounted) return fetchImpl
+  const counted = async (resource, options = {}) => {
+    let current = String(resource instanceof URL ? resource.href : resource)
+    let init = { ...options, redirect: 'manual' }
+    for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
+      if (!budget.canSpend(1)) throw new Error('probe_budget_exceeded')
+      budget.spend(1)
+      const response = await fetchImpl(current, init)
+      if (!REDIRECT_STATUSES.has(response.status)) {
+        try { Object.defineProperty(response, 'probeFinalUrl', { value: current, configurable: true }) } catch { /* Response may be frozen. */ }
+        return response
+      }
+      const location = response.headers?.get('location')
+      let next
+      try { next = location ? new URL(location, current).href : '' } catch { next = '' }
+      if (!next || hop === MAX_REDIRECTS) {
+        try { Object.defineProperty(response, 'probeFinalUrl', { value: current, configurable: true }) } catch { /* Response may be frozen. */ }
+        return response
+      }
+      current = next
+    }
   }
+  counted.probeCounted = true
+  return counted
 }
 
 function corsAllowsPlayer(response) {
   let sameOrigin = false
-  try { sameOrigin = new URL(response.url).origin === PLAYER_ORIGIN } catch { return false }
+  try { sameOrigin = new URL(probeResponseUrl(response)).origin === PLAYER_ORIGIN } catch { return false }
   if (sameOrigin) return true
   const allowed = response.headers?.get('access-control-allow-origin')
   return allowed === '*' || allowed?.split(/\s*,\s*/).includes(PLAYER_ORIGIN) === true
@@ -90,7 +116,7 @@ async function fetchPart(fetchImpl, url, signal, range, limit) {
 
 export async function inspectHlsResource(url, { fetchImpl = fetch, timeoutMs = 5000, signal, depth = 0, maxDepth = 3, budget } = {}) {
   if (depth > maxDepth) return { ok: false, kind: 'hls', error: 'variant_depth_exceeded' }
-  fetchImpl = countedFetch(fetchImpl, budget)
+  fetchImpl = createCountedFetch(fetchImpl, budget)
   if (depth === 0) signal = signal ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs)
   const probeStarted = Date.now()
   let response
@@ -116,24 +142,30 @@ export async function inspectHlsResource(url, { fetchImpl = fetch, timeoutMs = 5
       if (!path || path.startsWith('#')) continue
       try {
         const height = Number(rows[index].match(/RESOLUTION=\d+x(\d+)/i)?.[1] || 0)
-        variants.push({ url: mediaResource(path, response.url || url), height })
+        variants.push({ url: mediaResource(path, probeResponseUrl(response, url)), height })
       } catch { /* Invalid variant URL is not playable. */ }
     }
     variants.sort((a, b) => (b.height === 1080) - (a.height === 1080) || b.height - a.height)
     let best
+    const softFailures = []
     for (const variant of variants) {
       if (signal.aborted || Date.now() - probeStarted >= timeoutMs) break
       const probe = await inspectHlsResource(variant.url, { fetchImpl, timeoutMs, signal, depth: depth + 1, maxDepth })
+      if (!probe.ok && isSoftProbeFailure(probe.error)) softFailures.push(probe.error)
       if (!probe.ok || signal.aborted || Date.now() - probeStarted >= timeoutMs) continue
       if (probe.height === 1080) return probe
       if (!best || probe.height > best.height) best = probe
     }
-    return best || { ok: false, kind: 'hls', error: 'no_playable_variant' }
+    if (best) return best
+    if (signal.aborted) softFailures.push('probe_aborted')
+    else if (Date.now() - probeStarted >= timeoutMs) softFailures.push('probe_timeout')
+    // 预算/Worker 出口失败不能在主清单处被改写成「没有可播变体」这种硬失败。
+    return { ok: false, kind: 'hls', error: softFailures[0] || 'no_playable_variant' }
   }
 
   const segments = text.split('\n').map((line) => line.trim()).filter((line) => line && !line.startsWith('#'))
   if (!segments.length) return { ok: false, kind: 'hls', error: 'empty_playlist' }
-  const base = response.url || url
+  const base = probeResponseUrl(response, url)
   const beforeFirst = text.split(/\r?\n/).map((row) => row.trim()).slice(0, text.split(/\r?\n/).findIndex((row) => row.trim() === segments[0]))
   const lastTag = (tag) => beforeFirst.findLast((row) => row.startsWith(tag))?.slice(tag.length) || ''
   let init
@@ -154,7 +186,11 @@ export async function inspectHlsResource(url, { fetchImpl = fetch, timeoutMs = 5
       init = await fetchPart(fetchImpl, mediaResource(uri, base), signal, byteRange(map.match(/BYTERANGE="([^"]+)"/)?.[1]), 1024 * 1024)
       if (!init.byteLength) throw new Error('empty_init')
     }
-  } catch {
+  } catch (error) {
+    const message = String(error?.message || '')
+    if (message === 'probe_budget_exceeded') return { ok: false, kind: 'hls', error: 'probe_budget_exceeded' }
+    if (message === 'cors_blocked') return { ok: false, kind: 'hls', error: 'playlist_dependencies_cors_blocked' }
+    if (/^http_(429|5\d\d)$/.test(message)) return { ok: false, kind: 'hls', error: `playlist_dependencies_${message}` }
     return { ok: false, kind: 'hls', error: 'playlist_dependencies_unavailable' }
   }
   let firstSegment
@@ -182,6 +218,6 @@ export async function inspectHlsResource(url, { fetchImpl = fetch, timeoutMs = 5
   const probeMs = Date.now() - probeStarted
   if (depth === 0 && probeMs >= timeoutMs) return { ok: false, kind: 'hls', error: 'probe_timeout' }
   const dimensions = mediaDimensions(init || segment)
-  if (isTransportStream(segment) && !dimensions.height) return { ok: true, kind: 'hls', segments: segments.length, duration, firstSegment, firstSegmentMs, probeMs: Date.now() - probeStarted, firstBytes: segment.slice(0, 65536), variantHeight: 0, width: 0, height: 0, qualitySource: 'unknown', mediaUrl: response.url || url }
-  return { ok: true, kind: 'hls', segments: segments.length, duration, firstSegment, firstSegmentMs, probeMs, firstBytes: segment.slice(0, 65536), variantHeight: dimensions.height, ...dimensions, qualitySource: dimensions.height ? 'media' : 'unknown', mediaUrl: response.url || url }
+  if (isTransportStream(segment) && !dimensions.height) return { ok: true, kind: 'hls', segments: segments.length, duration, firstSegment, firstSegmentMs, probeMs: Date.now() - probeStarted, firstBytes: segment.slice(0, 65536), variantHeight: 0, width: 0, height: 0, qualitySource: 'unknown', mediaUrl: probeResponseUrl(response, url) }
+  return { ok: true, kind: 'hls', segments: segments.length, duration, firstSegment, firstSegmentMs, probeMs, firstBytes: segment.slice(0, 65536), variantHeight: dimensions.height, ...dimensions, qualitySource: dimensions.height ? 'media' : 'unknown', mediaUrl: probeResponseUrl(response, url) }
 }

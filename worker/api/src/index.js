@@ -1,7 +1,7 @@
 // kanju-api —— Cloudflare Worker 版片源服务（D1）
 import { syncOnce } from './sync.js'
 import { syncHomeFeed, syncHotRanks } from './feed-sync.js'
-import { inspectHlsResource } from './playback-probe.js'
+import { createCountedFetch, inspectHlsResource } from './playback-probe.js'
 import { mediaDimensions, readBounded } from './media-dimensions.js'
 import { isSoftProbeFailure, probeCandidates, probeStatus, selectPlayable } from './source-selection.js'
 import { createProbeBudget } from './probe-budget.js'
@@ -215,6 +215,10 @@ function lineOptions(rv) {
 }
 
 
+function probeMediaUrl(response, fallback) {
+  return response?.probeFinalUrl || response?.url || fallback
+}
+
 function sniff(buf, contentType = '') {
   if (/image\//i.test(contentType)) {
     const b = new Uint8Array(buf)
@@ -247,12 +251,13 @@ async function inspectHls(url, signal, budget) {
 }
 
 async function inspectMp4(url, signal, budget) {
+  const countedFetch = createCountedFetch(
+    (resource, options) => fetch(resource, { ...options, headers: { ...options.headers, 'user-agent': UA } }),
+    budget
+  )
   try {
-    if (budget && !budget.canSpend(1)) return { ok: false, kind: 'mp4', error: 'probe_budget_exceeded' }
-    if (budget) budget.spend(1)
-    const r = await fetch(url, {
-      headers: { 'user-agent': UA, range: 'bytes=0-8388607' },
-      redirect: 'follow',
+    const r = await countedFetch(url, {
+      headers: { range: 'bytes=0-8388607' },
       signal: AbortSignal.any([AbortSignal.timeout(7000), ...(signal ? [signal] : [])]),
     })
     if (r.status >= 400) return { ok: false, kind: 'mp4', status: r.status, error: `http_${r.status}` }
@@ -266,9 +271,10 @@ async function inspectMp4(url, signal, budget) {
     if (kind !== 'mp4') return { ok: false, kind, error: 'not_video' }
     if (!buf.byteLength) return { ok: false, kind: 'mp4', error: 'empty_media' }
     const dimensions = mediaDimensions(buf)
-    return { ok: true, kind: 'mp4', length: len, ...dimensions, qualitySource: dimensions.height ? 'media' : 'unknown', mediaUrl: r.url || url, fingerprint: `mp4-url:${await sha(`${String(r.url || url).split('?')[0]}|${len}`)}` }
-  } catch {
-    return { ok: false, kind: 'mp4', error: 'fetch_failed' }
+    const mediaUrl = probeMediaUrl(r, url)
+    return { ok: true, kind: 'mp4', length: len, ...dimensions, qualitySource: dimensions.height ? 'media' : 'unknown', mediaUrl, fingerprint: `mp4-url:${await sha(`${String(mediaUrl).split('?')[0]}|${len}`)}` }
+  } catch (error) {
+    return { ok: false, kind: 'mp4', error: error?.message === 'probe_budget_exceeded' ? 'probe_budget_exceeded' : 'fetch_failed' }
   }
 }
 

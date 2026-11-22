@@ -1,5 +1,5 @@
 // 这些失败只说明 Worker 自己的出口/预算不够，不代表线路不可播：
-// 地址已经拿到，浏览器在用户网络里仍可能正常起播。一律按「未验证/状态未知」处理。
+// 地址已经拿到，浏览器在用户网络里仍可能正常起播。按「未验证/状态未知」处理。
 export const SOFT_PROBE_FAILURES = new Set([
   'probe_timeout',
   'probe_budget_exceeded',
@@ -11,12 +11,22 @@ export const SOFT_PROBE_FAILURES = new Set([
 // 只有确实可能因并发挤压而变好的失败才值得再探一次；限流和出口网络失败重试只会浪费子请求。
 export const RETRYABLE_PROBE_FAILURES = new Set(['probe_timeout', 'probe_budget_exceeded', 'probe_aborted'])
 
+// 明确证明浏览器也拿不到媒体的失败，不能当成「Worker 出口问题」去抢可播备用线。
+function isHardProbeFailure(code) {
+  if (/(^|_)cors_blocked$/.test(code)) return true
+  return /^first_segment_(not_media|empty|decryption_failed|invalid_byte_range|placeholder_image)$/.test(code)
+    || code === 'no_playable_variant'
+}
+
 export function isSoftProbeFailure(error, item) {
   const code = String(error || '')
   if (item?.tentative) return true
+  if (isHardProbeFailure(code)) return false
   return SOFT_PROBE_FAILURES.has(code)
-    || /^first_segment_/.test(code)
-    || /^resolve_http_(429|500|502|503|504)/.test(code)
+    || /^http_(429|5\d\d)$/.test(code)
+    || /^first_segment_(http_(429|5\d\d)|incomplete|unavailable|fetch_failed|timeout)$/.test(code)
+    || /^playlist_dependencies_(unavailable|fetch_failed|timeout|http_(429|5\d\d))$/.test(code)
+    || /^resolve_http_(429|5\d\d)/.test(code)
     || /^resolve_(too_many_subrequests|probe_budget_exceeded)/.test(code)
 }
 

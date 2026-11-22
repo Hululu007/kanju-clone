@@ -3,6 +3,8 @@ import test from 'node:test'
 import { readFileSync } from 'node:fs'
 import { DatabaseSync } from 'node:sqlite'
 import worker from '../worker/api/src/index.js'
+import { inspectHlsResource } from '../worker/api/src/playback-probe.js'
+import { createProbeBudget } from '../worker/api/src/probe-budget.js'
 
 const schema = readFileSync(new URL('../worker/api/schema.sql', import.meta.url), 'utf8')
 const mp4Bytes = () => {
@@ -101,7 +103,7 @@ function fixture(t, options = {}) {
   sqlite.prepare('INSERT INTO origin_defaults(show_id,provider,label) VALUES(?,?,?)').run(id, 'official-z', '1080P-官方Z')
   if (cached) {
     sqlite.prepare(`INSERT INTO sources(show_id,ep_idx,provider,label,url,kind,fingerprint,status,checked_at)
-      VALUES(?,?,?,?,?,?,?,?,datetime('now'))`).run(id, 0, 'official-z', cached.label, cached.url, 'mp4', cached.fingerprint || null, cached.status || 'ok')
+      VALUES(?,?,?,?,?,?,?,?,datetime('now'))`).run(id, 0, 'official-z', cached.label, cached.url, cached.kind || 'mp4', cached.fingerprint || null, cached.status || 'ok')
   }
   return {
     id,
@@ -180,4 +182,110 @@ test('the worker never spends more than the Cloudflare subrequest budget', async
   const out = await play(f)
   assert.ok(f.fetchCount() <= 50, `worker spent ${f.fetchCount()} subrequests`)
   assert.ok(out.options.length > 0)
+})
+
+test('a rate-limited MP4 default stays unknown and the fallback is flagged', async (t) => {
+  const f = fixture(t, {
+    resolvePolicy: (ticket) => ticket === 'official-ticket'
+      ? { status: 201, text: JSON.stringify({ line: { url: 'https://media.example/official.mp4' } }) }
+      : null,
+    mediaPolicy: (path) => path === '/official.mp4' ? new Response('', { status: 429 }) : null,
+  })
+  const out = await play(f)
+  assert.equal(out.provider, 'official-z', JSON.stringify(out))
+  assert.equal(out.verified, false, JSON.stringify(out))
+  assert.equal(out.url, 'https://media.example/official.mp4', JSON.stringify(out))
+  const def = out.options.find((o) => o.label === '1080P-官方Z')
+  assert.equal(def.status, 'unknown', JSON.stringify(out.options))
+  assert.equal(out.originDefaultStatus, 'http_429', JSON.stringify(out))
+  assert.equal(out.probeDegraded, true, JSON.stringify(out))
+})
+
+test('an HLS master-to-segment transport failure stays an unverified default', async (t) => {
+  const f = fixture(t, {
+    resolvePolicy: (ticket) => ticket === 'official-ticket'
+      ? { status: 201, text: JSON.stringify({ line: { url: 'https://media.example/official.m3u8' } }) }
+      : null,
+    mediaPolicy: (path) => {
+      if (path === '/official.m3u8') return new FixtureResponse('#EXTM3U\n#EXT-X-STREAM-INF:RESOLUTION=1920x1080\nvariant.m3u8\n', { status: 200, headers: { 'content-type': 'application/vnd.apple.mpegurl', 'access-control-allow-origin': '*' } }, 'https://media.example/official.m3u8')
+      if (path === '/variant.m3u8') return new FixtureResponse('#EXTM3U\n#EXTINF:2,\nseg1.ts\n', { status: 200, headers: { 'content-type': 'application/vnd.apple.mpegurl', 'access-control-allow-origin': '*' } }, 'https://media.example/variant.m3u8')
+      if (path === '/seg1.ts') return 'throw'
+      return null
+    },
+  })
+  const out = await play(f)
+  assert.equal(out.provider, 'official-z', JSON.stringify(out))
+  assert.equal(out.verified, false, JSON.stringify(out))
+  assert.equal(out.url, 'https://media.example/official.m3u8', JSON.stringify(out))
+  const def = out.options.find((o) => o.label === '1080P-官方Z')
+  assert.equal(def.status, 'unknown', JSON.stringify(out.options))
+  assert.equal(out.originDefaultStatus, 'first_segment_unavailable', JSON.stringify(out))
+  assert.equal(out.probeDegraded, true, JSON.stringify(out))
+})
+
+test('a first segment without browser CORS is a dead line, not an unverified candidate', async (t) => {
+  const f = fixture(t, {
+    resolvePolicy: (ticket) => ticket === 'official-ticket'
+      ? { status: 201, text: JSON.stringify({ line: { url: 'https://media.example/official.m3u8' } }) }
+      : null,
+    mediaPolicy: (path) => {
+      if (path === '/official.m3u8') return new FixtureResponse('#EXTM3U\n#EXTINF:2,\nseg1.ts\n', { status: 200, headers: { 'content-type': 'application/vnd.apple.mpegurl', 'access-control-allow-origin': '*' } }, 'https://media.example/official.m3u8')
+      if (path === '/seg1.ts') return new Response(new Uint8Array(2048), { status: 200 })
+      return null
+    },
+  })
+  const out = await play(f)
+  assert.equal(out.provider, 'other', JSON.stringify(out))
+  const def = out.options.find((o) => o.label === '1080P-官方Z')
+  assert.equal(def.status, 'dead', JSON.stringify(out.options))
+  assert.equal(out.probeDegraded, false, JSON.stringify(out))
+})
+
+test('an HLS transport failure never clears a verified cached source', async (t) => {
+  const f = fixture(t, {
+    resolvePolicy: (ticket) => ticket === 'official-ticket'
+      ? { status: 201, text: JSON.stringify({ line: { url: 'https://media.example/official.m3u8' } }) }
+      : null,
+    mediaPolicy: (path) => {
+      if (path === '/official.m3u8') return new FixtureResponse('#EXTM3U\n#EXT-X-STREAM-INF:RESOLUTION=1920x1080\nvariant.m3u8\n', { status: 200, headers: { 'content-type': 'application/vnd.apple.mpegurl', 'access-control-allow-origin': '*' } }, 'https://media.example/official.m3u8')
+      if (path === '/variant.m3u8') return new FixtureResponse('#EXTM3U\n#EXTINF:2,\nseg1.ts\n', { status: 200, headers: { 'content-type': 'application/vnd.apple.mpegurl', 'access-control-allow-origin': '*' } }, 'https://media.example/variant.m3u8')
+      if (path === '/seg1.ts') return 'throw'
+      return null
+    },
+    cached: { label: '1080P-官方Z', url: 'https://media.example/cached.m3u8', kind: 'hls', fingerprint: 'hls-bytes:previous' },
+  })
+  await play(f)
+  const row = f.sqlite.prepare("SELECT status,fingerprint,url FROM sources WHERE show_id=? AND provider='official-z'").get(f.id)
+  assert.equal(row.status, 'ok', JSON.stringify(row))
+  assert.equal(row.fingerprint, 'hls-bytes:previous', JSON.stringify(row))
+  assert.equal(row.url, 'https://media.example/cached.m3u8', JSON.stringify(row))
+})
+
+test('an HLS variant stopped by the probe budget reports probe_budget_exceeded', async () => {
+  const fetchImpl = async (input) => {
+    const url = new URL(input)
+    assert.equal(url.pathname, '/master.m3u8')
+    return new FixtureResponse('#EXTM3U\n#EXT-X-STREAM-INF:RESOLUTION=1920x1080\nvariant.m3u8\n', { status: 200, headers: { 'content-type': 'application/vnd.apple.mpegurl', 'access-control-allow-origin': '*' } }, 'https://media.example/master.m3u8')
+  }
+  const out = await inspectHlsResource('https://media.example/master.m3u8', { fetchImpl, budget: createProbeBudget(1) })
+  assert.equal(out.ok, false, JSON.stringify(out))
+  assert.equal(out.error, 'probe_budget_exceeded', JSON.stringify(out))
+})
+
+test('an HLS init segment stopped by the probe budget reports probe_budget_exceeded', async () => {
+  const fetchImpl = async (input) => {
+    const url = new URL(input)
+    assert.equal(url.pathname, '/init.m3u8')
+    return new FixtureResponse('#EXTM3U\n#EXT-X-MAP:URI="init.mp4"\n#EXTINF:2,\nseg1.ts\n', { status: 200, headers: { 'content-type': 'application/vnd.apple.mpegurl', 'access-control-allow-origin': '*' } }, 'https://media.example/init.m3u8')
+  }
+  const out = await inspectHlsResource('https://media.example/init.m3u8', { fetchImpl, budget: createProbeBudget(1) })
+  assert.equal(out.ok, false, JSON.stringify(out))
+  assert.equal(out.error, 'probe_budget_exceeded', JSON.stringify(out))
+})
+
+test('every redirect hop is charged to the probe budget', async () => {
+  const fetchImpl = async (input) => new FixtureResponse(null, { status: 302, headers: { location: '/final.m3u8' } }, 'https://media.example/redirect.m3u8')
+  const out = await inspectHlsResource('https://media.example/redirect.m3u8', { fetchImpl, budget: createProbeBudget(1) })
+  assert.equal(out.ok, false, JSON.stringify(out))
+  assert.equal(out.error, 'probe_budget_exceeded', JSON.stringify(out))
 })
