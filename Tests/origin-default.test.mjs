@@ -101,3 +101,13 @@ test('集名缺失时即使序号能对上也不冒充原站默认集', () => {
   assert.equal(result.reason, 'episode_not_in_library')
   assert.equal(result.idx, null)
 })
+
+test('无标签且同源有多语言版本时不认定默认线路，也不单独重试首条', () => {
+  const probed = [
+    { line: { provider: 'official-z', label: '1080P-官方Z' }, ok: false, error: 'probe_timeout' },
+    { line: { provider: 'official-z', label: '1080P-官方Z · 粤语' }, ok: true },
+  ]
+  // 默认标记与重试判定必须用同一套规则：都无从判断，都不动手。
+  assert.equal(markOriginDefault(probed.map((item) => item.line), 'official-z').some((line) => line.originDefault), false)
+  assert.deepEqual(planOriginRetry(probed, { provider: 'official-z', label: '' }), { index: -1, retry: false })
+})

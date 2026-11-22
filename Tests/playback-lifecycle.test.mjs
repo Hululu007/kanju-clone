@@ -55,6 +55,12 @@ test('automatic recovery requires strict selected-line resolution and refuses st
   assert.match(player, /generation !== playGeneration \|\| !playbackWanted/)
 })
 
+test('manual line selection resolves strictly so a 粤语 line never plays 普通话', () => {
+  assert.match(player, /lineRequestOptions\(requestedLine\)/)
+  assert.match(player, /sayPlayStatus\(requestedLine \? manualLineTip/)
+  assert.match(player, /所选线路「\$\{manualLineLabel \|\| requestedLine\}」暂不可用/)
+})
+
 test('playback result reports require an attempt id and are sent at most once', () => {
   const runtime = readFileSync(new URL('../src/runtime.js', import.meta.url), 'utf8')
   assert.match(runtime, /!showId \|\| !provider \|\| !attemptId/)

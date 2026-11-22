@@ -28,19 +28,22 @@ export async function loadOriginDefault(env, showId) {
 // 指定了标签（语言版本）却找不到时就是没匹配上：不能退到同 provider 的第一条，
 // 否则粤语默认会被当成普通话，选线把它当默认、重试却判定未命中。
 // 没给标签时，只有该 provider 在本集恰好只有一条线路才算命中，多条无从判断。
-export function markOriginDefault(lines, provider, label = '') {
-  let at = -1
-  if (provider) {
-    const wanted = String(label || '')
-    if (wanted) {
-      at = lines.findIndex((line) => line.provider === provider && String(line.label) === wanted)
-    } else {
-      const hits = lines.reduce((list, line, index) => (line.provider === provider ? [...list, index] : list), [])
-      // 多条同 provider 时，若它们标签全同（重复行）可认定是同一条；标签不同则无从判断，不猜。
-      const sameLabel = hits.length > 1 && hits.every((index) => String(lines[index].label) === String(lines[hits[0]].label))
-      at = hits.length === 1 || sameLabel ? hits[0] : -1
-    }
+// 默认标记和单独重试必须用同一套判定，否则会出现「标记不认、重试却认」的分歧。
+function findOriginDefaultIndex(lines, provider, label = '') {
+  const wanted = String(provider || '')
+  if (!wanted) return -1
+  const wantedLabel = String(label || '')
+  if (wantedLabel) {
+    return lines.findIndex((line) => line?.provider === wanted && String(line?.label) === wantedLabel)
   }
+  const hits = lines.reduce((list, line, index) => (line?.provider === wanted ? [...list, index] : list), [])
+  // 多条同 provider 时，若它们标签全同（重复行）可认定是同一条；标签不同（多语言版本）则无从判断，不猜。
+  const sameLabel = hits.length > 1 && hits.every((index) => String(lines[index]?.label) === String(lines[hits[0]]?.label))
+  return hits.length === 1 || sameLabel ? hits[0] : -1
+}
+
+export function markOriginDefault(lines, provider, label = '') {
+  const at = findOriginDefaultIndex(lines, provider, label)
   return lines.map((line, index) => ({ ...line, originDefault: index === at }))
 }
 
@@ -57,7 +60,7 @@ export function planOriginRetry(probed, originDefault = {}) {
   const provider = String(originDefault?.provider || '')
   const label = String(originDefault?.label || '')
   if (!provider) return { index: -1, retry: false }
-  const index = probed.findIndex((item) => item.line?.provider === provider && (!label || String(item.line.label) === label))
+  const index = findOriginDefaultIndex(probed.map((item) => item.line), provider, label)
   if (index < 0) return { index, retry: false }
   const item = probed[index]
   return { index, retry: !item.ok && SOFT_PROBE_FAILURES.includes(item.error) }

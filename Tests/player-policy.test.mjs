@@ -6,7 +6,7 @@ test('next episode follows actual episode number rather than API row index or or
   assert.equal(nextEpisodeAfter(episodes, 8)?.idx, 1)
   assert.equal(nextEpisodeAfter(episodes, 2), null)
 })
-import { nextEpisodeAfter, qualityRank, rankPlayableLines, shouldShowNextCue } from '../src/player-policy.js'
+import { lineRequestOptions, nextEpisodeAfter, qualityRank, rankPlayableLines, shouldShowNextCue } from '../src/player-policy.js'
 
 test('quality labels rank 1080p above 720p and recognize UHD', () => {
   assert.equal(qualityRank('720P-普通'), 720)
@@ -87,4 +87,9 @@ test('没有续播记录时打开原站默认集，不会被第 0 集当成续�
 test('有续播记录时优先续播集', () => {
   const episodes = [{ idx: 0 }, { idx: 1 }, { idx: 2 }]
   assert.equal(pickStartEpisode(episodes, { resumeIdx: 2, originDefaultIdx: 1 }), 2)
+})
+
+test('手选线路必须严格解析，不能回退到同 provider 的另一语言版本', () => {
+  assert.deepEqual(lineRequestOptions('official-z|1080P-官方Z · 粤语'), { strict: true })
+  assert.deepEqual(lineRequestOptions(''), { strict: false })
 })

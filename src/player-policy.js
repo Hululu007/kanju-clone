@@ -27,6 +27,12 @@ export function mergeLineOptionsList(existing, incoming) {
   return [...options.values()]
 }
 
+// 手选线路：用户点了哪一条就只认哪一条，包括语言版本。
+// 粤语探测失败时应当提示「所选线路不可用」，不能回退到同 provider 的普通话。
+export function lineRequestOptions(requestedLine = '') {
+  return { strict: Boolean(String(requestedLine || '')) }
+}
+
 // 起播集：有续播用续播，否则用原站默认集，再否则用列表第一集。
 // resumeIdx 为 null 表示没有续播记录——不能把它当成第 0 集。
 export function pickStartEpisode(episodes, { resumeIdx = null, originDefaultIdx = null } = {}) {

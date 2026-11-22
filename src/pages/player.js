@@ -8,7 +8,7 @@ import { proxyReady, proxyShowFresh, resolvePlay, reportPlaybackResult, fetchLin
 import { authReady, fetchShowProgress, flushSavedProgress, saveProgress } from '../auth.js'
 import { openSettings } from '../settings-panel.js'
 import { createPictureClickHandlers, didTouchMove } from '../player-gestures.js'
-import { nextEpisodeAfter, rankPlayableLines, sampleStall, shouldHandlePlaybackShortcut, shouldShowNextCue, lineKeyOfOption, mergeLineOptionsList, pickStartEpisode } from '../player-policy.js'
+import { nextEpisodeAfter, rankPlayableLines, sampleStall, shouldHandlePlaybackShortcut, shouldShowNextCue, lineKeyOfOption, lineRequestOptions, mergeLineOptionsList, pickStartEpisode } from '../player-policy.js'
 import {
   FILL_MODES,
   clampRate,
@@ -1461,6 +1461,8 @@ async function play(idx, autoplay = true, requestedLine = '', { fromEpisode = nu
   await proxyReady
   if (generation !== playGeneration) return
   const fresh = await resolvePlay(show.id, ep.idx, requestedLine, {
+    // 手选线路严格按点的这一条解析，粤语失败就提示不可用，不回退到普通话。
+    ...lineRequestOptions(requestedLine),
     quality: fromEpisode == null && !sameEpisode ? 1080 : actualQuality || 1080,
     preferred,
     signal: requestSignal,
@@ -1484,16 +1486,20 @@ async function play(idx, autoplay = true, requestedLine = '', { fromEpisode = nu
     return
   }
   const url = fresh.url
+  const manualLineLabel = requestedLine
+    ? lineOptions(ep.idx).find((option) => lineKeyOf(option) === requestedLine)?.label || requestedLine.split('|').slice(1).join('|')
+    : ''
+  const manualLineTip = `所选线路「${manualLineLabel || requestedLine}」暂不可用，请换一条线路。`
   if (fresh?.error) {
     pending = false
     if (playRequest?.signal === requestSignal) playRequest = null
-    sayPlayStatus('这一集的片源暂时取不到（线路维护或需要会员），换一集或换一部试试。')
+    sayPlayStatus(requestedLine ? manualLineTip : '这一集的片源暂时取不到（线路维护或需要会员），换一集或换一部试试。')
     return
   }
   if (!url) {
     pending = false
     if (playRequest?.signal === requestSignal) playRequest = null
-    sayPlayStatus('这一集暂时取不到片源（可能是会员片源或线路维护），换一集或换一部试试。')
+    sayPlayStatus(requestedLine ? manualLineTip : '这一集暂时取不到片源（可能是会员片源或线路维护），换一集或换一部试试。')
     return
   }
   activeEpisode = Number(ep.idx)
