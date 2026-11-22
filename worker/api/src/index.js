@@ -109,9 +109,9 @@ async function dbRun(env, sql, ...args) {
   return env.DB.prepare(sql).bind(...args).run()
 }
 
-async function getGuest(env, force = false) {
+async function getGuest(env, force = false, immediate = false) {
   if (guest && !force) return guest
-  if (guestForceAt && Date.now() - guestForceAt < 300_000) return guest
+  if (!immediate && guestForceAt && Date.now() - guestForceAt < 300_000) return guest
   if (!force) {
     const row = await dbFirst(env, "SELECT value FROM meta WHERE key='guest_cookie'").catch(() => null)
     if (row?.value) {
@@ -142,7 +142,7 @@ async function resolveEpisode(env, ep) {
   const cookie = await getGuest(env).catch(() => '')
   let r = await signedFetch(env, `/v1/playback/resolve/${ep.token}?view=compact`, { cookie })
   if (r.status === 401 && /playback_user_session_required/.test(r.text)) {
-    const fresh = await getGuest(env, true).catch(() => '')
+    const fresh = await getGuest(env, true, true).catch(() => '')
     r = await signedFetch(env, `/v1/playback/resolve/${ep.token}?view=compact`, { cookie: fresh })
   }
   if (r.status < 200 || r.status >= 300) {
@@ -155,18 +155,38 @@ async function resolveEpisode(env, ep) {
   return value
 }
 
-async function resolveTicket(env, ticket, signal) {
+// 原站对 resolve-line 会按会话/IP 限流（实测 Worker 侧曾返回 429），
+// 本地客户端有重试，Worker 旧实现一次失败就丢掉整条官方线。这里补上有界重试。
+const RESOLVE_RETRY_STATUS = new Set([403, 429, 500, 502, 503, 504])
+async function resolveTicket(env, ticket, signal, retries = 1) {
   await throttle()
   if (signal?.aborted) throw new Error('probe_aborted')
-  const cookie = await getGuest(env).catch(() => '')
-  if (signal?.aborted) throw new Error('probe_aborted')
-  const r = await signedFetch(env, '/v1/playback/resolve-line', { method: 'POST', body: { ticket }, cookie, timeout: 7000, signal })
-  if (r.status < 200 || r.status >= 300) {
-    const err = new Error(`HTTP ${r.status} ${r.text.slice(0, 120)}`)
-    err.body = r.text
-    throw err
+  let cookie = await getGuest(env).catch(() => '')
+  let last
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    if (signal?.aborted) throw new Error('probe_aborted')
+    const r = await signedFetch(env, '/v1/playback/resolve-line', { method: 'POST', body: { ticket }, cookie, timeout: 7000, signal })
+    if (r.status >= 200 && r.status < 300) return JSON.parse(r.text)?.line?.url || ''
+    const code = (() => { try { return JSON.parse(r.text)?.code || '' } catch { return '' } })()
+    last = { status: r.status, body: r.text, code }
+    // Cloudflare 免费版每次调用最多 50 个子请求；撞限后任何重试都只会继续失败。
+    if (/too many subrequests/i.test(r.text)) break
+    const sessionExpired = (r.status === 401 || r.status === 403) && /playback_user_session_required|login_required|session/i.test(r.text)
+    if (attempt === 0 && sessionExpired) {
+      cookie = await getGuest(env, true, true).catch(() => '')
+      continue
+    }
+    if (attempt < retries && (RESOLVE_RETRY_STATUS.has(r.status) || sessionExpired)) {
+      await new Promise((resolve) => setTimeout(resolve, 300 * (attempt + 1)))
+      continue
+    }
+    break
   }
-  return JSON.parse(r.text)?.line?.url || ''
+  const err = new Error(`HTTP ${last.status} ${last.body.slice(0, 120)}`)
+  err.body = last.body
+  err.status = last.status
+  err.code = last.code
+  throw err
 }
 
 // ---------- 线路与内容指纹 ----------
@@ -278,6 +298,20 @@ async function setHealth(env, showId, provider, verdict, detail = '') {
   ).catch(() => {})
 }
 
+// 原站对 Worker 出口会限流 resolve-line（实测 429）。同一集上次验证过的直链仍可用时，
+// 用它顶上，避免只因为限流就把原站默认线路换掉。只认同一 show+集+provider+标签的记录。
+async function cachedSourceUrl(env, showId, epIdx, line) {
+  const rows = await dbAll(env, `SELECT url,label,checked_at FROM sources
+    WHERE show_id=? AND ep_idx=? AND provider=? AND status='ok' AND url IS NOT NULL AND url<>''
+    ORDER BY checked_at DESC`, showId, Number(epIdx), line.provider).catch(() => [])
+  const hit = rows.find((row) => !row.label || String(row.label) === String(line.label))
+  if (!hit) return ''
+  const checkedAt = Date.parse(String(hit.checked_at).replace(' ', 'T') + 'Z')
+  const age = Date.now() - checkedAt
+  if (!Number.isFinite(age) || age < -3_600_000 || age > 7 * 86_400_000) return ''
+  return hit.url
+}
+
 async function recordLineProbe(env, showId, provider, ok) {
   await dbRun(env,
     `INSERT INTO provider_playback_stats(show_id,provider,successes,failures,updated_at) VALUES(?,?,?,?,datetime('now'))
@@ -377,6 +411,10 @@ async function playUrl(env, showId, idx, requestedLine = '', targetQuality = 0, 
     stats: successfulProviders.get(line.provider),
   })), successfulProviders).filter((line) => health.get(line.provider)?.verdict !== 'dup')
   const requestedHit = requestedLine ? lines.find((line) => matchesLineKey(line, requestedLine)) : null
+  if (!requestedLine) {
+    const at = lines.findIndex((line) => line.originDefault)
+    if (at > 0) lines.unshift(lines.splice(at, 1)[0])
+  }
   if (requestedLine) {
     if (!requestedHit) throw new Error('所选线路在本集不可用')
     const at = lines.indexOf(requestedHit)
@@ -391,17 +429,32 @@ async function playUrl(env, showId, idx, requestedLine = '', targetQuality = 0, 
   const tried = []
   const probeOne = async (line, signal) => {
     let url = line.url
+    let fromCache = false
     if (!url && line.ticket) {
-      try { url = await resolveTicket(env, line.ticket, signal) } catch (error) {
+      try { url = await resolveTicket(env, line.ticket, signal, line.originDefault ? 2 : 1) } catch (error) {
         const body = String(error.body || error.message || '')
         const member = /playback_user_session_required|login_required/.test(body)
-        if (member) await setHealth(env, showId, line.provider, 'member', '需要登录/会员')
-        return { line, ok: false, url: '', kind: '', error: member ? 'member' : 'resolve_failed' }
+        if (member) {
+          await setHealth(env, showId, line.provider, 'member', '需要登录/会员')
+          return { line, ok: false, url: '', kind: '', error: 'member' }
+        }
+        const cached = (error.status === 429 || /too many subrequests/i.test(body))
+          ? await cachedSourceUrl(env, showId, idx, line)
+          : ''
+        if (cached) { url = cached; fromCache = true } else {
+          const detail = error.status ? `resolve_http_${error.status}${error.code ? `_${error.code}` : ''}` : `resolve_${String(error.message).slice(0, 40)}`
+          return { line, ok: false, url: '', kind: '', error: detail }
+        }
       }
     }
     if (!url) return { line, ok: false, url: '', kind: '', error: 'no_url' }
     const info = await inspectSource(url, signal)
-    if (!info.ok) return { line, ok: false, url, ...info }
+    if (!info.ok) {
+      // 线路已经解析出真实地址，但 Worker 自己的出口拿不到媒体。
+      // 这是探测器的网络限制，不等于浏览器也拿不到；留给选线阶段做未验证兜底。
+      const soft = ['probe_timeout', 'probe_budget_exceeded', 'probe_aborted', 'fetch_failed'].includes(info.error)
+      return { line, ok: false, url, ...info, tentative: soft || undefined }
+    }
     const rows = await dbAll(env, 'SELECT ep_idx, kind, fingerprint FROM sources WHERE show_id=? AND provider=? AND fingerprint IS NOT NULL', showId, line.provider).catch(() => [])
     // Old HLS hashes were invalid; old MP4 URL hashes remain comparable within MP4 only.
     const comparableFingerprint = (kind, fingerprint) => {
@@ -423,9 +476,15 @@ async function playUrl(env, showId, idx, requestedLine = '', targetQuality = 0, 
         return { ...info, line, url, ok: false, error: 'same_as_first_episode' }
       }
     }
-    return { line, url, ...info, ok: true }
+    return { line, url, ...info, ok: true, fromCache }
   }
-  let probed = await probeCandidates(candidates.filter(Boolean), probeOne, { concurrency: 4, timeoutMs: 7000, budgetMs: 20000 })
+  // Cloudflare 免费版一次调用最多 50 个子请求：20 多条线全解析+探测必然撞限。
+  // 原站默认线路已排在最前，只探前 8 条；其余保留为「未探测」，不当成死线。
+  const MAX_PROBE_LINES = 8
+  const allCandidates = candidates.filter(Boolean)
+  const probeTargets = allCandidates.slice(0, MAX_PROBE_LINES)
+  const deferredLines = allCandidates.slice(MAX_PROBE_LINES).map((line) => ({ line, ok: false, deferred: true, error: 'probe_budget_exceeded' }))
+  let probed = (await probeCandidates(probeTargets, probeOne, { concurrency: 4, timeoutMs: 7000, budgetMs: 20000 })).concat(deferredLines)
 
   // 原站默认线路只有「超时/预算不足」这类软失败时单独再试一次：
   // 并发探测会把它挤到超时，导致默认线路被换成别的线路，与原站不一致。
@@ -446,14 +505,22 @@ async function playUrl(env, showId, idx, requestedLine = '', targetQuality = 0, 
     }
   }
   const mediaCandidates = probed.map((item) => ({ ...item.line, ...item, quality: Number(item.height || item.variantHeight) || 0 }))
+  // 原站默认线路解析出了地址、只是 Worker 出口探测超时/失败时，不要因为我们的网络
+  // 限制把用户切到别家线路：浏览器在用户自己的网络里仍可能正常播放。标记为未验证交给播放器。
+  const tentativeDefault = !requestedLine && !mediaCandidates.some((item) => item.ok && item.originDefault)
+    ? mediaCandidates.find((item) => item.originDefault && item.tentative && item.url)
+    : null
   const chosen = requestedLine
     ? mediaCandidates.find((item) => matchesLineKey(item, requestedLine) && item.ok) || selectPlayable(mediaCandidates.filter((item) => !matchesLineKey(item, requestedLine)), { preferred, targetQuality: requestedQuality })
-    : selectPlayable(mediaCandidates, { preferred, targetQuality: requestedQuality })
+    : tentativeDefault
+      ? { ...tentativeDefault, ok: true, kind: tentativeDefault.kind || (/\.m3u8(\?|$)/i.test(tentativeDefault.url) ? 'hls' : 'mp4'), mediaUrl: tentativeDefault.url, quality: 0 }
+      : selectPlayable(mediaCandidates, { preferred, targetQuality: requestedQuality })
   if (chosen) {
     const { line, mediaUrl, fingerprint: fp, kind, segments, duration, height = 0, width = 0 } = chosen
     const quality = Number(height || chosen.variantHeight) || 0
     const url = mediaUrl || chosen.url
-    await saveSource(env, showId, Number(idx), { provider: line.provider, label: line.label, url, kind, fingerprint: fp, segments, duration, quality: quality || null, status: 'ok' })
+    // 未验证线路不能写进 sources 冒充已验证片源。
+    if (!chosen.tentative) await saveSource(env, showId, Number(idx), { provider: line.provider, label: line.label, url, kind, fingerprint: fp, segments, duration, quality: quality || null, status: 'ok' })
     const value = {
       showId,
       idx: Number(idx),
@@ -469,7 +536,9 @@ async function playUrl(env, showId, idx, requestedLine = '', targetQuality = 0, 
       qualitySource: chosen.qualitySource || 'unknown',
       firstSegmentMs: chosen.firstSegmentMs ?? null,
       fingerprint: fp,
-      verified: true,
+      verified: !chosen.tentative,
+      probeDegraded: !!chosen.tentative,
+      sourceFromCache: !!chosen.fromCache,
       skip,
       options: probed.map((item) => ({
         provider: item.line.provider,

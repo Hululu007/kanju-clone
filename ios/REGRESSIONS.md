@@ -1406,3 +1406,30 @@ testToolbarDownloadButtonReplacesTheDanmakuSlot → missing-button
 - **修复版本**：0.1.19 build 30。
 - **验证边界**：同上，Swift 侧只到 packaging-only 能编出包；node 用例在真实文件系统上跑了 9 组对照（含旧实现确实误删 B 的演示）。
   **真机待验收**：①正常下载/补图后封面照常显示；②整剧删光后只删本剧封面，别的剧封面还在；③断网打开片库老记录照常补图。
+
+## WEB-REG-001 Worker 出口撞 Cloudflare 子请求上限，官方默认线被换掉（Web/Worker，非 iOS）
+
+- **现象**：`/api/play` 默认线路排序正确，但起播常回退别家；`tried` 里有 `resolve_failed`、
+  `resolve_Too many subrequests by single Worker in…`、`probe_timeout`。
+- **根因**（`worker/api/src/index.js`）：Cloudflare 免费版每次 Worker 调用最多 50 个子请求。
+  旧实现把 20 多条线路全部送去 resolve-line + 媒体探测；并发 4、7 秒超时，跑到后段就在
+  `getGuest` / `resolve-line` 处撞上限。撞限后统一报 `resolve_failed`，原站默认线路被判死，
+  `selectPlayable` 于是换到别家线路。另有：上游 429 不重试、会话过期强制刷新被 5 分钟节流挡住。
+- **修复**：
+  - 有界重试：非默认线 2 次尝试，原站默认线 3 次；429/403/5xx 退避；会话过期强制刷新不受节流挡；
+    撞到子请求上限立即停止重试。
+  - 有界探测：原站默认线路排到最前，只探测前 8 条；其余条目保留为「未探测/状态未知」，不标 dead。
+  - 兜底：429 或子请求上限时复用同一 show+集+provider+标签、7 天内验证过的直链。
+  - 默认线路拿到真实地址但 Worker 侧媒体探测超时/网络失败时，作为 `verified:false`、
+    `probeDegraded:true` 的候选交给浏览器（用户自己的网络仍可能可播），不再换成别家线路；
+    `sources` 表不写入未验证线路。
+- **复现测试**（`Tests/worker-egress.test.mjs`，Node，旧实现下先红）：
+  - `a 429 from resolve-line is retried instead of losing the official line`（红：选到备用线）
+  - `a resolved origin-default line survives a worker-side transport timeout as unverified`（红：选到备用线）
+  - `a rate-limited resolve reuses the last verified media url for the same episode`（红：选到备用线）
+  - `the subrequest limit reuses the last verified url instead of losing the official line`（红：选到备用线）
+  - `a long line list never probes more lines than the worker subrequest budget allows`（红：20 条全去解析）
+  - `a hard HTTP failure on the origin-default line still falls back to a verified line`（对照组，修复前后都绿）
+- **结果**：旧实现 5 红 1 绿；修复后全套 `node --test Tests/*.test.mjs` 82 通过 / 0 失败 / 0 跳过。
+  诊断实例 `kanju-api-diag-ken` 上线后抽查对照表前 14 部：10 部有响应的全部命中原站默认线路
+  （其中 3 部为未验证候选），未再出现「换到别家线路」。
