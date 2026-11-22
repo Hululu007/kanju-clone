@@ -9,7 +9,7 @@ import { proxyReady, proxyShowFresh, resolvePlay, reportPlaybackResult, fetchLin
 import { authReady, fetchShowProgress, flushSavedProgress, saveProgress } from '../auth.js'
 import { openSettings } from '../settings-panel.js'
 import { createPictureClickHandlers, didTouchMove } from '../player-gestures.js'
-import { nextEpisodeAfter, rankPlayableLines, sampleStall, shouldHandlePlaybackShortcut, shouldShowNextCue, lineKeyOfOption, lineRequestOptions, mergeLineOptionsList, pickStartEpisode, autoSwitchCandidates, lineLabelOfKey } from '../player-policy.js'
+import { nextEpisodeAfter, rankPlayableLines, sampleStall, shouldHandlePlaybackShortcut, shouldShowNextCue, lineKeyOfOption, lineRequestOptions, mergeLineOptionsList, pickStartEpisode, autoSwitchCandidates, autoSwitchPlan, lineLabelOfKey, needsFullLineList, playbackResumed, shouldRetrySwitchAfterRefresh, shouldScheduleRefreshRetry } from '../player-policy.js'
 import {
   FILL_MODES,
   clampRate,
@@ -358,6 +358,24 @@ let dragging = false
 
 function playing() {
   return !video.paused && !video.ended
+}
+
+// 缓冲卡死时 paused=false、currentTime 不再前进：用「最近一次真实进度推进」
+// 判断是否真的在播，补拉线路回来后才能立刻换线（2026-11-22 审核 P1-2）。
+const ADVANCE_WINDOW_MS = 1_500
+let lastAdvanceAt = 0
+let lastAdvancePosition = -1
+
+function notePlaybackAdvance() {
+  const position = video.currentTime || 0
+  if (Math.abs(position - lastAdvancePosition) >= 0.05) {
+    lastAdvancePosition = position
+    lastAdvanceAt = Date.now()
+  }
+}
+
+function playbackAdvancing() {
+  return lastAdvanceAt > 0 && Date.now() - lastAdvanceAt <= ADVANCE_WINDOW_MS
 }
 
 function popupOpen() {
@@ -1181,6 +1199,9 @@ const isHlsUrl = (value) => /\.m3u8(\?|$)/i.test(String(value || ''))
 
 function attach(url, kind = '', onFatal = () => {}, onAttached = () => {}) {
   const attempt = ++playbackAttemptId
+  // 换源/换集就重新计进度：上一集停在 500 秒，下一集从头开始不能被当成「在播」。
+  lastAdvanceAt = 0
+  lastAdvancePosition = -1
   if (hls) {
     hls.destroy()
     hls = null
@@ -1217,6 +1238,34 @@ async function ensureLines(epIdx) {
   if (linesByEp.has(Number(epIdx))) return
   const j = await fetchLines(show.id, epIdx).catch(() => null)
   if (j) mergeLineOptions(epIdx, j.options)
+}
+
+// 快取起播返回的线路列表只是「库里已验证的部分线路」：标记出来，
+// 换线前补拉一次完整列表，避免把「库里没有这条线」当成「这一集没有这条线」。
+const lineListState = new Map()
+
+function markLineListPartial(epIdx) {
+  const key = Number(epIdx)
+  const state = lineListState.get(key) || { partial: false, promise: null }
+  lineListState.set(key, { ...state, partial: true })
+}
+
+async function refreshLineList(epIdx) {
+  const key = Number(epIdx)
+  const state = lineListState.get(key) || { partial: false, promise: null }
+  if (state.promise) return state.promise
+  const promise = (async () => {
+    await proxyReady
+    const j = await fetchLines(show.id, key).catch(() => null)
+    if (j) {
+      mergeLineOptions(key, j.options)
+      lineListState.set(key, { partial: false, promise: null })
+    } else {
+      lineListState.set(key, { partial: true, promise: null })
+    }
+  })()
+  lineListState.set(key, { ...state, promise })
+  return promise
 }
 
 function currentEpIdx() {
@@ -1314,36 +1363,72 @@ function scheduleStallCheck(generation) {
   }, 1_000)
 }
 
-async function switchToNextLine(generation = playGeneration) {
+async function switchToNextLine(generation = playGeneration, { afterRefresh = false } = {}) {
   if (generation !== playGeneration || switchingAutomatically || !playbackWanted ||
       document.visibilityState === 'hidden' || video.seeking || dragging || document.pictureInPictureElement) return
   pending = false
   // 只排除「当前这一条线」（provider|label），同 provider 的其他语言版本仍可尝试。
   failedLines.add(currentLineKey || `${currentProvider}|`)
-  // 候选规则（含「手选后不换语言」）放在 player-policy 里，单测覆盖同一条调用链。
-  const candidates = autoSwitchCandidates(lineOptions(currentEpIdx()), {
-    currentKey: currentLineKey,
-    currentProvider,
-    failed: failedLines,
-    manualKey: manualLineKey,
-  })
-  if (!candidates.length) {
-    if (manualLineKey) {
-      const failedLabel = lineLabelOfKey(manualLineKey) || '所选'
-      sayPlayStatus(`所选线路「${failedLabel}」播放失败，不会自动换成其他语言版本，请手动选择其他线路。`)
-    } else {
-      sayPlayStatus('当前集的其他线路也不可用，请手动选择线路。')
-    }
-    return
-  }
+  // 从算候选这一刻就占住换线锁：补拉列表最多要等 8 秒，两次恢复若都等到这里结束，
+  // 会各自对同一条备用线发一次严格解析（2026-11-22 审核 P1-2）。
   switchingAutomatically = true
   switchingGeneration = generation
-  const oldTime = video.currentTime || 0
-  const wasPlaying = playbackWanted
-  const requestedProviders = new Set(candidates.map((option) => option.provider))
-  const epIdx = currentEpIdx()
-  const ordered = rankPlayableLines(candidates, { preferred: lastSuccessfulProvider, targetQuality: actualQuality || 1080 })
   try {
+    const epIdx = currentEpIdx()
+    // 这一集的清单如果只是快取起播带回的「库里已验证线路」，换线时要补拉完整清单。
+    // 补拉与换线并行：已经有候选就立刻换线；只有零候选时才在下面有界等待。
+    const partial = Boolean(lineListState.get(Number(epIdx))?.partial)
+    const refresh = partial && !afterRefresh ? refreshLineList(epIdx) : null
+    // 候选规则（含「手选后不换语言」）放在 player-policy 里，单测覆盖同一条调用链。
+    const autoSwitch = () => autoSwitchCandidates(lineOptions(epIdx), {
+      currentKey: currentLineKey,
+      currentProvider,
+      failed: failedLines,
+      manualKey: manualLineKey,
+    })
+    let candidates = autoSwitch()
+    const plan = autoSwitchPlan({
+      candidateCount: candidates.length,
+      partial,
+      afterRefresh,
+    })
+    if (plan === 'await-refresh') {
+      await Promise.race([refresh, new Promise((resolve) => setTimeout(resolve, 8_000))])
+      if (generation !== playGeneration) return
+      candidates = autoSwitch()
+    }
+    // 手上的候选（可能只是快取里的那几条）全试过仍失败、或等完窗口仍没有候选时，
+    // 补拉可能带回还没试过的新线路：只要还没真的播起来，就挂一次「补拉回来再试」，
+    // 不能提示完「所有线路失败」就永不重试（2026-11-22 审核 P1-1）。
+    const scheduleRetryAfterRefresh = () => {
+      if (!refresh || !shouldScheduleRefreshRetry({ partial, afterRefresh })) return false
+      void refresh.then(() => {
+        if (generation !== playGeneration) return
+        // 缓冲卡死时 paused=false 但进度不动，不能被当成已恢复（2026-11-22 审核 P1-2）。
+        const resumed = playbackResumed({ paused: video.paused, ended: video.ended, advancing: playbackAdvancing() })
+        if (shouldRetrySwitchAfterRefresh({ wanted: playbackWanted, switching: switchingAutomatically, playing: resumed })) {
+          void switchToNextLine(generation, { afterRefresh: true })
+        }
+      })
+      return true
+    }
+    if (!candidates.length) {
+      if (!afterRefresh) {
+        if (scheduleRetryAfterRefresh()) {
+          sayPlayStatus('正在重新获取线路列表…')
+        } else if (manualLineKey) {
+          const failedLabel = lineLabelOfKey(manualLineKey) || '所选'
+          sayPlayStatus(`所选线路「${failedLabel}」播放失败，不会自动换成其他语言版本，请手动选择其他线路。`)
+        } else {
+          sayPlayStatus('当前集的其他线路也不可用，请手动选择线路。')
+        }
+      }
+      return
+    }
+    const oldTime = video.currentTime || 0
+    const wasPlaying = playbackWanted
+    const requestedProviders = new Set(candidates.map((option) => option.provider))
+    const ordered = rankPlayableLines(candidates, { preferred: lastSuccessfulProvider, targetQuality: actualQuality || 1080 })
     for (const candidate of ordered.slice(0, MAX_AUTO_ALTERNATIVES)) {
       if (generation !== playGeneration || !playbackWanted) return
       const controller = new AbortController()
@@ -1425,7 +1510,11 @@ async function switchToNextLine(generation = playGeneration) {
       sayPlayStatus(`已自动切换到 ${candidate.label} 线路`)
       return
     }
-    sayPlayStatus('当前集所有可用线路均播放失败，请手动选择线路。')
+    if (scheduleRetryAfterRefresh()) {
+      sayPlayStatus('当前线路都不可用，正在重新获取线路列表…')
+    } else {
+      sayPlayStatus('当前集所有可用线路均播放失败，请手动选择线路。')
+    }
   } finally {
     if (switchingGeneration === generation) {
       switchingAutomatically = false
@@ -1484,9 +1573,14 @@ async function play(idx, autoplay = true, requestedLine = '', { fromEpisode = nu
   }).catch(() => null)
   if (generation !== playGeneration) return
   if (playRequest?.signal === requestSignal) playRequest = null
-  if (!fresh?.options?.length) void ensureLines(ep.idx).then(() => {
-    if (generation === playGeneration) renderLineList()
-  })
+  // 快取起播的线路列表可能只是库里已验证的那几条：先补拉一次完整列表（后台进行，不挡起播）。
+  if (needsFullLineList(fresh)) {
+    const partial = Boolean(fresh?.optionsPartial)
+    if (partial) markLineListPartial(ep.idx)
+    void (partial ? refreshLineList(ep.idx) : ensureLines(ep.idx)).then(() => {
+      if (generation === playGeneration) renderLineList()
+    })
+  }
   if (!fresh) {
     pending = false
     if (playRequest?.signal === requestSignal) playRequest = null
@@ -1672,6 +1766,7 @@ function runSkip() {
 }
 
 video.addEventListener('timeupdate', () => {
+  notePlaybackAdvance()
   pumpDm()
   paintProgress()
   if (!mediaStarted || pending || switchingAutomatically || activeEpisode !== currentEpIdx()) return

@@ -108,6 +108,44 @@ export function shouldShowNextCue({ duration, currentTime, current, cancelled })
   return Number.isFinite(duration) && duration > 0 && duration - currentTime <= 10 && current !== cancelled
 }
 
+// 快取起播只带「库里已验证过的线路」，不是这一集的完整线路清单：
+// 播放器必须再补拉一次 /api/lines，否则自动换线会以为没有候选、线路菜单也会少项。
+export function needsFullLineList(result) {
+  if (result?.optionsPartial) return true
+  return !result?.options?.length
+}
+
+// 自动换线的等待策略（2026-11-22 审核 P1-2）。
+// 快取起播带回的线路列表只是库内已验证的那几条，不是整集清单。只有「手上一个可用
+// 备用线都没有」时才值得有界等待补拉；已经有候选就立刻换线，不能被补拉拖慢。
+export function autoSwitchPlan({ candidateCount = 0, partial = false, afterRefresh = false } = {}) {
+  if (candidateCount > 0) return 'switch'
+  if (!partial) return 'give-up'
+  if (afterRefresh) return 'give-up'
+  return 'await-refresh'
+}
+
+// 补拉在等待窗口（8 秒）之后才回来时，播放器可能已经提示过「没有可用线路」。
+// 只要还没播起来、也没有另一次换线在跑，就要用补到的列表再试一次，不能提示完就放弃。
+export function shouldRetrySwitchAfterRefresh({ wanted = true, switching = false, playing = false } = {}) {
+  return Boolean(wanted && !switching && !playing)
+}
+
+// 换线时手上的清单如果只是「库里已验证的部分清单」，候选全失败后补拉可能带回
+// 还没试过的新线路：只要补拉还在跑，就必须登记一次续接，不能因为起初有几条
+// 候选就直接判定这一集没有可用线路（2026-11-22 审核 P1-1）。
+// afterRefresh 表示这次本身就是续接后的重试，只允许再试一次，避免循环。
+export function shouldScheduleRefreshRetry({ partial = false, afterRefresh = false } = {}) {
+  return Boolean(partial && !afterRefresh)
+}
+
+// 「已恢复播放」不能只看 paused/ended：缓冲卡死时 paused=false、currentTime 不动，
+// 补拉回来的可用线路会被误判成「已经在播」而错过立即换线（2026-11-22 审核 P1-2）。
+// advancing 表示最近确实有进度推进，由播放器按时间窗计算后传入。
+export function playbackResumed({ paused = true, ended = false, advancing = false } = {}) {
+  return !paused && !ended && Boolean(advancing)
+}
+
 export function sampleStall(previous, { now, position, suspended }) {
   if (suspended) return null
   const since = !previous || Math.abs(position - previous.position) >= 0.05 ? now : previous.since
