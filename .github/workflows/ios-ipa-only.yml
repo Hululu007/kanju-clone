@@ -1,0 +1,90 @@
+name: Package the unsigned IPA only
+
+on:
+  workflow_dispatch:
+    inputs:
+      code_ref:
+        description: '要出包的 commit SHA（默认 main）'
+        required: false
+        default: 'main'
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: macos-15
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.code_ref }}
+
+      - name: Record what is being built
+        run: |
+          git rev-parse HEAD | tee build-info.log
+          git log -1 --format='%s' | tee -a build-info.log
+          grep -n 'MARKETING_VERSION\|CURRENT_PROJECT_VERSION' ios/project.yml | tee -a build-info.log
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        working-directory: ios
+        run: xcodegen generate
+
+      - name: Build Release for device (unsigned)
+        working-directory: ios
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project ZhuijuAI.xcodeproj \
+            -scheme ZhuijuAI \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build | tee xcodebuild.log
+
+      - name: Package unsigned IPA
+        working-directory: ios
+        run: |
+          set -euo pipefail
+          APP="build/Build/Products/Release-iphoneos/ZhuijuAI.app"
+          test -d "$APP"
+          VERSION=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Info.plist")
+          BUILD=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP/Info.plist")
+          test "$VERSION" = "0.1.19"
+          test "$BUILD" = "30"
+          NAME="ZhuijuAI-${VERSION}-build${BUILD}-unsigned"
+          mkdir Payload
+          cp -R "$APP" Payload/
+          /usr/bin/zip -qry "${NAME}.ipa" Payload
+          shasum -a 256 "${NAME}.ipa" | tee "${NAME}.ipa.sha256"
+          echo "version=$VERSION build=$BUILD" | tee ipa-info.log
+          git rev-parse HEAD | tee -a ipa-info.log
+
+      - name: Upload the IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: ZhuijuAI-unsigned-ipa-only
+          path: |
+            ios/*.ipa
+            ios/*.ipa.sha256
+            ios/ipa-info.log
+            build-info.log
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-package-build-log
+          path: ios/xcodebuild.log
+          if-no-files-found: ignore
+          retention-days: 7

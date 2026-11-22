@@ -4,6 +4,7 @@ import { icon } from '../icons.js'
 import { shell, bindShell, initTheme, pageHead, posterCard, showToast } from '../shell.js'
 import { findShow, shows } from '../data.js'
 import { u } from '../base.js'
+import { recordWatchedShow } from '../watch-history.js'
 import { proxyReady, proxyShowFresh, resolvePlay, reportPlaybackResult, fetchLines, fetchDanmaku, sendDanmaku } from '../runtime.js'
 import { authReady, fetchShowProgress, flushSavedProgress, saveProgress } from '../auth.js'
 import { openSettings } from '../settings-panel.js'
@@ -1695,10 +1696,7 @@ function remember(idx) {
   const position = video.currentTime || 0
   const duration = video.duration || null
   const name = epLabel(idx)
-  try {
-    const hist = JSON.parse(localStorage.getItem('kj-history') || '[]')
-    localStorage.setItem('kj-history', JSON.stringify([show.id, ...hist.filter((x) => x !== show.id)].slice(0, 12)))
-  } catch {}
+  recordWatchedShow(show.id)
   try {
     const progress = JSON.parse(localStorage.getItem('kj-progress') || '{}')
     progress[show.id] = { idx, label: name, position, duration, updated: Date.now() }

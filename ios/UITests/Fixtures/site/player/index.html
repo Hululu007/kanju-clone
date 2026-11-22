@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>测试剧 - 第19集 - 追剧AI</title>
+<style>
+  :root { color-scheme: dark; }
+  html, body { margin: 0; padding: 0; background: #07131b; color: #e8f1f5;
+    font-family: -apple-system, "PingFang SC", "Helvetica Neue", sans-serif; }
+  /* 照抄站点移动端布局：顶栏 60px + 从它下面开始的滚动容器（REG-005 的现场） */
+  .page-head { position: fixed; top: 0; left: 0; right: 0; height: 60px; z-index: 60;
+    display: flex; align-items: center; gap: 10px; padding: 0 12px;
+    background: linear-gradient(180deg, rgba(10,20,28,.97), rgba(10,20,28,.9)); }
+  .ph-back { color: #9fb4bf; text-decoration: none; font-size: 13px; }
+  .ph-title { flex: 1; margin: 0; font-size: 15px; font-weight: 700; }
+  .ph-menu, .icon-btn, .pp-tool, .fx-btn { appearance: none; border: 1px solid rgba(255,255,255,.18);
+    background: rgba(255,255,255,.06); color: #e8f1f5; font-size: 12px; font-weight: 600;
+    padding: 8px 12px; border-radius: 9px; }
+  .main { height: calc(100vh - 60px); margin-top: 60px; overflow-y: auto; overflow-x: hidden;
+    -webkit-overflow-scrolling: touch; }
+  .pools { display: flex; gap: 8px; padding: 10px 12px; }
+  #player { position: relative; width: 100%; aspect-ratio: 16/9; background: #000; overflow: hidden; }
+  #player video { width: 100%; height: 100%; display: block; background: #000; object-fit: contain; }
+  .p-label { position: absolute; left: 10px; top: 8px; font-size: 12px; color: #cfe3ec;
+    background: rgba(0,0,0,.45); padding: 3px 8px; border-radius: 8px; }
+  .pp-toolbar { display: flex; gap: 8px; padding: 10px 12px; flex-wrap: wrap; }
+  .pp-settings, .line-bar { padding: 10px 12px; background: rgba(255,255,255,.04); }
+  .pp-hint { padding: 6px 12px; min-height: 2.6em; display: flex; align-items: center;
+    color: #9fb4bf; font-size: 12px; }
+  .detail-info { padding: 8px 12px; }
+  .detail-info h1 { margin: 0; font-size: 17px; }
+  .ep-head { display: flex; align-items: center; gap: 10px; padding: 12px 12px 0; }
+  .ep-title { flex: 1; margin: 0; font-size: 15px; font-weight: 700; }
+  .ep-total { font-size: 12px; font-weight: 400; color: #9fb4bf; }
+  .cast-btn { appearance: none; border: 1px solid rgba(255,255,255,.18); background: rgba(255,255,255,.06);
+    color: #e8f1f5; font-size: 12px; font-weight: 600; padding: 8px 12px; border-radius: 9px; }
+  .ep-grid { display: flex; flex-wrap: wrap; gap: 8px; padding: 10px 12px 24px; }  .ep { appearance: none; border: 1px solid rgba(255,255,255,.16); background: rgba(255,255,255,.05);
+    color: #e8f1f5; font-size: 12px; padding: 9px 12px; border-radius: 9px; }
+  .ep.on { background: rgba(22,224,157,.2); color: #16e09d; border-color: rgba(22,224,157,.5); }
+  .tabbar { position: fixed; left: 0; right: 0; bottom: 0; height: 52px; display: flex;
+    background: rgba(10,20,28,.96); border-top: 1px solid rgba(255,255,255,.08); }
+  .tab { flex: 1; appearance: none; border: 0; background: transparent; color: #9fb4bf; font-size: 12px; }
+</style>
+</head>
+<body>
+<header class="page-head">
+  <a class="ph-back" href="/index.html">返回</a>
+  <h1 class="ph-title">测试剧</h1>
+  <button class="icon-btn" type="button" data-action="settings" aria-label="设置">设置</button>
+</header>
+<div class="main">
+  <div class="pools"><button class="fx-btn" id="fxPlay" type="button">开始播放测试片</button></div>
+  <section class="player" id="player">
+    <video id="video" playsinline preload="metadata" poster="" muted></video>
+    <span class="p-label" id="playerLabel">测试剧 · 第19集</span>
+  </section>
+  <div class="pp-toolbar" id="playTools">
+    <button class="pp-tool" id="settingsBtn" type="button">显示设置</button>
+    <button class="pp-tool on" id="dmBtn" type="button">弹幕 开</button>
+    <button class="pp-tool" id="pipBtn" type="button">画中画</button>
+    <button class="pp-tool" id="ppDownload" type="button" data-pw-act="dl">下载</button>
+    <button class="pp-tool" id="nextEpBtn" type="button">下一集</button>
+  </div>
+  <div class="pp-settings" id="settingsPanel" hidden></div>
+  <div class="line-bar" id="lineBar" hidden></div>
+  <p class="pp-hint" id="playHint">点「开始播放测试片」播放这一集</p>
+  <div class="detail-info"><h1>测试剧</h1></div>
+  <!-- 站点播放页里，选集区标题旁边就是那个投屏入口：真机上它在折叠线以上，很显眼 -->
+  <div class="ep-head">
+    <h2 class="ep-title">选集 <span class="ep-total">全 5 集</span></h2>
+    <button class="cast-btn" id="castBtn" type="button" data-action="cast" aria-label="投屏到电视">投屏</button>
+  </div>
+  <div class="ep-grid" id="epGrid">
+    <button class="ep on" type="button" data-ep="19">第19集</button>
+    <button class="ep" type="button" data-ep="20">第20集</button>
+    <button class="ep" type="button" data-ep="21">第21集</button>
+    <button class="ep" type="button" data-ep="22">第22集</button>
+    <button class="ep" type="button" data-ep="23">第23集</button>
+  </div>
+</div>
+<nav class="tabbar"><button class="tab" type="button">首页</button><button class="tab" type="button">我的</button></nav>
+<script>
+  /* 受控夹具站自己的账号 token：注入层的下载门控读的就是这一份（无账号、同源）。 */
+  try { localStorage.setItem('kj-auth-token', 'fixture-token'); } catch (error) {}
+  document.getElementById('fxPlay').addEventListener('click', function () {
+    var video = document.getElementById('video');
+    video.src = '/media/fixture.mp4';
+    video.muted = true;
+    var started = video.play();
+    if (started && started.catch) started.catch(function () {});
+  });
+</script>
+</body>
+</html>

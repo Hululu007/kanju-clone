@@ -10,6 +10,7 @@ import {
   showToast,
 } from '../shell.js'
 import { u } from '../base.js'
+import { readWatchHistory } from '../watch-history.js'
 import { CATS, ROWS, allByPool, shows } from '../data.js'
 import { proxyReady, proxyShow, proxyHomeFeed, proxyList } from '../runtime.js'
 import { fetchUserProgress, getCachedUser } from '../auth.js'
@@ -505,8 +506,7 @@ async function loadContinue() {
       progress: { idx: row.idx, position: row.position, duration: row.duration },
     }))
   } else {
-    let ids = []
-    try { ids = JSON.parse(localStorage.getItem('kj-history') || '[]') } catch {}
+    const ids = readWatchHistory()
     if (!ids.length) return
     const progress = readProgress()
     const local = new Map(shows.map((s) => [s.id, s]))

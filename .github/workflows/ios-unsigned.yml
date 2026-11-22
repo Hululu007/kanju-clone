@@ -2,6 +2,12 @@ name: Build unsigned iOS IPA
 
 on:
   workflow_dispatch:
+    inputs:
+      ui_smoke:
+        description: '运行模拟器回归和截图关卡，false 时只运行 Node 回归并出 IPA'
+        type: choice
+        options: ['true', 'false']
+        default: 'true'
   push:
     paths:
       - 'ios/**'
@@ -19,7 +25,7 @@ jobs:
         run: brew install xcodegen
 
       - name: Run bootstrap regression
-        run: node ios/Tests/bootstrap.test.mjs
+        run: node --test ios/Tests/*.test.mjs Tests/*.test.mjs
 
       - name: Generate Xcode project
         working-directory: ios
@@ -33,17 +39,51 @@ jobs:
           /usr/libexec/PlistBuddy -c 'Add :NSAppTransportSecurity:NSAllowsLocalNetworking bool true' FixtureInfo.plist
           xcodegen generate
 
+      # 后台下载的集成测试由系统的 nsurlsessiond 执行传输。headless 模拟器里这个服务
+      # 偶尔没有就绪，后台会话会直接以 NSCocoaErrorDomain 4097（XPC 连不上）失败 —— 那是
+      # 环境问题，不是本地网络或产品逻辑（同一地址前台请求正常）。这里把它叫起来并留下状态，
+      # 测试本身也会区分「环境没起来」和「传输真的错了」。
+      - name: Wake the simulator background networking daemon
+        if: github.event_name != 'workflow_dispatch' || inputs.ui_smoke != 'false'
+        run: |
+          set -uo pipefail
+          DEVICE=$(xcrun simctl list devices available -j | python3 -c 'import json,sys; d=json.load(sys.stdin); print(next(x["udid"] for group in d["devices"].values() for x in group if x["name"].startswith("iPhone")))')
+          echo "device=$DEVICE" > nsurlsessiond.log
+          xcrun simctl bootstatus "$DEVICE" -b >> nsurlsessiond.log 2>&1 || true
+          echo "--- before ---" >> nsurlsessiond.log
+          xcrun simctl spawn "$DEVICE" launchctl print system/com.apple.nsurlsessiond >> nsurlsessiond.log 2>&1 || true
+          xcrun simctl spawn "$DEVICE" launchctl kickstart -k system/com.apple.nsurlsessiond >> nsurlsessiond.log 2>&1 || true
+          xcrun simctl spawn "$DEVICE" launchctl bootstrap system /System/Library/LaunchDaemons/com.apple.nsurlsessiond.plist >> nsurlsessiond.log 2>&1 || true
+          open -a Simulator --args -CurrentDeviceUDID "$DEVICE" >> nsurlsessiond.log 2>&1 || true
+          sleep 5
+          echo "--- after ---" >> nsurlsessiond.log
+          xcrun simctl spawn "$DEVICE" launchctl print system/com.apple.nsurlsessiond >> nsurlsessiond.log 2>&1 || true
+          xcrun simctl spawn "$DEVICE" launchctl list >> nsurlsessiond.log 2>&1 || true
+          cat nsurlsessiond.log
+
       # The playback tests only use the Objective-C WKWebView APIs (see PlaybackTests.javaScript),
       # so no WebKit Swift overlay (libswiftWebKit.dylib) is needed at runtime. Do not reintroduce
       # a manual copy of that dylib: it does not exist in the Xcode 16.x simulator toolchain.
       - name: Run WKWebView playback regression on simulator
+        if: github.event_name != 'workflow_dispatch' || inputs.ui_smoke != 'false'
         working-directory: ios
         run: |
           set -euo pipefail
           DEVICE=$(xcrun simctl list devices available -j | python3 -c 'import json,sys; d=json.load(sys.stdin); print(next(x["udid"] for group in d["devices"].values() for x in group if x["name"].startswith("iPhone")))')
           python3 -m http.server 8765 --bind 127.0.0.1 --directory Tests > fixture-server.log 2>&1 &
-          xcodebuild -project ZhuijuAI.xcodeproj -scheme ZhuijuAI -destination "platform=iOS Simulator,id=$DEVICE" -derivedDataPath build CODE_SIGNING_ALLOWED=NO INFOPLIST_FILE=FixtureInfo.plist build-for-testing | tee simulator-build.log
-          xcodebuild -project ZhuijuAI.xcodeproj -scheme ZhuijuAI -destination "platform=iOS Simulator,id=$DEVICE" -derivedDataPath build -resultBundlePath playback-tests.xcresult CODE_SIGNING_ALLOWED=NO test-without-building | tee simulator-tests.log
+          # 暂停/继续竞态用的受控慢速源（进程外：进程内 NWListener 会被 iOS 本地网络隐私
+          # 拦掉入站连接）。日志进 artifact，用来证明测试真的连上了、真的收到了字节。
+          python3 Tests/Fixtures/controlled_source.py --port 8766 > controlled-source.log 2>&1 &
+          for i in $(seq 1 40); do
+            if curl -sf -o /dev/null http://127.0.0.1:8766/health; then break; fi
+            sleep 0.5
+          done
+          curl -sS -o /dev/null -w 'controlled-source health %{http_code}\n' http://127.0.0.1:8766/health | tee -a controlled-source.log
+          # 模拟器包按 Xcode 默认做 ad-hoc 签名（不要 CODE_SIGNING_ALLOWED=NO）：
+          # 后台会话要连 nsurlsessiond 的 XPC 服务，未签名的测试宿主会被拒绝（4097）。
+          xcodebuild -project ZhuijuAI.xcodeproj -scheme ZhuijuAI -destination "platform=iOS Simulator,id=$DEVICE" -derivedDataPath build CODE_SIGN_IDENTITY=- CODE_SIGNING_REQUIRED=NO INFOPLIST_FILE=FixtureInfo.plist build-for-testing | tee simulator-build.log
+          codesign -dv --verbose=2 build/Build/Products/Debug-iphonesimulator/ZhuijuAI.app 2>&1 | tee -a simulator-build.log || true
+          xcodebuild -project ZhuijuAI.xcodeproj -scheme ZhuijuAI -destination "platform=iOS Simulator,id=$DEVICE" -derivedDataPath build -resultBundlePath playback-tests.xcresult CODE_SIGN_IDENTITY=- CODE_SIGNING_REQUIRED=NO -only-testing:ZhuijuAITests test-without-building | tee simulator-tests.log
           xcrun xcresulttool get test-results summary --path playback-tests.xcresult | tee simulator-tests-summary.log
 
       - name: Build Release for device
@@ -82,8 +122,97 @@ jobs:
             ios/ZhuijuAI-unsigned.ipa.sha256
           retention-days: 14
 
+      # ---- 出包关卡：真启动 App、真点页面、逐张截图 ----------------------------------
+      # 页面来自同机受控夹具站（无账号、不连公网），片源是真 mp4，所以截图里有真画面。
+      - name: Serve the controlled fixture site
+        if: always() && (github.event_name != 'workflow_dispatch' || inputs.ui_smoke != 'false')
+        working-directory: ios
+        run: |
+          set -uo pipefail
+          # 上一步给 XCTest 起的 python3 -m http.server 8765 可能还占着端口：它把根目录
+          # 指向 ios/Tests，会把 UI 夹具页答成 404（run44272465791 的 red 就是这个：
+          # fixture page 404 → 页面没有「开始播放测试片」也找不到批量入口）。
+          lsof -ti tcp:8765 | xargs -r kill -9 || true
+          sleep 1
+          mkdir -p UITests/Fixtures/site/media
+          ffmpeg -y -hide_banner -loglevel error \
+            -f lavfi -i testsrc2=size=640x480:rate=24 \
+            -f lavfi -i sine=frequency=440:sample_rate=44100 \
+            -t 6 -c:v libx264 -pix_fmt yuv420p -c:a aac -movflags +faststart \
+            UITests/Fixtures/site/media/fixture.mp4
+          nohup python3 UITests/Fixtures/fixture_server.py --root UITests/Fixtures/site --port 8765 \
+            > fixture-site.log 2>&1 &
+          for i in $(seq 1 60); do
+            if curl -sf -o /dev/null http://127.0.0.1:8765/player/index.html; then break; fi
+            sleep 0.5
+          done
+          page=$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:8765/player/index.html)
+          media=$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:8765/media/fixture.mp4)
+          echo "fixture page $page"
+          echo "fixture media $media"
+          # 夹具站没真起来就直接红：否则 UI 测试会拿一个 404 页去点，然后报一堆像产品 bug 的红
+          test "$page" = "200"
+          test "$media" = "200"
+
+      # 这一条是真门禁：App 起不来、页面点不动、少一档画面模式都算失败。
+      # 批量下载那一项在下载队列合入前会如实变红（没有 skip 掩护）。
+      - name: Run the app UI smoke and shoot every screen
+        id: ui_smoke
+        if: always() && (github.event_name != 'workflow_dispatch' || inputs.ui_smoke != 'false')
+        working-directory: ios
+        run: |
+          set -o pipefail
+          DEVICE=$(xcrun simctl list devices available -j | python3 -c 'import json,sys; d=json.load(sys.stdin); print(next(x["udid"] for group in d["devices"].values() for x in group if x["name"].startswith("iPhone")))')
+          echo "device=$DEVICE" | tee ui-smoke.log
+          xcrun simctl boot "$DEVICE" >/dev/null 2>&1 || true
+          xcrun simctl bootstatus "$DEVICE" -b >> ui-smoke.log 2>&1 || true
+          xcodebuild -project ZhuijuAI.xcodeproj -scheme ZhuijuAI \
+            -destination "platform=iOS Simulator,id=$DEVICE" \
+            -derivedDataPath build \
+            -resultBundlePath ui-smoke.xcresult \
+            CODE_SIGN_IDENTITY=- CODE_SIGNING_REQUIRED=NO INFOPLIST_FILE=FixtureInfo.plist \
+            -only-testing:ZhuijuAIUITests \
+            test-without-building 2>&1 | tee -a ui-smoke.log
+          xcrun xcresulttool get test-results summary --path ui-smoke.xcresult \
+            | tee ui-smoke-summary.log
+
+      # 导出截图本身也要能被审：少一张必需图就非零退出。
+      - name: Export the screenshots as PNG
+        if: always() && (github.event_name != 'workflow_dispatch' || inputs.ui_smoke != 'false')
+        working-directory: ios
+        run: |
+          set -uo pipefail
+          if [ -d ui-smoke.xcresult ]; then
+            # 空白/全黑检查要 Pillow；装不上就退化成人工看图（脚本里已写明）
+            python3 -m pip install --quiet pillow >> ui-screenshots-export.log 2>&1 || true
+            python3 scripts/export-ui-screenshots.py \
+              --xcresult ui-smoke.xcresult --output ui-screenshots \
+              --run ${{ github.run_id }} --sha ${{ github.sha }} | tee -a ui-screenshots-export.log
+            status=${PIPESTATUS[0]}
+            echo "export-exit=$status" | tee -a ui-screenshots-export.log
+            # 少一张必需图 / 有空白图 → 这一步本身必须红，不能只留一行字
+            exit "$status"
+          else
+            echo 'no ui-smoke.xcresult: the UI smoke step did not get to run (that step already failed, so this one does not add a second red)' | tee -a ui-screenshots-export.log
+          fi
+
+      - name: Upload the UI smoke screenshots
+        if: always() && (github.event_name != 'workflow_dispatch' || inputs.ui_smoke != 'false')
+        uses: actions/upload-artifact@v4
+        with:
+          # 固定名 + commit/run 绑定：审核时 gh run download 一次就能对上这一轮
+          name: ZhuijuAI-ui-smoke-${{ github.sha }}-run${{ github.run_id }}
+          path: |
+            ios/ui-screenshots
+            ios/ui-smoke.xcresult
+            ios/ui-smoke.log
+            ios/ui-smoke-summary.log
+            ios/ui-screenshots-export.log
+            ios/fixture-site.log
+          retention-days: 14
+
       - name: Upload playback test evidence
-        if: always()
+        if: always() && (github.event_name != 'workflow_dispatch' || inputs.ui_smoke != 'false')
         uses: actions/upload-artifact@v4
         with:
           name: ZhuijuAI-playback-tests
@@ -92,12 +221,13 @@ jobs:
             ios/simulator-tests.log
             ios/simulator-tests-summary.log
             ios/fixture-server.log
+            ios/controlled-source.log
           retention-days: 7
 
       # Runs in its own step: a failing xcodebuild stops the script above (set -e),
       # so diagnostics must live where they still execute.
       - name: Export test diagnostics
-        if: failure()
+        if: failure() && (github.event_name != 'workflow_dispatch' || inputs.ui_smoke != 'false')
         working-directory: ios
         run: |
           set +e

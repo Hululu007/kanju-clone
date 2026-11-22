@@ -122,7 +122,7 @@ final class WebViewController: UIViewController {
         offlineView.isHidden = true
         offlineView.translatesAutoresizingMaskIntoConstraints = false
 
-        offlineLabel.text = "连不上 追剧AI\n请检查网络后重试"
+        offlineLabel.text = "连不上 阿噗影视\n请检查网络后重试"
         offlineLabel.textColor = .white
         offlineLabel.font = .preferredFont(forTextStyle: .body)
         offlineLabel.numberOfLines = 0

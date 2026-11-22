@@ -1,17 +1,33 @@
 import Foundation
+import UIKit
+import UserNotifications
 
-/// 一集一次、用户点一下下一个文件。
+/// 持久下载队列：单集和批量走同一条队列。
 ///
-/// 三条边界写在代码里，而不是只在文档里：
-/// 1. 同时只有一个任务 —— 再来一集先取消旧的，不做队列、不做批量抓取；
-/// 2. 只接受 https 直链（调用方已用 `WebViewController.shareableURL` 校验过一次）；
-/// 3. 落盘到沙盒 Documents/Downloads，用户可见、可取消、可自己清理。
+/// 边界写在代码里，而不是只在文档里：
+/// 1. 全队列最多同时跑 `maxConcurrent`（2）条，其余排队等空位；
+/// 2. 同一部剧的同一集（showId + 集标识）在排队/下载/暂停时不会重复入队；
+/// 3. 任务、进度、暂停用的 resumeData 都落 UserDefaults，进程被回收后重新拉起还能接上；
+/// 4. 暂停用 `cancel(byProducingResumeData:)` 拿到真实续传数据，拿不到就如实从 0 重来；
+/// 5. 取消只停任务、只标状态，不删除已经下载完成（或已经落盘）的文件；
+/// 6. 一集失败只影响这一集，绝不把整部剧标成完成；
+/// 7. 接受 https 直链的 MP4/M4V/MOV/MKV/TS 和 HLS 清单（.m3u8/.m3u）；网页地址、其它扩展名如实拒绝；
+///    HLS 走 HLSDownloader：逐片下载、AES-128 解密、合成一个文件（边界见那个文件顶部）；
+/// 8. 总长度未知（服务器没给 Content-Length）时不编百分比，只报已收字节。
+///
+/// 0.1.12 起用后台会话（background URLSession），切到别的 App、锁屏时由系统继续传。
+/// 一个进程只允许一个后台会话、一个标识，所以状态全部是类级的。
+///
+/// 明确不能保证的：用户在后台把 App 强制退出（上滑清掉）时系统会停掉会话，
+/// 这种情况会如实标记为「下载被系统中断」，不会假装完成。
 final class MediaDownloader: NSObject {
     enum Failure: Error {
         case cancelled
         case http(Int)
         case network(String)
         case disk(String)
+        /// 线路本身不支持整集下载（HLS / 网页地址 / 非视频扩展名）
+        case unsupported(String)
 
         var message: String {
             switch self {
@@ -19,25 +35,229 @@ final class MediaDownloader: NSObject {
             case .http(let code): return "片源服务器返回 \(code)"
             case .network(let text): return text.isEmpty ? "网络中断" : text
             case .disk(let text): return text.isEmpty ? "写不进本机存储" : text
+            case .unsupported(let text): return text.isEmpty ? "这条线路不能整集下载" : text
             }
         }
     }
 
-    struct Job {
-        let id: String
-        let name: String
-        let url: URL
+    /// 网页请求入队的一集：id 由网页生成，showId + epKey 是去重键。
+    struct Request {
+        var id: String
+        var url: URL
+        var name: String
+        var meta: [String: String]
+
+        var showId: String { meta["showId"] ?? meta["id"] ?? "" }
+        var epKey: String { meta["epKey"] ?? "" }
     }
 
-    private var session: URLSession?
-    private var task: URLSessionDownloadTask?
-    private var job: Job?
-    private var progress: ((Int64, Int64) -> Void)?
-    private var finish: ((Result<[String: Any], Failure>) -> Void)?
-    /// `didFinishDownloadingTo` 先到、`didCompleteWithError` 后到：结果在这里交接。
-    private var moved: [String: Any]?
+    /// 一个下载任务在磁盘上的记录：进程被回收后靠它把状态接回来。
+    struct Record: Codable {
+        var id: String
+        var url: String
+        var name: String
+        var title: String
+        var ep: String
+        var meta: [String: String]
+        var received: Int64
+        var total: Int64
+        /// queued / running / paused / done / failed / cancelled
+        var status: String
+        var path: String
+        var size: Int64
+        var reason: String
+        /// 终态是否已经交给过网页（progress 不算终态，每次都可以重发）
+        var delivered: Bool
+        var taskIdentifier: Int
+        var updatedAt: Double
+        /* 0.1.14 新增：去重与暂停续传。旧记录没有这两个字段，解码时按缺省处理。 */
+        var showId: String? = nil
+        var epKey: String? = nil
+        var resumeData: String? = nil
+        /// 每启动一次任务 +1：暂停回调靠它确认「这个 resumeData 属于我现在看的这条任务」，
+        /// 避免用户立即继续、新任务已经建好之后，旧任务的回调把数据写进新记录。
+        var generation: Int? = nil
+        /// 用户显式删除的时间戳（墓碑）。墓碑只留在原生记录里，不会进快照，
+        /// 因此晚到的完成回调、重启、重新进页都不可能把这一集带回来。
+        var deletedAt: Double? = nil
+        /// 这部剧封面在本机的相对路径（相对 Documents，形如 `DownloadCovers/cover-1a2b.img`）。
+        /// 同一部剧的每一集写的是同一份，旧记录没有这个字段，解码时按缺省处理。
+        var coverPath: String? = nil
+    }
 
-    var isBusy: Bool { task != nil }
+    /// 同一时刻最多跑几条：用户要的是「两集一起下」，不是把整部剧一起拉满。
+    static let maxConcurrent = 2
+
+    #if DEBUG
+    /// **仅测试构建**：把暂停时 `cancel(byProducingResumeData:)` 的回调推迟投递，
+    /// 用来确定性地复现「用户已经继续/取消，旧任务的回调才回来」这个顺序。
+    /// Release 不编译这段，产品行为不受影响。
+    static var testResumeDataCallbackDelay: TimeInterval = 0
+    /// **仅测试构建**：系统这次回调到底给了多少字节的 resumeData（-1 = 没给）。
+    /// 测试靠它证明「竞态这一轮真的走的是有数据的旧任务」，不然绿了也可能是空跑。
+    static var testLastResumeDataBytes: Int = -1
+    /// **仅测试构建**：把真实那条落盘函数暴露给状态机测试用（不是伪下载、不伪装 delegate，
+    /// 只是让测试能给这个真实函数喂一条「属于旧任务的 payload」）。
+    static func testStoreResumeData(id: String, generation: Int, data: Data?) {
+        storeResumeData(id: id, generation: generation, data: data)
+    }
+    #endif
+
+    /// 后台会话的标识：App 被重新拉起时系统就是用它把回调交回来的，不能改。
+    static let backgroundIdentifier = "org.dpdns.zhuiju.ios.downloads"
+    static let tasksKey = "kj-ios-download-tasks"
+
+    /// 片源请求头的兜底 UA：后台会话默认的 `App名/版本 CFNetwork/...` 会被一部分片源 CDN 直接拒绝，
+    /// 网页播放器能播、App 下载却 403，就是这条请求头差异造成的。
+    /// 真机上网页加载完会把真实的 `navigator.userAgent` 交上来（见 WebViewController），这里只是兜底。
+    static let browserUserAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
+        + "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
+    /// 站点用 `ZhuijuAI/<版本>` 这个前缀认 App，补在浏览器 UA 后面，两边都不丢。
+    static var appUserAgentToken: String {
+        let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.0.0"
+        return "ZhuijuAI/\(version) iOS"
+    }
+    /// 所有媒体请求（整文件 / HLS 分片 / 清单 / 密钥）统一用这一份 UA。
+    static var mediaUserAgent: String = browserUserAgent + " " + appUserAgentToken
+
+    /// 媒体请求要带的头：Referer 必须和网页播放时一致，UA 必须是浏览器 UA。
+    /// 网页明确交上来一个浏览器 UA 就照用；只给了 App 令牌（老版本）就用兜底 UA，绝不发裸令牌。
+    static func mediaRequestHeaders(from meta: [String: String]) -> [String: String] {
+        var headers = ["Accept": "*/*", "Accept-Language": "zh-CN,zh;q=0.9"]
+        let supplied = (meta["userAgent"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        headers["User-Agent"] = supplied.contains("Mozilla/") ? supplied : mediaUserAgent
+        let referer = (meta["referer"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        if !referer.isEmpty { headers["Referer"] = referer }
+        return headers
+    }
+    static let notifyAskedKey = "kj-ios-notify-asked"
+    /// 进程里唯一的那份下载器：后台回调可能早于界面创建，必须共用同一套状态。
+    static let shared = MediaDownloader()
+    /// 系统在 `handleEventsForBackgroundURLSession` 里给的收尾回调。
+    static var backgroundCompletion: (() -> Void)?
+    /// 状态变化时通知界面（进度、终态、暂停、排队变化）。界面再转发给网页。
+    static var eventSink: (([[String: Any]]) -> Void)?
+
+    private static var sessionStorage: URLSession?
+    private static var records: [Record] = []
+    private static var progressHandlers: [String: (Int64, Int64) -> Void] = [:]
+    private static var finishHandlers: [String: (Result<[String: Any], Failure>) -> Void] = [:]
+    private static var tasks: [String: URLSessionDownloadTask] = [:]
+    private static var finishedTasks: Set<Int> = []
+    private static var movedFiles: [Int: [String: Any]] = [:]
+    private static var lastProgressEventAt: [String: TimeInterval] = [:]
+    private static var lastPersistAt: TimeInterval = 0
+
+    var isBusy: Bool {
+        Self.freshRecords().contains { $0.status == "running" || $0.status == "queued" }
+    }
+
+    /// 给回归测试看的只读信息：确认这是后台会话、标识没改名。
+    var sessionConfiguration: URLSessionConfiguration { Self.sessionInstance().configuration }
+
+    // MARK: - 纯逻辑（可单元测试，不碰网络）
+
+    /// 这条线路能不能整集下载。返回 nil 表示可以，否则是给用户看的原因。
+    ///
+    /// 收 https 的视频直链和 HLS 清单：播放页地址、blob:/data: 一律拒绝 ——
+    /// 把播放网页当成视频下下来的，是一张 HTML 而不是剧集。
+    /// HLS 清单本身能下，真正的分片、解密、合成在 HLSDownloader 里。
+    static func rejection(of url: URL) -> String? {
+        let scheme = (url.scheme ?? "").lowercased()
+        let host = (url.host ?? "").lowercased()
+        #if DEBUG
+        /* 只有测试构建（DEBUG）认受控源；Release 包永远只收 https，生产规则不因测试放宽。 */
+        let controlledLoopback = ["127.0.0.1", "localhost", "::1"].contains(host)
+        #else
+        let controlledLoopback = false
+        #endif
+        if scheme != "https" && !(scheme == "http" && controlledLoopback) {
+            return "只支持 https 直链下载，这条线路是 \(scheme.isEmpty ? "未知协议" : scheme)"
+        }
+        if url.host?.isEmpty != false { return "这条线路没有有效的主机名" }
+        let path = url.path.lowercased()
+        if path.hasSuffix(".m3u8") || path.hasSuffix(".m3u") {
+            /* HLS 清单：交给 HLSDownloader 逐片下载、解密、合成。 */
+            return nil
+        }
+        if path.hasSuffix(".html") || path.hasSuffix(".htm") {
+            return "这是播放网页，不是视频文件，不能下载"
+        }
+        /* 站点自己的播放页/详情页是没有扩展名的路由：不能拿来当视频下。 */
+        let pageMarkers = ["/player", "/watch", "/detail", "/show/", "/episode"]
+        if path.hasSuffix("/") || pageMarkers.contains(where: { path.contains($0) }) {
+            return "这是播放网页，不是视频文件，不能下载"
+        }
+        let videoExtensions = [".mp4", ".m4v", ".mov", ".mkv", ".ts"]
+        if !videoExtensions.contains(where: { path.hasSuffix($0) }) {
+            /* 没有扩展名的直链（`/play/19`）放过：它可能是 CDN 直出，
+               真正下载时按内容校验，失败就如实报错。 */
+            if path.contains(".") { return "这条线路的文件类型不能整集下载" }
+        }
+        return nil
+    }
+
+    /// 队列调度（纯函数）：当前还能再启动哪几条。
+    static func planStarts(_ list: [Record], limit: Int = maxConcurrent) -> [Record] {
+        let running = list.filter { $0.status == "running" }.count
+        var slots = max(0, limit - running)
+        guard slots > 0 else { return [] }
+        var picked: [Record] = []
+        for record in list.sorted(by: { $0.updatedAt < $1.updatedAt }) where record.status == "queued" {
+            if slots <= 0 { break }
+            picked.append(record)
+            slots -= 1
+        }
+        return picked
+    }
+
+    /// 去重：同一部剧的同一集正在排队/下载/暂停时不重复入队。
+    static func duplicateIndex(in list: [Record], showId: String, epKey: String) -> Int? {
+        guard !epKey.isEmpty else { return nil }
+        return list.firstIndex { record in
+            guard (record.showId ?? "") == showId, (record.epKey ?? "") == epKey else { return false }
+            return record.status == "queued" || record.status == "running" || record.status == "paused"
+        }
+    }
+
+    /// 一部剧的总体进度：总集数未知时 `knownTotal=false`，界面不许造百分比。
+    struct Summary {
+        var total = 0
+        var done = 0
+        var failed = 0
+        var cancelled = 0
+        var running = 0
+        var queued = 0
+        var paused = 0
+        var received: Int64 = 0
+        var bytesTotal: Int64 = 0
+        var knownBytes: Bool { bytesTotal > 0 }
+        /// 只有「所有任务都成功」才算整部剧完成；有失败就是部分失败。
+        var finished: Bool { queued == 0 && running == 0 && paused == 0 && done > 0 }
+        var allDone: Bool { finished && failed == 0 && cancelled == 0 }
+    }
+
+    static func summary(_ list: [Record], showId: String) -> Summary {
+        var result = Summary()
+        for record in list where record.status != "cancelled" || (record.showId ?? "") == showId {
+            guard (record.showId ?? "") == showId else { continue }
+            result.total += 1
+            switch record.status {
+            case "done": result.done += 1
+            case "failed": result.failed += 1
+            case "cancelled": result.cancelled += 1
+            case "running": result.running += 1
+            case "queued": result.queued += 1
+            case "paused": result.paused += 1
+            default: break
+            }
+            if record.status != "cancelled" {
+                result.received += record.received
+                result.bytesTotal += record.total
+            }
+        }
+        return result
+    }
 
     /// 文件名清洗：只留文件名本身，路径分隔符、控制字符一律换掉，并补上视频扩展名。
     ///
@@ -46,11 +266,19 @@ final class MediaDownloader: NSObject {
     /// `.m3u8` 这类清单也不能冒充成视频文件。
     static func fileName(from raw: String?, fallback: String) -> String {
         let videoExtensions = [".mp4", ".m4v", ".mov", ".mkv", ".ts"]
-        var name = fallback
-        if let raw = raw, let parsed = URL(string: raw) {
-            let last = parsed.lastPathComponent
-            if !last.isEmpty, videoExtensions.contains(where: { last.lowercased().hasSuffix($0) }) {
-                name = last
+        var name = fallback.trimmingCharacters(in: .whitespacesAndNewlines)
+        /* 调用方给的通常就是「真实剧名 第X集.mp4」，它优先：
+           站点直链最后一段往往只是 `19.mp4`，拿它顶掉会把剧名丢掉（REG-009）。
+           只有调用方没给名字（或只给了 `video.mp4` 这类占位名）时才退回链接里的文件名。 */
+        let genericNames = ["video", "download", "movie"]
+        let stem = (name as NSString).deletingPathExtension.lowercased()
+        let genericName = name.isEmpty || genericNames.contains(stem)
+        if genericName || !videoExtensions.contains(where: { name.lowercased().hasSuffix($0) }) {
+            if let raw = raw, let parsed = URL(string: raw) {
+                let last = parsed.lastPathComponent
+                if !last.isEmpty, videoExtensions.contains(where: { last.lowercased().hasSuffix($0) }) {
+                    name = last
+                }
             }
         }
         let banned = CharacterSet(charactersIn: "/\\:*?\"<>|")
@@ -64,50 +292,1275 @@ final class MediaDownloader: NSObject {
         return String(trimmed.prefix(120))
     }
 
+    /// 下载目录名只写一处：记录里存相对路径时也用它拼回来。
+    static let downloadsFolder = "Downloads"
+
     static func directory() -> URL? {
         guard let base = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else { return nil }
-        return base.appendingPathComponent("Downloads", isDirectory: true)
+        return base.appendingPathComponent(downloadsFolder, isDirectory: true)
     }
+
+    /// 落盘时只记相对路径（`Downloads/文件名`）。沙盒容器的绝对路径会随重装/换包变化，
+    /// 存绝对路径等于给下一条记录埋一颗「删不掉」的雷。
+    static func relativePath(for raw: String?) -> String {
+        guard let name = storedFileName(raw) else { return "" }
+        return downloadsFolder + "/" + name
+    }
+
+    /// 把网页传来的 / 记录里的路径解析成**当前**下载目录里的文件地址：
+    /// 先确认写法确实指向下载目录，再取最后一段文件名拼到当前 Documents/Downloads；
+    /// 旧容器的绝对路径、相对路径、裸文件名三种写法都落到同一个地方，跨版本换容器也能删/能播。
+    static func fileURL(forStoredPath raw: String?) -> URL? {
+        guard let text = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty,
+              let directory = directory() else { return nil }
+        /* 只取最后一段文件名，但必须先校验来路：不能什么路径都按文件名塞进下载目录。 */
+        let name = (text as NSString).lastPathComponent
+        guard !name.isEmpty, name != ".", name != "..", name != "/",
+              storedPathIsInsideDownloads(text, name: name) else { return nil }
+        let root = directory.standardizedFileURL.resolvingSymlinksInPath()
+        let candidate = root.appendingPathComponent(name).standardizedFileURL
+        guard candidate.pathComponents.count == root.pathComponents.count + 1,
+              Array(candidate.pathComponents.prefix(root.pathComponents.count)) == root.pathComponents else {
+            return nil
+        }
+        return candidate
+    }
+
+    /// 收到路径的写法校验：只认裸文件名、`Downloads/文件名`、旧容器 `…/Documents/Downloads/文件名`。
+    /// 其它路径（`/tmp/x.mp4`、`../../outside.mp4`、`Downloads/子目录/x.mp4`）不解析：
+    /// 只凭文件名就把越界路径映射成下载目录里的同名文件，删除时会误删别人的文件。
+    private static func storedPathIsInsideDownloads(_ text: String, name: String) -> Bool {
+        /* 裸文件名：网页只给了名字。 */
+        if !text.contains("/") { return true }
+        /* 记录里存的相对路径。 */
+        if text == downloadsFolder + "/" + name { return true }
+        /* 旧版本的沙盒绝对路径：必须整段以 /Documents/Downloads/<文件名> 结尾，
+           前面是哪个容器都不管；中间多一层目录的不认。 */
+        let legacySuffix = "/Documents/" + downloadsFolder + "/" + name
+        return text.count >= legacySuffix.count && String(text.suffix(legacySuffix.count)) == legacySuffix
+    }
+
+    /// 落盘用的文件名：和 `fileURL(forStoredPath:)` 同一套规则，取最后一段、`..`/`.`/空串不认。
+    private static func storedFileName(_ raw: String?) -> String? {
+        guard let text = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty else { return nil }
+        let name = (text as NSString).lastPathComponent
+        guard !name.isEmpty, name != ".", name != "..", name != "/" else { return nil }
+        return name
+    }
+
+    // MARK: - 对外（实例方法都落到同一份状态上）
 
     func start(
         id: String,
         url: URL,
         name: String,
+        meta: [String: Any]? = nil,
         onProgress: @escaping (Int64, Int64) -> Void,
         onFinish: @escaping (Result<[String: Any], Failure>) -> Void
     ) {
-        cancel(silent: true)
-        let configuration = URLSessionConfiguration.default
-        configuration.timeoutIntervalForRequest = 30
-        configuration.timeoutIntervalForResource = 60 * 60
-        configuration.waitsForConnectivity = true
-        let queue = OperationQueue.main
-        let session = URLSession(configuration: configuration, delegate: self, delegateQueue: queue)
-        let task = session.downloadTask(with: url)
-        self.session = session
-        self.task = task
-        self.job = Job(id: id, name: name, url: url)
-        self.progress = onProgress
-        self.finish = onFinish
-        self.moved = nil
+        var flat: [String: String] = [:]
+        for (key, value) in meta ?? [:] {
+            if let text = value as? String { flat[key] = text }
+            else if let number = value as? NSNumber { flat[key] = number.stringValue }
+        }
+        let request = Request(id: id, url: url, name: name, meta: flat)
+        Self.enqueue([request], progress: [id: onProgress], finish: [id: onFinish])
+    }
+
+    /// 批量入队：单集和批量共用同一条持久队列。
+    @discardableResult
+    func enqueue(_ requests: [Request]) -> [String] {
+        Self.enqueue(requests)
+    }
+
+    /// 删一集时要用的**当前**落盘路径：确认框打开的那几秒里下载可能刚好完成，
+    /// 界面手里的快照路径已经过时（还是空串），拿它去删等于什么都没删。
+    /// 找不到记录时返回空串（没什么可删的）。
+    func currentStoredPath(id: String?, showId: String, epKey: String) -> String {
+        Self.currentStoredPath(id: id, showId: showId, epKey: epKey)
+    }
+
+    private static func currentStoredPath(id: String?, showId: String, epKey: String) -> String {
+        let wantedId = (id ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let list = loadRecords()
+        var hit: Record?
+        if !wantedId.isEmpty {
+            /* 同 id 只会有一条，但后写的更可信。 */
+            for record in list where record.id == wantedId { hit = record }
+        }
+        if hit == nil && !showId.isEmpty && !epKey.isEmpty {
+            for record in list where (record.showId ?? "") == showId && (record.epKey ?? "") == epKey {
+                hit = record
+            }
+        }
+        return (hit?.path ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// 左滑删除一集：取消任务、把这一集写进独立墓碑存储（不再进快照）、通知网页刷新。
+    /// 本地文件由调用方先用 removeDownloadedFile 删掉；文件删不掉就不该走到这里。
+    func deleteEpisode(id: String?, showId: String, epKey: String) {
+        Self.deleteEpisode(id: id, showId: showId, epKey: epKey)
+    }
+
+    /// 真正删掉这一集的本地文件（不是挪进回收站，删了才真的释放空间）。
+    /// 只接受 Documents/Downloads 里的普通文件，而且只动这一个文件：
+    /// 路径越界、目标是目录、删除失败都返回 false，由调用方保留记录并告诉用户；
+    /// 文件本来就不在了也算成功，记录照样要删。
+    func removeDownloadedFile(at path: String?) -> Bool {
+        Self.removeDownloadedFile(at: path)
+    }
+
+    @discardableResult
+    static func removeDownloadedFile(at path: String?) -> Bool {
+        guard let raw = path?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else { return true }
+        guard let directory = directory(), let source = fileURL(forStoredPath: raw) else {
+            NSLog("refuse to delete file outside download directory: %@", raw)
+            return false
+        }
+        let root = directory.standardizedFileURL.resolvingSymlinksInPath()
+        let rootComponents = root.pathComponents
+        let sourceComponents = source.pathComponents
+        /* 只认下载目录里的直接子项：同前缀的兄弟目录、下载目录本身一律不动。 */
+        guard sourceComponents.count == rootComponents.count + 1,
+              Array(sourceComponents.prefix(rootComponents.count)) == rootComponents else {
+            NSLog("refuse to delete file outside download directory: %@", raw)
+            return false
+        }
+        let fileManager = FileManager.default
+        var isDirectory: ObjCBool = false
+        guard fileManager.fileExists(atPath: source.path, isDirectory: &isDirectory) else { return true }
+        guard !isDirectory.boolValue else {
+            NSLog("refuse to delete a directory: %@", raw)
+            return false
+        }
+        do {
+            try fileManager.removeItem(at: source)
+        } catch {
+            NSLog("delete downloaded file failed: %@", String(describing: error))
+            return false
+        }
+        /* 旧版本把删掉的文件挪进 .trash：同一个文件名的历史副本顺手清掉，别继续白占空间。 */
+        let legacyTrash = root.appendingPathComponent(".trash", isDirectory: true)
+            .appendingPathComponent(source.lastPathComponent)
+        if fileManager.fileExists(atPath: legacyTrash.path) {
+            try? fileManager.removeItem(at: legacyTrash)
+        }
+        return true
+    }
+
+    // MARK: - 封面（这部剧的封面图单独落盘）
+
+    /// 封面单独放一个目录，**不进** `Documents/Downloads`：
+    /// 下载目录里每一个直接子项都是「可播放 / 可分享 / 可删除」的整集文件，
+    /// 封面混进去会被当成一集，也会把「本 App 下载占用」算歪。
+    static let coverFolderName = "DownloadCovers"
+    /// 明确取不到封面（远端没这张图 / 已经 404）的剧：只记这一类结论。
+    /// 临时断网、超时**不能**写进这里，否则一次地铁进隧道就永远不再补。
+    private static let coverMissingKey = "kj-ios-cover-missing"
+
+    static func coverDirectory() -> URL? {
+        guard let base = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else { return nil }
+        let directory = base.appendingPathComponent(coverFolderName, isDirectory: true)
+        let manager = FileManager.default
+        if !manager.fileExists(atPath: directory.path) {
+            try? manager.createDirectory(at: directory, withIntermediateDirectories: true)
+        }
+        return directory
+    }
+
+    /// 一部剧的封面文件名：由稳定的剧标识算出来（showId 优先，没有就用剧名）。
+    /// 同一部剧的每一集都指向同一个文件，不按集分别存一张图。
+    static func coverFileName(showId: String, title: String) -> String {
+        let seed = !showId.isEmpty ? showId : "title:" + title
+        var hash: UInt64 = 0xcbf2_9ce4_8422_2325
+        for byte in seed.utf8 {
+            hash = (hash ^ UInt64(byte)) &* 0x0000_0100_0000_01b3
+        }
+        return "cover-" + String(hash, radix: 16) + ".img"
+    }
+
+    static func coverRelativePath(showId: String, title: String) -> String {
+        coverFolderName + "/" + coverFileName(showId: showId, title: title)
+    }
+
+    /// 记录里的封面相对路径 → 磁盘位置。
+    /// 只认 `DownloadCovers` 的**直接子项**；越界、目录、解析符号链接后跑到别处的路径一律拒绝。
+    /// 删封面也走这一条，保证不会误删到别的剧或用户其它文件。
+    static func coverURL(forStoredPath raw: String?) -> URL? {
+        guard let text = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty else { return nil }
+        guard text.hasPrefix(coverFolderName + "/") else { return nil }
+        let name = (text as NSString).lastPathComponent
+        guard !name.isEmpty, name != ".", name != ".." else { return nil }
+        guard let directory = coverDirectory() else { return nil }
+        let root = directory.standardizedFileURL.resolvingSymlinksInPath()
+        /* 只解析「目录」这一段：容器路径本身可能是符号链接（/var → /private/var）。
+           文件名这一段**不解析**：解析了就等于顺着一根链接走——`cover-A.img` 指向 `cover-B.img` 时
+           目标会变成 B，删 A 就是删 B、写 A 就是覆盖 B。 */
+        let target = root.appendingPathComponent(name).standardizedFileURL
+        let rootComponents = root.pathComponents
+        let targetComponents = target.pathComponents
+        guard targetComponents.count == rootComponents.count + 1,
+              Array(targetComponents.prefix(rootComponents.count)) == rootComponents else {
+            NSLog("refuse cover path outside the cover directory: %@", raw ?? "")
+            return nil
+        }
+        /* 层级对还不够：目标若是目录（或符号链接解出来的目录），后面 removeItem 会把整棵子树删掉。
+           第一次落盘时文件还不存在是正常的，所以「不存在」放行，其余（目录、别名、特殊类型）一律拒绝。 */
+        guard isRegularFileOrMissing(target) else {
+            NSLog("refuse non-regular cover target: %@", raw ?? "")
+            return nil
+        }
+        return target
+    }
+
+    /// 封面目录里只认普通文件。目录、别名（符号链接）、其它特殊类型一律不认；目标不存在按「尚未落盘」放行。
+    /// 关键：先认链接再判类型。`attributesOfItem` 在某些路径上会跟随链接，所以先用
+    /// `destinationOfSymbolicLink` 认一下——它只对链接本体成功，悬空链接也算，不会漏。
+    private static func isRegularFileOrMissing(_ url: URL) -> Bool {
+        let manager = FileManager.default
+        if (try? manager.destinationOfSymbolicLink(atPath: url.path)) != nil {
+            return false
+        }
+        var isDirectory: ObjCBool = false
+        guard manager.fileExists(atPath: url.path, isDirectory: &isDirectory) else { return true }
+        guard !isDirectory.boolValue else { return false }
+        guard let attributes = try? manager.attributesOfItem(atPath: url.path),
+              let type = attributes[.type] as? FileAttributeType else { return false }
+        return type == .typeRegular
+    }
+
+    /// 这部剧已经落盘的封面相对路径（磁盘上真有这个文件才算）。
+    static func localCoverPath(showId: String, title: String) -> String? {
+        let relative = coverRelativePath(showId: showId, title: title)
+        guard let url = coverURL(forStoredPath: relative) else { return nil }
+        return FileManager.default.fileExists(atPath: url.path) ? relative : nil
+    }
+
+    private static func coverMissing() -> Set<String> {
+        let list = UserDefaults.standard.stringArray(forKey: coverMissingKey) ?? []
+        return Set(list)
+    }
+
+    private static func coverKey(showId: String, title: String) -> String {
+        !showId.isEmpty ? showId : "title:" + title
+    }
+
+    private static func markCoverMissing(showId: String, title: String) {
+        var list = UserDefaults.standard.stringArray(forKey: coverMissingKey) ?? []
+        let keyText = coverKey(showId: showId, title: title)
+        guard !list.contains(keyText) else { return }
+        list.append(keyText)
+        /* 有界：只留最近 2000 条结论，正常用量远远用不到。 */
+        if list.count > 2000 { list = Array(list.suffix(2000)) }
+        UserDefaults.standard.set(list, forKey: coverMissingKey)
+    }
+
+    private static func clearCoverMissing(showId: String, title: String) {
+        var list = UserDefaults.standard.stringArray(forKey: coverMissingKey) ?? []
+        let keyText = coverKey(showId: showId, title: title)
+        guard list.contains(keyText) else { return }
+        list.removeAll { $0 == keyText }
+        UserDefaults.standard.set(list, forKey: coverMissingKey)
+    }
+
+    /// 封面拿的是另一套会话：后台会话不支持 data task，封面也不需要后台续传。
+    private static var coverSession: URLSession?
+
+    private static func coverSessionInstance() -> URLSession {
+        if let session = coverSession { return session }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 15
+        configuration.timeoutIntervalForResource = 30
+        let session = URLSession(configuration: configuration)
+        coverSession = session
+        return session
+    }
+
+    /// 给还没有封面的剧补图：只用记录里已经带上的远端封面地址，不猜也不编。
+    /// - 成功一次：落盘 + 写回记录，之后离线也能看；
+    /// - 远端明确没有这张图（404/410）：记进缺图名单，不再反复请求；
+    /// - 断网 / 超时 / 其它错误：只是这次没取到，下次打开片库还会再试。
+    func backfillCovers(completion: @escaping () -> Void) {
+        Self.backfillCovers(completion: completion)
+    }
+
+    private static func backfillCovers(completion: @escaping () -> Void) {
+        records = loadRecords()
+        let missing = coverMissing()
+        var wanted: [(showId: String, title: String, remote: String, referer: String)] = []
+        var seen = Set<String>()
+        for record in records where !Self.isDeleted(record) {
+            let showId = record.showId ?? ""
+            let title = record.title
+            let keyText = coverKey(showId: showId, title: title)
+            guard !seen.contains(keyText) else { continue }
+            guard localCoverPath(showId: showId, title: title) == nil else { continue }
+            guard !missing.contains(keyText) else { continue }
+            let remote = (record.meta["cover"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !remote.isEmpty else { continue }
+            seen.insert(keyText)
+            wanted.append((showId, title, remote, record.meta["referer"] ?? ""))
+        }
+        guard !wanted.isEmpty else {
+            completion()
+            return
+        }
+        let group = DispatchGroup()
+        for item in wanted {
+            group.enter()
+            fetchCover(showId: item.showId, title: item.title, remote: item.remote, referer: item.referer) {
+                group.leave()
+            }
+        }
+        group.notify(queue: .main) { completion() }
+    }
+
+    /// 开始下载时就把这一部剧的封面存下来：之后飞行模式打开片库也能看到同一张图。
+    private static func captureCovers(for records: [Record]) {
+        var seen = Set<String>()
+        for record in records where !Self.isDeleted(record) {
+            let showId = record.showId ?? ""
+            let title = record.title
+            let keyText = coverKey(showId: showId, title: title)
+            guard !seen.contains(keyText) else { continue }
+            seen.insert(keyText)
+            guard localCoverPath(showId: showId, title: title) == nil else { continue }
+            let remote = (record.meta["cover"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !remote.isEmpty else { continue }
+            fetchCover(showId: showId, title: title, remote: remote, referer: record.meta["referer"] ?? "") {}
+        }
+    }
+
+    private static func fetchCover(
+        showId: String,
+        title: String,
+        remote: String,
+        referer: String,
+        completion: @escaping () -> Void
+    ) {
+        guard let url = URL(string: remote), let scheme = url.scheme?.lowercased(),
+              scheme == "https" || scheme == "http" else {
+            /* 地址本身不可用：不写成「没有封面」，下次有真实地址时还要能补。 */
+            completion()
+            return
+        }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 15
+        for (name, value) in mediaRequestHeaders(from: ["referer": referer]) {
+            request.setValue(value, forHTTPHeaderField: name)
+        }
+        let task = coverSessionInstance().dataTask(with: request) { data, response, error in
+            let http = response as? HTTPURLResponse
+            DispatchQueue.main.async {
+                defer { completion() }
+                if let error = error {
+                    /* 断网 / 超时：只是这次没取到，不能当「这部剧没有封面」。 */
+                    NSLog("cover fetch failed: %@", String(describing: error))
+                    return
+                }
+                guard let http = http else { return }
+                if http.statusCode == 404 || http.statusCode == 410 {
+                    /* 已删光的剧不再记「无图」：那条名单是按剧记的，留着会影响以后重新下载同一部剧时的补图。 */
+                    guard hasLiveRecord(showId: showId, title: title) else { return }
+                    markCoverMissing(showId: showId, title: title)
+                    return
+                }
+                guard http.statusCode == 200, let data = data, !data.isEmpty else {
+                    NSLog("cover fetch http %d", http.statusCode)
+                    return
+                }
+                storeCover(data, showId: showId, title: title)
+            }
+        }
         task.resume()
     }
 
-    func cancel(silent: Bool = false) {
-        guard let running = task else { return }
-        running.cancel()
-        if !silent { finish?(.failure(.cancelled)) }
-        cleanup()
+    private static func storeCover(_ data: Data, showId: String, title: String) {
+        /* 解不出来的字节不落盘：坏图在界面上就是一块空白，比占位图更难解释。 */
+        guard UIImage(data: data) != nil else {
+            NSLog("cover data is not an image: %@", showId)
+            return
+        }
+        /* 补图是异步的：请求发出去之后这部剧可能已经被整剧删光。
+           没有活记录了就别再落盘，否则删掉的封面会被晚到的响应重新写回来，而且没人再清理它。 */
+        guard hasLiveRecord(showId: showId, title: title) else {
+            NSLog("cover dropped, show already deleted: %@", showId)
+            return
+        }
+        let relative = coverRelativePath(showId: showId, title: title)
+        guard let target = coverURL(forStoredPath: relative) else { return }
+        do {
+            try data.write(to: target, options: .atomic)
+        } catch {
+            NSLog("cover write failed: %@", String(describing: error))
+            return
+        }
+        clearCoverMissing(showId: showId, title: title)
+        applyCoverPath(relative, showId: showId, title: title)
     }
 
-    private func cleanup() {
-        session?.invalidateAndCancel()
-        session = nil
-        task = nil
-        job = nil
-        progress = nil
-        finish = nil
-        moved = nil
+    /// 这部剧是否还有未删除的记录（封面只跟着活记录走，墓碑不算引用）。
+    private static func hasLiveRecord(showId: String, title: String) -> Bool {
+        loadRecords().contains { record in
+            guard !isDeleted(record) else { return false }
+            return !showId.isEmpty ? (record.showId ?? "") == showId : record.title == title
+        }
+    }
+
+    /// 把相对路径写进这部剧的每一条**活**记录（同一部剧共用一张封面）。
+    /// 墓碑记录不写：它不再引用这个文件，写进去只会留下一条指向已删文件的脏路径。
+    private static func applyCoverPath(_ relative: String, showId: String, title: String) {
+        records = loadRecords()
+        var changed = false
+        for index in records.indices {
+            guard !isDeleted(records[index]) else { continue }
+            let sameShow = !showId.isEmpty
+                ? (records[index].showId ?? "") == showId
+                : records[index].title == title
+            guard sameShow, records[index].coverPath != relative else { continue }
+            records[index].coverPath = relative
+            changed = true
+        }
+        if changed { persist(force: true) }
+        NotificationCenter.default.post(name: .downloadLibraryDidChange, object: nil)
+    }
+
+    /// 删到这一部剧一集不剩时，封面也删掉；还有别的集在就留着（共享引用不能误删）。
+    private static func removeCoverIfUnused(showId: String, title: String) {
+        let list = loadRecords().filter { !Self.isDeleted($0) }
+        let stillUsed = list.contains { record in
+            let sameShow = !showId.isEmpty
+                ? (record.showId ?? "") == showId
+                : record.title == title
+            return sameShow
+        }
+        guard !stillUsed else { return }
+        let relative = coverRelativePath(showId: showId, title: title)
+        if let url = coverURL(forStoredPath: relative),
+           FileManager.default.fileExists(atPath: url.path) {
+            try? FileManager.default.removeItem(at: url)
+        }
+        clearCoverMissing(showId: showId, title: title)
+    }
+
+    private static func deleteEpisode(id: String?, showId: String, epKey: String) {
+        records = loadRecords()
+        var changed = false
+        /* 这一集的剧名先记下来：删掉记录之后再判断这部剧是不是一集都不剩。 */
+        var touchedShows: [(showId: String, title: String)] = []
+        let deletedAt = Date().timeIntervalSince1970
+        /* 墓碑独立落库，不依赖这条记录还在不在：记录被 400 条上限裁掉，删除结论也不会丢。 */
+        rememberTombstone(showId: showId, epKey: epKey, at: deletedAt)
+        for index in records.indices {
+            let record = records[index]
+            let sameId = !(id ?? "").isEmpty && record.id == id
+            let sameEpisode = !showId.isEmpty && !epKey.isEmpty
+                && (record.showId ?? "") == showId && (record.epKey ?? "") == epKey
+            guard sameId || sameEpisode else { continue }
+            records[index].deletedAt = deletedAt
+            rememberTombstone(showId: records[index].showId ?? "", epKey: records[index].epKey ?? "", at: deletedAt)
+            records[index].status = "cancelled"
+            records[index].reason = "已删除"
+            records[index].path = ""
+            records[index].received = 0
+            records[index].resumeData = nil
+            records[index].delivered = false
+            if let task = tasks.removeValue(forKey: record.id) { task.cancel() }
+            /* HLS 的分片任务和缓存也一起清掉：删了就要真的不占空间。 */
+            HLSDownloader.discard(id: record.id)
+            progressHandlers.removeValue(forKey: record.id)
+            finishHandlers.removeValue(forKey: record.id)
+            touchedShows.append((records[index].showId ?? "", records[index].title))
+            changed = true
+        }
+        if changed {
+            persist(force: true)
+            /* 整剧删到一集不剩时，这部剧的封面也一起清掉；还有别的集在就留着。 */
+            for show in touchedShows {
+                removeCoverIfUnused(showId: show.showId, title: show.title)
+            }
+            emitStateEvents()
+            pump()
+        }
+    }
+
+    /// 暂停一整部剧（正在传的取 resumeData、排队的转 paused）。
+    func pause(showId: String) { Self.pause(showId: showId) }
+
+    /// 继续一整部剧（paused → queued，再按并发上限调度）。
+    func resume(showId: String) { Self.resume(showId: showId) }
+
+    /// 取消一整部剧：只停任务、只标状态，已下载的文件不动。
+    func cancel(showId: String) { Self.cancel(showId: showId) }
+
+    /// 取消全部（含排队的）。`silent` 给测试收尾用，不回调。
+    func cancel(silent: Bool = false) { Self.stop(silent: silent) }
+
+    func restore(completion: (() -> Void)? = nil) {
+        Self.reconcile(completion: completion)
+    }
+
+    func eventsForPage() -> [[String: Any]] {
+        Self.pageEvents()
+    }
+
+    /// 这部剧在本机的封面相对路径（没有就是空串，界面自己画带剧名的占位）。
+    func coverPath(showId: String, title: String) -> String {
+        Self.localCoverPath(showId: showId, title: title) ?? ""
+    }
+
+    /// 队列快照：网页侧据此算「按剧总体进度」和每条任务的状态，重启后也能对齐。
+    func snapshotForPage() -> [[String: Any]] {
+        Self.snapshot()
+    }
+
+    func handleBackgroundEvents(completion: @escaping () -> Void) {
+        Self.adoptBackgroundEvents(completion: completion)
+    }
+
+    // MARK: - 会话
+
+    private static func sessionInstance() -> URLSession {
+        if let existing = sessionStorage { return existing }
+        let configuration = URLSessionConfiguration.background(withIdentifier: backgroundIdentifier)
+        /* 不交给系统随意调度：用户点完就在等这一集，能连就马上传。 */
+        configuration.isDiscretionary = false
+        configuration.sessionSendsLaunchEvents = true
+        configuration.timeoutIntervalForRequest = 30
+        configuration.timeoutIntervalForResource = 60 * 60
+        configuration.waitsForConnectivity = true
+        let created = URLSession(configuration: configuration, delegate: shared, delegateQueue: OperationQueue.main)
+        sessionStorage = created
+        return created
+    }
+
+    // MARK: - 入队 / 调度
+
+    private static func freshRecords() -> [Record] {
+        records = loadRecords()
+        return records
+    }
+
+    @discardableResult
+    private static func enqueue(
+        _ requests: [Request],
+        progress: [String: (Int64, Int64) -> Void] = [:],
+        finish: [String: (Result<[String: Any], Failure>) -> Void] = [:]
+    ) -> [String] {
+        records = loadRecords()
+        var accepted: [String] = []
+        let tombstones = deletedKeys()
+        let requestedKeys = Set(requests.map { key(showId: $0.showId, epKey: $0.epKey) })
+        /* 已删掉的集：旧记录可以清掉（墓碑在独立存储里），但墓碑本身不能在这里删，
+           否则用户删过的历史随时会被下一条入队请求带回界面。 */
+        for deadKey in tombstones where !requestedKeys.contains(deadKey) {
+            let parts = deadKey.split(separator: "|", maxSplits: 1, omittingEmptySubsequences: false)
+            if parts.count == 2 {
+                records.removeAll { (($0.showId ?? "") == String(parts[0])) && (($0.epKey ?? "") == String(parts[1])) }
+            }
+        }
+        var rejected: [(String, String, [String: String])] = []
+        for request in requests {
+            if let reason = rejection(of: request.url) {
+                rejected.append((request.id, reason, request.meta))
+                continue
+            }
+            let showId = request.showId
+            let epKey = request.epKey
+            /* 没有集号就没法去重、没法记进片库：如实落一条失败记录。
+               以前这里直接 `continue`，网页的乐观行（点一下就先画成「排队中」）永远等不到快照，
+               看起来就是「一直排队，其实什么都没下」。 */
+            if epKey.isEmpty {
+                var record = Record(
+                    id: request.id, url: request.url.absoluteString, name: request.name,
+                    title: request.meta["title"] ?? "", ep: request.meta["epLabel"] ?? "",
+                    meta: request.meta, received: 0, total: 0, status: "failed",
+                    path: "", size: 0, reason: "这一集缺少集号，没法下载（请在选集列表里点具体集数）",
+                    delivered: false, taskIdentifier: 0, updatedAt: Date().timeIntervalSince1970
+                )
+                record.showId = showId
+                record.epKey = ""
+                records.append(record)
+                continue
+            }
+            let episodeKey = key(showId: showId, epKey: epKey)
+            if tombstones.contains(episodeKey) {
+                forgetTombstone(showId: showId, epKey: epKey)
+                records.removeAll { (($0.showId ?? "") == showId) && (($0.epKey ?? "") == epKey) }
+            }
+            if let index = duplicateIndex(in: records, showId: showId, epKey: epKey) {
+                /* 已经在队列里：不重复入队（同一部剧同一集只跑一条） */
+                accepted.append(records[index].id)
+                continue
+            }
+            /* 之前下过 / 失败过：重新入队时用新记录覆盖旧记录（换文件也要能重下） */
+            if let index = records.firstIndex(where: { ($0.showId ?? "") == showId && ($0.epKey ?? "") == epKey && !epKey.isEmpty }) {
+                records.remove(at: index)
+            }
+            var record = Record(
+                id: request.id,
+                url: request.url.absoluteString,
+                name: request.name,
+                title: request.meta["title"] ?? "",
+                ep: request.meta["epLabel"] ?? "",
+                meta: request.meta,
+                received: 0,
+                total: 0,
+                status: "queued",
+                path: "",
+                size: 0,
+                reason: "",
+                delivered: false,
+                taskIdentifier: 0,
+                updatedAt: Date().timeIntervalSince1970
+            )
+            record.showId = showId
+            record.epKey = epKey
+            records.append(record)
+            accepted.append(request.id)
+            progressHandlers[request.id] = progress[request.id]
+            finishHandlers[request.id] = finish[request.id]
+        }
+        for (id, reason, meta) in rejected {
+            /* 不支持就如实拒绝：留一条 failed 记录，网页能显示真实原因，不会静默消失 */
+            var record = Record(
+                id: id, url: "", name: meta["name"] ?? "", title: meta["title"] ?? "",
+                ep: meta["epLabel"] ?? "", meta: meta, received: 0, total: 0, status: "failed",
+                path: "", size: 0, reason: reason, delivered: false, taskIdentifier: 0,
+                updatedAt: Date().timeIntervalSince1970
+            )
+            record.showId = meta["showId"] ?? meta["id"] ?? ""
+            record.epKey = meta["epKey"] ?? ""
+            records.append(record)
+        }
+        if !requests.isEmpty { requestNotificationPermissionOnce() }
+        persist(force: true)
+        pump()
+        emitStateEvents()
+        /* 开始下载就把封面存下来：之后飞行模式打开片库也能看到同一张图，
+           不必等这次下载真的完成。 */
+        captureCovers(for: accepted.compactMap { id in records.first { $0.id == id } })
+        return accepted
+    }
+
+    private static func pump() {
+        for record in planStarts(records) {
+            launch(record)
+        }
+        persist(force: true)
+    }
+
+    private static func launch(_ record: Record) {
+        /* HLS 走分片下载器：一条记录内部并发下分片，全部到齐后合成一个文件。 */
+        if HLSDownloader.isHLSSource(url: record.url, kind: record.meta["kind"]) {
+            update(record.id) { current in
+                current.status = "running"
+                current.taskIdentifier = 0
+                current.resumeData = nil
+                current.reason = ""
+            }
+            HLSDownloader.shared.start(record: record)
+            return
+        }
+        let session = sessionInstance()
+        let task: URLSessionDownloadTask?
+        if let text = record.resumeData, let data = Data(base64Encoded: text) {
+            /* 续传数据里带着第一次请求的 URL 和请求头；这一条只在暂停/继续（同一个任务）时用到。 */
+            task = session.downloadTask(withResumeData: data)
+        } else if let url = URL(string: record.url) {
+            /* 整文件下载也必须带 Referer + 浏览器 UA：部分片源按 UA/防盗链拒绝裸 URLSession 请求，
+               网页播放器能播、App 直接 403 —— 这一段就是那个差异的修复点。 */
+            var request = URLRequest(url: url)
+            for (field, value) in mediaRequestHeaders(from: record.meta) {
+                request.setValue(value, forHTTPHeaderField: field)
+            }
+            request.timeoutInterval = 30
+            task = session.downloadTask(with: request)
+        } else {
+            task = nil
+        }
+        guard let downloadTask = task else {
+            fail(id: record.id, failure: .network("下载地址无效"))
+            return
+        }
+        downloadTask.taskDescription = record.id
+        tasks[record.id] = downloadTask
+        update(record.id) { current in
+            current.status = "running"
+            current.taskIdentifier = downloadTask.taskIdentifier
+            current.resumeData = nil
+            current.reason = ""
+            current.generation = (current.generation ?? 0) + 1
+        }
+        downloadTask.resume()
+    }
+
+    /// 暂停一部剧：正在传的用系统给的 resumeData，排队的直接转 paused。
+    private static func pause(showId: String) {
+        records = loadRecords()
+        var changed = false
+        for record in records where record.status == "queued" && matches(record, showId) {
+            update(record.id) { $0.status = "paused"; $0.reason = "已暂停" }
+            changed = true
+        }
+        let running = records.filter { $0.status == "running" && matches($0, showId) }.map(\.id)
+        for id in running {
+            /* 先把状态改成 paused：delegate 收到取消回调时就不会再写成「失败」 */
+            update(id) { $0.status = "paused"; $0.reason = "已暂停" }
+            changed = true
+            /* HLS 的分片任务不在 tasks 里：单独停掉，已经下好的分片留着。 */
+            HLSDownloader.pause(id: id)
+            if let task = tasks.removeValue(forKey: id) {
+                let generation = record(id)?.generation ?? 0
+                task.cancel(byProducingResumeData: { data in
+                    #if DEBUG
+                    testLastResumeDataBytes = data?.count ?? -1
+                    #endif
+                    /* 回调来自系统内部队列：回到主队列再改状态，和 pause/resume/pump 串行，
+                       并且要核对「还是那条被暂停的任务」，否则宁可丢弃。 */
+                    let deliver = {
+                        storeResumeData(id: id, generation: generation, data: data)
+                    }
+                    #if DEBUG
+                    let delay = testResumeDataCallbackDelay
+                    #else
+                    let delay: TimeInterval = 0
+                    #endif
+                    if delay > 0 {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: deliver)
+                    } else {
+                        DispatchQueue.main.async(execute: deliver)
+                    }
+                })
+            }
+        }
+        progressHandlers[showId] = nil
+        if changed { persist(force: true); emitStateEvents() }
+    }
+
+    private static func resume(showId: String) {
+        records = loadRecords()
+        var changed = false
+        for record in records where record.status == "paused" && matches(record, showId) {
+            update(record.id) { $0.status = "queued"; $0.reason = "" }
+            changed = true
+        }
+        if changed { persist(force: true); pump(); emitStateEvents() }
+    }
+
+    /// 暂停回调落 resumeData：必须同时满足「还是暂停态」和「还是那条任务（generation 一致）」。
+    /// - 用户已经点了继续/取消：新任务已经建好或状态已变 → 丢弃旧数据，绝不污染新任务；
+    /// - 系统没给 resumeData（片源不支持 Range）：保持 paused 且 resumeData 为空，
+    ///   继续时从 0 重下，进度如实归零，不伪造续传。
+    private static func storeResumeData(id: String, generation: Int, data: Data?) {
+        records = loadRecords()
+        guard let index = records.firstIndex(where: { $0.id == id }) else { return }
+        guard records[index].status == "paused", (records[index].generation ?? 0) == generation else { return }
+        records[index].resumeData = (data?.isEmpty == false) ? data!.base64EncodedString() : nil
+        records[index].updatedAt = Date().timeIntervalSince1970
+        persist(force: true)
+        emitStateEvents()
+    }
+
+    /// 取消一部剧：停任务、标状态。已下载的文件保留。
+    private static func cancel(showId: String) {
+        records = loadRecords()
+        var changed = false
+        for record in records where matches(record, showId) && (record.status == "queued" || record.status == "paused" || record.status == "running") {
+            update(record.id) { current in
+                current.status = "cancelled"
+                current.reason = "已取消"
+                current.delivered = false
+                current.resumeData = nil
+                /* 取消后不保留一个「下了多少」的假进度 */
+                current.received = 0
+            }
+            changed = true
+            if let task = tasks.removeValue(forKey: id(of: record)) { task.cancel() }
+            /* 取消 = 这一集不下了：分片缓存和分片任务一起丢掉，别留着一份没人接管的僵尸任务
+               继续跑、继续占下载名额。resume() 那一条（用户只是暂停）才保留缓存。 */
+            HLSDownloader.discard(id: record.id)
+        }
+        if changed { persist(force: true); pump(); emitStateEvents() }
+    }
+
+    /// 取消全部（含排队）。测试收尾与「清空队列」共用。
+    private static func stop(silent: Bool) {
+        records = loadRecords()
+        for record in records where record.status == "queued" || record.status == "paused" || record.status == "running" {
+            update(record.id) { current in
+                guard current.status != "done" else { return }
+                current.status = "cancelled"
+                current.reason = "已取消"
+                current.received = 0
+                current.resumeData = nil
+                current.delivered = false
+            }
+            if let task = tasks.removeValue(forKey: id(of: record)) { task.cancel() }
+            HLSDownloader.discard(id: record.id)
+        }
+        let handlers = finishHandlers
+        finishHandlers.removeAll()
+        progressHandlers.removeAll()
+        if !silent {
+            for (_, handler) in handlers { handler(.failure(.cancelled)) }
+        }
+        persist(force: true)
+        emitStateEvents()
+    }
+
+    private static func matches(_ record: Record, _ showId: String) -> Bool {
+        guard !showId.isEmpty else { return false }
+        return (record.showId ?? "") == showId
+    }
+
+    private static func id(of record: Record) -> String { record.id }
+
+    /// 重新接上后台会话：App 被系统重新拉起时，这里把上一个进程留下的任务找回来。
+    ///
+    /// 四条边界：
+    /// 1. running 但系统里已经没有这条任务 → 如实标「系统中断」；
+    /// 2. queued / paused 的按原状态保留并重新调度（重启后队列不会凭空消失）；
+    /// 3. 系统交回来的任务只接管仍在队列里的（queued / running）；已删、已取消、失败、已完成的一律 cancel；
+    ///    以前无条件把记录改回 running：任务 cancel() 是异步的，取消/删除后的下一次对账会把它复活，
+    ///    而那条任务永远不会再发终态回调 —— 这就是「取消过一集，队列从此永远卡着」。
+    /// 4. 对不上任何记录的系统任务（孤儿）直接 cancel，不让它们白占后台会话和下载名额。
+    /// 5. paused 不是终态：HLS 的分片缓存必须留着，只停调度；进程重启后把记录里的暂停态同步给 HLS，
+    ///    否则对账会把已暂停的任务重新拉起来，已下好的分片也可能被当僵尸删掉。
+    private static var reconciling = false
+    private static func reconcile(completion: (() -> Void)?) {
+        /* 页面加载、回到前台、切页都会叫一次对账：重入会拿到两份不同时刻的 getAllTasks，
+           相互覆盖状态。只允许一份在跑，后面的直接按上一次结果继续。 */
+        guard !reconciling else { completion?(); return }
+        reconciling = true
+        let activeSession = sessionInstance()
+        records = loadRecords()
+        activeSession.getAllTasks { systemTasks in
+            let alive = Set(systemTasks.compactMap { $0.taskDescription })
+            var changed = false
+            for index in records.indices where records[index].status == "running" {
+                if alive.contains(records[index].id) { continue }
+                /* HLS 的分片跑在另一条后台会话里：状态还在就接着下，不能按整文件任务误判失败。 */
+                if HLSDownloader.hasJob(id: records[index].id) {
+                    HLSDownloader.resume(id: records[index].id)
+                    continue
+                }
+                /* 系统没给完成回调、任务也不在了：如实标失败，不许假装完成。 */
+                records[index].status = "failed"
+                records[index].reason = "下载被系统中断（App 被强制退出或任务被清理）"
+                records[index].delivered = false
+                changed = true
+            }
+            for task in systemTasks {
+                guard let id = task.taskDescription,
+                      let index = records.firstIndex(where: { $0.id == id }) else {
+                    /* 孤儿任务：记录已经不在（删了/被截断），留着只会占名额。 */
+                    task.cancel()
+                    continue
+                }
+                let adoptable = (records[index].status == "queued" || records[index].status == "running")
+                    && !Self.isDeleted(records[index])
+                guard adoptable else {
+                    /* 记录已经是终态（已删除/已取消/失败/完成）：这条任务不能再跑下去，也不能复活记录。 */
+                    task.cancel()
+                    continue
+                }
+                records[index].status = "running"
+                records[index].taskIdentifier = task.taskIdentifier
+                tasks[id] = task as? URLSessionDownloadTask
+            }
+            /* 已删/取消/失败的 HLS 遗留任务（旧版本取消时只 pause 不丢弃）：连分片缓存一起清掉。
+               暂停中的记录保留 job 和分片缓存，但要把暂停态同步给 HLS，不能让对账重新调度。 */
+            HLSDownloader.discardZombies(isLive: { id in
+                records.contains { $0.id == id && !Self.isDeleted($0) &&
+                    ($0.status == "queued" || $0.status == "running" || $0.status == "paused") }
+            }, isPaused: { id in
+                records.contains { $0.id == id && !Self.isDeleted($0) && $0.status == "paused" }
+            })
+            if changed { persist(force: true) }
+            reconciling = false
+            /* 上次没跑完的队列接着跑（并发仍然最多两条） */
+            pump()
+            completion?()
+        }
+    }
+
+    /// HLS 分片任务是否还在（只给对账用，不暴露写入口）。
+    /// 注意：不能在这里 reload 覆盖内存里的 records —— 对账/入队可能还有没落库的改动。
+    static func isRunning(id: String) -> Bool {
+        if let hit = records.first(where: { $0.id == id }) {
+            return hit.status == "running" && !Self.isDeleted(hit)
+        }
+        return loadRecords().contains { $0.id == id && $0.status == "running" && !Self.isDeleted($0) }
+    }
+
+    /// 交给网页的终态/进度事件：终态只交一次，进度每次都可以重发。
+    private static func pageEvents() -> [[String: Any]] {
+        records = loadRecords()
+        var events: [[String: Any]] = []
+        var needsSave = false
+        for record in records where !Self.isDeleted(record) {
+            if record.status == "running" {
+                events.append([
+                    "event": "progress", "id": record.id,
+                    "received": record.received, "total": record.total,
+                    "showId": record.showId ?? "", "epKey": record.epKey ?? "",
+                ])
+                continue
+            }
+            if record.delivered { continue }
+            switch record.status {
+            case "done":
+                events.append([
+                    "event": "done", "id": record.id, "path": record.path, "name": record.name, "size": record.size,
+                    "showId": record.showId ?? "", "epKey": record.epKey ?? "", "ep": record.ep,
+                    /* 网页片库靠这些字段把完成项并回同一部剧（重启后也不依赖当前页面） */
+                    "title": record.title, "epLabel": record.ep,
+                    "cover": record.meta["cover"] ?? "", "showTotal": record.meta["total"] ?? "",
+                ])
+            case "cancelled":
+                events.append(["event": "cancelled", "id": record.id,
+                               "showId": record.showId ?? "", "epKey": record.epKey ?? ""])
+            case "failed":
+                events.append(["event": "failed", "id": record.id, "reason": record.reason,
+                               "showId": record.showId ?? "", "epKey": record.epKey ?? ""])
+            default:
+                continue
+            }
+            needsSave = true
+        }
+        if needsSave {
+            for index in records.indices where !Self.isDeleted(records[index]) && records[index].status != "running" && records[index].status != "queued" && records[index].status != "paused" {
+                records[index].delivered = true
+            }
+            persist(force: true)
+        }
+        return events
+    }
+
+    /// 队列快照：所有任务的真实状态（含排队/暂停），网页据此算整剧进度。
+    /// `coverPath` / `showTotal` 只给原生片库用：`coverPath` 是本机落盘的相对路径，
+    /// 不把远端地址当成「本地封面」传给界面。
+    private static func snapshot() -> [[String: Any]] {
+        records = loadRecords()
+        return records.filter { !Self.isDeleted($0) }.map { record -> [String: Any] in
+            let showId = record.showId ?? ""
+            return [
+                "id": record.id,
+                "showId": showId,
+                "epKey": record.epKey ?? "",
+                "epLabel": record.ep,
+                "title": record.title,
+                "name": record.name,
+                "status": record.status,
+                "received": record.received,
+                "total": record.total,
+                "path": record.path,
+                "size": record.size,
+                "reason": record.reason,
+                "coverPath": record.coverPath ?? localCoverPath(showId: showId, title: record.title) ?? "",
+                "showTotal": record.meta["total"] ?? "",
+            ]
+        }
+    }
+
+    /// 把内存里的状态推给界面（界面再转发给网页）。
+    private static func emitStateEvents() {
+        guard let sink = eventSink else { return }
+        records = loadRecords()
+        var payload: [[String: Any]] = []
+        for record in records where !Self.isDeleted(record) {
+            var item: [String: Any] = [
+                "event": record.status == "running" ? "progress" : record.status,
+                "id": record.id,
+                "showId": record.showId ?? "",
+                "epKey": record.epKey ?? "",
+                "status": record.status,
+                "received": record.received,
+                "total": record.total,
+                "reason": record.reason,
+                "name": record.name,
+                "path": record.path,
+                "size": record.size,
+                "title": record.title,
+                "epLabel": record.ep,
+                "cover": record.meta["cover"] ?? "",
+                "showTotal": record.meta["total"] ?? "",
+            ]
+            if record.status == "done" || record.status == "failed" || record.status == "cancelled" { item["event"] = record.status }
+            payload.append(item)
+        }
+        sink(payload)
+    }
+
+    /// 后台回调收尾：会话已重建、状态已对账后再告诉系统，别提前收尾。
+    private static func adoptBackgroundEvents(completion: @escaping () -> Void) {
+        backgroundCompletion = completion
+        reconcile(completion: {
+            sessionInstance().getAllTasks { systemTasks in
+                guard systemTasks.isEmpty else { return }
+                if let pending = backgroundCompletion {
+                    backgroundCompletion = nil
+                    pending()
+                }
+            }
+        })
+    }
+
+    // MARK: - 记录读写
+
+    private static func loadRecords() -> [Record] {
+        guard let data = UserDefaults.standard.data(forKey: tasksKey) else { return [] }
+        var list = (try? JSONDecoder().decode([Record].self, from: data)) ?? []
+        /* 老版本记录的是沙盒绝对路径：读出来就迁成相对路径，下一次 persist 落库。
+           迁移只改写法，不动文件，也不影响「文件真的在还是在」。 */
+        for index in list.indices where !list[index].path.isEmpty {
+            let relative = relativePath(for: list[index].path)
+            if list[index].path != relative { list[index].path = relative }
+        }
+        return list
+    }
+
+    private static func persist(force: Bool) {
+        let now = Date().timeIntervalSince1970
+        if !force && now - lastPersistAt < 1 { return }
+        lastPersistAt = now
+        /* 已经下完、文件还在的记录一律留着：它们就是「我的下载」片库本身，
+           按条数裁掉就成了「下载完成了却看不到」。
+           其余记录（失败 / 取消 / 还没有落盘路径的中间态）只留最近 400 条，
+           够长又不会把 UserDefaults 撑爆。 */
+        var done: [Record] = []
+        var others: [Record] = []
+        for record in records {
+            if record.status == "done" && !record.path.isEmpty {
+                done.append(record)
+            } else {
+                others.append(record)
+            }
+        }
+        /* 极端兜底：2000 条已完成记录已远超正常用量，最旧的裁掉，别把默认值存储撑爆。
+           真正的上限是磁盘——文件被删或不见了，记录也就不该再留着。 */
+        if done.count > 2000 { done = Array(done.suffix(2000)) }
+        let trimmed = done + Array(others.suffix(400))
+        if let data = try? JSONEncoder().encode(trimmed) {
+            UserDefaults.standard.set(data, forKey: tasksKey)
+        }
+    }
+
+    private static let tombstonePrefix = "kj-ios-download-deleted-"
+    /// 墓碑独立存储：一个键装下所有 showId|epKey，值是删除时间戳。
+    /// 只从下载记录里读墓碑是不够的：记录会被 persist 的 suffix(400) 裁掉，
+    /// 裁掉之后旧快照、晚到回调又能把已删的集写回来。墓碑单独落库就不受记录裁剪影响。
+    private static let tombstoneStoreKey = "kj-ios-download-tombstones-v1"
+    /// 有界清理：只保留最近 2000 条删除。正常用户远用不到，也不会把默认值存储撑爆。
+    private static let tombstoneLimit = 2000
+    private static var tombstoneCache: [String: Double] = [:]
+    private static var tombstonesLoaded = false
+
+    private static func key(showId: String, epKey: String) -> String { showId + "|" + epKey }
+
+    private static func tombstones() -> [String: Double] {
+        if tombstonesLoaded { return tombstoneCache }
+        tombstoneCache = loadTombstones()
+        tombstonesLoaded = true
+        return tombstoneCache
+    }
+
+    private static func loadTombstones() -> [String: Double] {
+        let defaults = UserDefaults.standard
+        var merged: [String: Double] = [:]
+        if let saved = defaults.dictionary(forKey: tombstoneStoreKey) {
+            for (marker, value) in saved {
+                if let number = value as? NSNumber, number.doubleValue > 0 {
+                    merged[marker] = number.doubleValue
+                }
+            }
+        }
+        /* build24 之前一个删除项一个键：读进来迁移到独立存储，迁完把老键清掉。 */
+        var legacyKeys: [String] = []
+        for key in defaults.dictionaryRepresentation().keys where key.hasPrefix(tombstonePrefix) {
+            if let number = defaults.object(forKey: key) as? NSNumber, number.doubleValue > 0 {
+                merged[String(key.dropFirst(tombstonePrefix.count))] = number.doubleValue
+            }
+            legacyKeys.append(key)
+        }
+        /* 老记录上的 deletedAt 也是一份删除证据：一起并进来，记录被裁掉也不丢。 */
+        for record in loadRecords() {
+            guard let removedAt = record.deletedAt, removedAt > 0 else { continue }
+            let showId = record.showId ?? ""
+            let epKey = record.epKey ?? ""
+            guard !showId.isEmpty, !epKey.isEmpty else { continue }
+            merged[key(showId: showId, epKey: epKey)] = max(merged[key(showId: showId, epKey: epKey)] ?? 0, removedAt)
+        }
+        saveTombstones(merged)
+        for key in legacyKeys { defaults.removeObject(forKey: key) }
+        return merged
+    }
+
+    /// 存墓碑：按删除时间保留最近的 tombstoneLimit 条，只有超出的老记录才会被丢掉。
+    private static func saveTombstones(_ tombstones: [String: Double]) {
+        let defaults = UserDefaults.standard
+        guard !tombstones.isEmpty else {
+            defaults.removeObject(forKey: tombstoneStoreKey)
+            return
+        }
+        var stored: [String: Double] = [:]
+        for (marker, stamp) in tombstones.sorted(by: { $0.value > $1.value }).prefix(tombstoneLimit) {
+            stored[marker] = stamp
+        }
+        defaults.set(stored, forKey: tombstoneStoreKey)
+    }
+
+    private static func rememberTombstone(showId: String, epKey: String, at stamp: Double) {
+        guard !showId.isEmpty, !epKey.isEmpty else { return }
+        var next = tombstones()
+        next[key(showId: showId, epKey: epKey)] = stamp
+        saveTombstones(next)
+        tombstoneCache = next
+        tombstonesLoaded = true
+    }
+
+    private static func forgetTombstone(showId: String, epKey: String) {
+        guard !showId.isEmpty, !epKey.isEmpty else { return }
+        var next = tombstones()
+        guard next.removeValue(forKey: key(showId: showId, epKey: epKey)) != nil else { return }
+        saveTombstones(next)
+        tombstoneCache = next
+        tombstonesLoaded = true
+    }
+
+    private static func deletedKeys() -> Set<String> { Set(tombstones().keys) }
+
+    private static func isDeleted(_ record: Record) -> Bool {
+        if (record.deletedAt ?? 0) > 0 { return true }
+        let showId = record.showId ?? ""
+        let epKey = record.epKey ?? ""
+        guard !showId.isEmpty, !epKey.isEmpty else { return false }
+        return tombstones()[key(showId: showId, epKey: epKey)] != nil
+    }
+
+    private static func update(_ id: String, force: Bool = true, _ mutate: (inout Record) -> Void) {
+        if !records.contains(where: { $0.id == id }) { records = loadRecords() }
+        guard let index = records.firstIndex(where: { $0.id == id }) else { return }
+        mutate(&records[index])
+        records[index].updatedAt = Date().timeIntervalSince1970
+        persist(force: force)
+    }
+
+    private static func record(_ id: String) -> Record? {
+        if let hit = records.first(where: { $0.id == id }) { return hit }
+        records = loadRecords()
+        return records.first(where: { $0.id == id })
+    }
+
+    // MARK: - 通知
+
+    private static func requestNotificationPermissionOnce() {
+        let defaults = UserDefaults.standard
+        guard !defaults.bool(forKey: notifyAskedKey) else { return }
+        defaults.set(true, forKey: notifyAskedKey)
+        /* 授权是锦上添花：用户拒绝也不影响下载，所以结果直接忽略。 */
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
+    }
+
+    private static func notifyFinished(_ record: Record) {
+        let center = UNUserNotificationCenter.current()
+        center.getNotificationSettings { settings in
+            guard settings.authorizationStatus == .authorized || settings.authorizationStatus == .provisional else { return }
+            let content = UNMutableNotificationContent()
+            content.title = "下载完成"
+            content.body = record.title.isEmpty ? record.name : "\(record.title) · \(record.ep.isEmpty ? record.name : record.ep)"
+            center.add(UNNotificationRequest(identifier: record.id, content: content, trigger: nil))
+        }
+    }
+
+    // MARK: - 收尾
+
+    private static func complete(id: String, payload: [String: Any]) {
+        if let current = record(id), Self.isDeleted(current) {
+            /* 用户删这一集的时候它刚好下完：记录已经被墓碑作废，刚落盘的文件不能留成孤儿。 */
+            Self.removeDownloadedFile(at: Self.relativePath(for: payload["path"] as? String))
+            return
+        }
+        update(id) { record in
+            record.status = "done"
+            /* 只存相对路径：真机换一次容器，旧绝对路径就不存在了（删除会永远失败）。 */
+            record.path = Self.relativePath(for: payload["path"] as? String)
+            if let finalName = payload["name"] as? String, !finalName.isEmpty { record.name = finalName }
+            record.size = (payload["size"] as? NSNumber)?.int64Value ?? 0
+            record.received = record.size
+            record.total = max(record.total, record.size)
+            record.delivered = false
+            record.resumeData = nil
+            record.reason = ""
+        }
+        if let finished = record(id) { notifyFinished(finished) }
+        tasks.removeValue(forKey: id)
+        let handler = finishHandlers.removeValue(forKey: id)
+        progressHandlers.removeValue(forKey: id)
+        emitStateEvents()
+        handler?(.success(payload))
+        pump()
+    }
+
+    // MARK: - HLS 分片下载回调（由 HLSDownloader 调用）
+
+    /// 分片进度：已下好的分片按字节汇总，再按「已完成时长 / 总时长」折算总量，
+    /// 网页侧算出来的百分比就是「已完成的分片 / 总片数」，长剧集不会提前跳到 100%。
+    static func hlsProgress(id: String, received: Int64, total: Int64) {
+        guard let current = record(id), current.status == "running", !Self.isDeleted(current) else { return }
+        update(id, force: false) { item in
+            item.received = received
+            item.total = total
+        }
+        let now = Date().timeIntervalSince1970
+        guard now - (lastProgressEventAt[id] ?? 0) >= 0.25 else { return }
+        lastProgressEventAt[id] = now
+        guard let latest = record(id) else { return }
+        var event: [String: Any] = [
+            "event": "progress", "id": id, "showId": latest.showId ?? "",
+            "epKey": latest.epKey ?? "", "epLabel": latest.ep, "title": latest.title,
+            "received": latest.received, "total": latest.total,
+        ]
+        event["cover"] = latest.meta["cover"] ?? ""
+        event["showTotal"] = latest.meta["total"] ?? ""
+        eventSink?([event])
+    }
+
+    /// HLS 合成完成：和整文件下载走同一条完成路径（记录、通知、网页事件完全一致）。
+    static func hlsComplete(id: String, path: String, size: Int64, name: String) {
+        complete(id: id, payload: ["path": path, "size": size, "name": name])
+    }
+
+    static func hlsFail(id: String, reason: String) {
+        fail(id: id, failure: .network(reason))
+    }
+
+    private static func fail(id: String, failure: Failure) {
+        if let current = record(id), Self.isDeleted(current) { return }
+        update(id) { record in
+            record.status = failure.isCancellation ? "cancelled" : "failed"
+            record.reason = failure.message
+            record.delivered = false
+            record.resumeData = nil
+        }
+        tasks.removeValue(forKey: id)
+        /* 失败/取消的 HLS 任务不留分片缓存：这一集的记录已经是终态，没人会再接手那些分片，
+           继续留着就是白占磁盘。重试是网页重新解析、重新入队（新记录、从 0 开始）。 */
+        HLSDownloader.discard(id: id)
+        lastProgressEventAt.removeValue(forKey: id)
+        let handler = finishHandlers.removeValue(forKey: id)
+        progressHandlers.removeValue(forKey: id)
+        emitStateEvents()
+        handler?(.failure(failure))
+        pump()
+    }
+}
+
+private extension MediaDownloader.Failure {
+    var isCancellation: Bool {
+        if case .cancelled = self { return true }
+        return false
     }
 }
 
@@ -119,25 +1572,42 @@ extension MediaDownloader: URLSessionDownloadDelegate {
         totalBytesWritten: Int64,
         totalBytesExpectedToWrite: Int64
     ) {
-        progress?(totalBytesWritten, totalBytesExpectedToWrite)
+        guard let id = downloadTask.taskDescription, let current = Self.record(id), current.status == "running", !Self.isDeleted(current) else { return }
+        Self.update(id, force: false) { record in
+            record.received = totalBytesWritten
+            record.total = totalBytesExpectedToWrite > 0 ? totalBytesExpectedToWrite : record.total
+        }
+        Self.progressHandlers[id]?(totalBytesWritten, totalBytesExpectedToWrite)
+        let now = Date().timeIntervalSince1970
+        let isLastChunk = totalBytesExpectedToWrite > 0 && totalBytesWritten >= totalBytesExpectedToWrite
+        let shouldSendEvent = isLastChunk || now - (Self.lastProgressEventAt[id] ?? 0) >= 0.25
+        if shouldSendEvent, let record = Self.record(id) {
+            Self.lastProgressEventAt[id] = now
+            var event: [String: Any] = [
+                "event": "progress", "id": id, "showId": record.showId ?? "",
+                "epKey": record.epKey ?? "", "epLabel": record.ep, "title": record.title,
+                "received": record.received, "total": record.total,
+            ]
+            event["cover"] = record.meta["cover"] ?? ""
+            event["showTotal"] = record.meta["total"] ?? ""
+            Self.eventSink?([event])
+        }
     }
 
     func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
-        guard let job = job else { return }
+        guard let id = downloadTask.taskDescription else { return }
+        guard let current = Self.record(id), current.status == "running", !Self.isDeleted(current) else { return }
         if let response = downloadTask.response as? HTTPURLResponse, !(200...299).contains(response.statusCode) {
-            moved = nil
-            finish?(.failure(.http(response.statusCode)))
-            cleanup()
+            Self.fail(id: id, failure: .http(response.statusCode))
             return
         }
-        guard let directory = Self.directory() else {
-            finish?(.failure(.disk("找不到本机存储目录")))
-            cleanup()
+        guard let name = Self.record(id)?.name, let directory = Self.directory() else {
+            Self.fail(id: id, failure: .disk("找不到本机存储目录"))
             return
         }
         do {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-            let target = directory.appendingPathComponent(job.name)
+            let target = directory.appendingPathComponent(name)
             if FileManager.default.fileExists(atPath: target.path) {
                 try FileManager.default.removeItem(at: target)
             }
@@ -147,26 +1617,41 @@ extension MediaDownloader: URLSessionDownloadDelegate {
                let number = attributes[.size] as? NSNumber {
                 size = number.int64Value
             }
-            moved = ["path": target.path, "name": job.name, "size": size]
+            Self.movedFiles[downloadTask.taskIdentifier] = ["path": target.path, "name": name, "size": size]
         } catch {
-            finish?(.failure(.disk(error.localizedDescription)))
-            cleanup()
+            Self.fail(id: id, failure: .disk(error.localizedDescription))
         }
     }
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        guard let id = task.taskDescription else { return }
+        /* 同一条任务可能被重复回调（完成 + 取消 + 重连）：只认第一次终态。 */
+        guard !Self.finishedTasks.contains(task.taskIdentifier) else { return }
+        Self.finishedTasks.insert(task.taskIdentifier)
+        Self.tasks.removeValue(forKey: id)
+        /* 暂停/取消是我们自己先改的状态：这里不能再写成失败。 */
+        guard let current = Self.record(id), current.status == "running", !Self.isDeleted(current) else { return }
         if let error = error as NSError? {
             if error.domain == NSURLErrorDomain && error.code == NSURLErrorCancelled {
-                finish?(.failure(.cancelled))
+                Self.fail(id: id, failure: .cancelled)
             } else {
-                finish?(.failure(.network(error.localizedDescription)))
+                /* 带上 domain/code：模拟器里 4097（nsurlsessiond 没起来）和真正的网络错误
+                   在设置面板里长得一样，排查时必须有据可依。 */
+                Self.fail(id: id, failure: .network("网络中断（\(error.domain) \(error.code)）: \(error.localizedDescription)"))
             }
-            cleanup()
             return
         }
-        if let moved = moved {
-            finish?(.success(moved))
+        if let payload = Self.movedFiles[task.taskIdentifier] {
+            Self.movedFiles[task.taskIdentifier] = nil
+            Self.complete(id: id, payload: payload)
+        } else {
+            Self.fail(id: id, failure: .network("下载没有拿到文件"))
         }
-        cleanup()
+    }
+
+    func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession) {
+        guard let completion = Self.backgroundCompletion else { return }
+        Self.backgroundCompletion = nil
+        completion()
     }
 }

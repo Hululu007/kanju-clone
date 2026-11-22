@@ -2,8 +2,10 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import vm from 'node:vm';
 import test from 'node:test';
+import { attachFixtureInspect, withDOM } from './fixture-dom.mjs';
 
 const source = await readFile(new URL('../ZhuijuAI/AppBootstrap.js', import.meta.url), 'utf8');
+const settle = () => new Promise((resolve) => setTimeout(resolve, 10));
 
 function node(tag = 'div') {
   const element = {
@@ -16,22 +18,69 @@ function node(tag = 'div') {
     /* 真实 DOM 里 style.display 默认是空串，不是 undefined */
     style: { display: '' },
     dataset: {},
-    appendChild(child) { child.parentNode = element; element.children.push(child); return child; },
+    /* 真实 DOM 的 appendChild 会把节点从原来的父节点上摘下来（移动而不是复制）：
+       注入层靠这个把进度块在两个面板之间搬来搬去，夹具必须照做。 */
+    appendChild(child) {
+      if (child.parentNode && child.parentNode.children) {
+        const siblings = child.parentNode.children;
+        const at = siblings.indexOf(child);
+        if (at >= 0) siblings.splice(at, 1);
+      }
+      child.parentNode = element;
+      element.children.push(child);
+      return child;
+    },
     insertBefore(child, reference) {
       const index = element.children.indexOf(reference);
       child.parentNode = element;
       element.children.splice(index < 0 ? element.children.length : index, 0, child);
       return child;
     },
-    setAttribute(name, value) { element[name] = value; },
-    getAttribute(name) { return element[name]; },
-    removeAttribute(name) { delete element[name]; },
+    setAttribute(name, value) {
+      if (name === 'hidden') element.hidden = true;
+      else if (name === 'class') element.className = value;
+      else if (name.startsWith('data-')) element.dataset[name.slice(5).replace(/-([a-z])/g, (_, letter) => letter.toUpperCase())] = value;
+      else element[name] = value;
+    },
+    /* 真 DOM 里没写过的属性 getAttribute 返回 null，不是 undefined。
+       注入层有 `getAttribute('data-dl-key') !== null` 这类判断，夹具必须照真行为来，
+       否则删除按钮永远只能删到它自己（历史上这条差异被用例手写属性绕过去了）。 */
+    getAttribute(name) {
+      const value = name.startsWith('data-')
+        ? element.dataset[name.slice(5).replace(/-([a-z])/g, (_, letter) => letter.toUpperCase())]
+        : element[name];
+      return value === undefined ? null : value;
+    },
+    removeAttribute(name) { if (name === 'hidden') element.hidden = false; else delete element[name]; },
     get nextSibling() {
       const siblings = element.parentNode ? element.parentNode.children : [];
       const index = siblings.indexOf(element);
       return index >= 0 ? siblings[index + 1] : undefined;
     },
-    closest(selector) { return selector === '#' + element.id ? element : null; },
+    get firstChild() { return element.children.length ? element.children[0] : null; },
+    removeChild(child) {
+      const at = element.children.indexOf(child);
+      if (at >= 0) element.children.splice(at, 1);
+      child.parentNode = null;
+      return child;
+    },
+    hasAttribute(name) { return name === 'hidden' ? !!element.hidden : name in element; },
+    closest(selector) {
+      const matches = (candidate, part) => {
+        if (part[0] === '#') return candidate.id === part.slice(1);
+        if (part[0] === '.') return String(candidate.className || '').split(/\s+/).includes(part.slice(1));
+        const attribute = /^\[([\w-]+)(?:="([^"]*)")?\]$/.exec(part);
+        if (!attribute) return candidate.tagName === part.toUpperCase();
+        const value = candidate.getAttribute(attribute[1]);
+        return value !== undefined && value !== null && (attribute[2] === undefined || value === attribute[2]);
+      };
+      let candidate = element;
+      while (candidate) {
+        if (String(selector).split(',').some((part) => matches(candidate, part.trim()))) return candidate;
+        candidate = candidate.parentNode;
+      }
+      return null;
+    },
     querySelector(selector) {
       const want = String(selector).replace(/^\./, '');
       const walk = (current) => {
@@ -49,10 +98,19 @@ function node(tag = 'div') {
       return element.children.filter((child) => String(child.className || '').split(' ').includes(name));
     },
   };
-  return element;
+  /* children / parentNode 不参与 util.inspect：断言失败时 Node 的 assert 用
+     `customInspect: false, depth: 1000` 展开 actual，同一个节点既在 parentNode 里又在
+     children 里，输出会指数膨胀（2026-11-20 一次失败的断言就这样吃掉 40GB）。
+     访问和修改都不受影响，只是打印不再带整棵 DOM。 */
+  Object.defineProperty(element, 'children', { value: element.children, writable: true, enumerable: false, configurable: true });
+  Object.defineProperty(element, 'parentNode', { value: element.parentNode, writable: true, enumerable: false, configurable: true });
+  return withDOM(attachFixtureInspect(element), node);
 }
 
-function fixture({ origin = 'https://zhuiju.dpdns.org', storageThrows = false, landscape = false, keyword = '', search = '?id=fixture', episodes = [], playRejects = false, maxRate = 0, bridge = true, signedIn = false } = {}) {
+/* 夹具默认把「默认用第三方播放器」关掉（seed 成 '0'）：按钮/菜单类用例关心的是菜单本身，
+   每次都先点两下很啰嗦。新用例要验「默认就是第三方播放器」时传 externalPlayerDefault: true，
+   此时不写这条偏好，和真机上第一次安装的默认值一致。 */
+function fixture({ origin = 'https://zhuiju.dpdns.org', storageThrows = false, landscape = false, keyword = '', search = '?id=fixture', episodes = [], playRejects = false, maxRate = 0, bridge = true, signedIn = false, noSelectedEpisode = false, homePage = false, externalPlayerDefault = false, newDownloadUI = false, noElementFullscreen = false, seed = {} } = {}) {
   const shared = [];
   const listeners = {};
   const replies = [];
@@ -62,13 +120,17 @@ function fixture({ origin = 'https://zhuiju.dpdns.org', storageThrows = false, l
   const attributes = {};
   const selected = { dataset: { ep: '18' }, textContent: '第19集' };
   let videoRate = 1;
-  const video = { id: 'video', tagName: 'VIDEO', readyState: 2, currentSrc: 'https://media.example/19.mp4',
-    controls: true, paused: true, duration: 120, currentTime: 0, removed: [],
+  const video = { id: 'video', tagName: 'VIDEO', style: {}, readyState: 2, currentSrc: 'https://media.example/19.mp4',
+    controls: true, paused: true, duration: 120, currentTime: 0, videoWidth: 1920, videoHeight: 1080, removed: [],
+    attributes: {},
+    setAttribute(name, value) { video.attributes[name] = String(value); },
+    getAttribute(name) { return video.attributes[name]; },
     load() {}, querySelectorAll() { return []; },
-    removeAttribute(name) { video.removed.push(name); },
+    removeAttribute(name) { video.removed.push(name); delete video.attributes[name]; },
     pause() { video.paused = true; },
     play() { video.started = (video.started || 0) + 1; video.paused = false; return Promise.resolve(); },
-    webkitEnterFullscreen() { video.nativeFullscreen = (video.nativeFullscreen || 0) + 1; } };
+    webkitEnterFullscreen() { video.nativeFullscreen = (video.nativeFullscreen || 0) + 1; },
+    webkitExitFullscreen() { video.nativeExit = (video.nativeExit || 0) + 1; } };
   /* 系统可能把倍速夹回去：maxRate 模拟 iOS 只允许到 2× */
   Object.defineProperty(video, 'playbackRate', {
     get() { return videoRate; },
@@ -76,10 +138,18 @@ function fixture({ origin = 'https://zhuiju.dpdns.org', storageThrows = false, l
   });
   const player = node('section');
   player.id = 'player';
+  player.style.aspectRatio = '16 / 9';
+  player.getBoundingClientRect = () => ({ width: 390, height: 219 });
   player.appendChild(video);
   const head = node('head');
   const toolbar = node('div');
   toolbar.id = 'playTools';
+  /* 站点的工具条顺序：显示设置 / 线路 / 弹幕 / 画中画 / 下一集。弹幕按钮要让位给下载。 */
+  const dmButton = node('button');
+  dmButton.id = 'dmBtn';
+  dmButton.className = 'pp-tool on';
+  dmButton.textContent = '弹幕 开';
+  toolbar.appendChild(dmButton);
   const pipButton = node('button');
   pipButton.id = 'pipBtn';
   toolbar.appendChild(pipButton);
@@ -125,6 +195,11 @@ function fixture({ origin = 'https://zhuiju.dpdns.org', storageThrows = false, l
   const searchInput = node('textarea');
   searchInput.id = 'q';
   searchInput.value = keyword;
+  /* 播放页详情头：片库要拿它当剧名和封面（比文件名靠谱，也不用猜） */
+  const detailTitle = node('h1');
+  detailTitle.textContent = '测试剧';
+  const posterImage = node('img');
+  posterImage.src = 'https://zhuiju.dpdns.org/posters/fixture.jpg';
   const hint = node('p');
   hint.id = 'playHint';
   hint.textContent = '';
@@ -133,6 +208,15 @@ function fixture({ origin = 'https://zhuiju.dpdns.org', storageThrows = false, l
   const settingsPanel = node('div');
   settingsPanel.id = 'settingsPanel';
   settingsPanel.hidden = false;
+  /* 播放页顶栏：pageHead({title: show.title, back:'/'}) —— 真机上压在画面上的就是它。 */
+  const pageHead = node('header');
+  pageHead.className = 'page-head';
+  pageHead.hidden = false;
+  const phTitle = node('h1');
+  phTitle.className = 'ph-title';
+  phTitle.textContent = '测试剧';
+  pageHead.appendChild(phTitle);
+  const tabbar = node('nav'); tabbar.className = 'tabbar';
   const lineBar = node('div');
   lineBar.id = 'lineBar';
   lineBar.hidden = false;
@@ -140,6 +224,7 @@ function fixture({ origin = 'https://zhuiju.dpdns.org', storageThrows = false, l
     const button = node('button');
     button.className = idx === 0 ? 'ep on' : 'ep';
     button.dataset = { ep: String(idx) };
+    button.textContent = '第' + (Number(idx) + 1) + '集';
     button.classList = {
       toggle(name, force) {
         const on = button.className.split(' ').filter(Boolean).includes(name);
@@ -152,7 +237,7 @@ function fixture({ origin = 'https://zhuiju.dpdns.org', storageThrows = false, l
   });
   const epGrid = node('div');
   epGrid.id = 'epGrid';
-  epGrid.children.push(...epButtons);
+  for (const episode of epButtons) epGrid.appendChild(episode);
   const mediaProto = {
     play() {
       mediaProto.attempts = (mediaProto.attempts || 0) + 1;
@@ -191,15 +276,40 @@ function fixture({ origin = 'https://zhuiju.dpdns.org', storageThrows = false, l
   });
   tabRow.querySelectorAll = (selector) => (selector === '.pp-tab' ? tabButtons : []);
   const body = node('body');
+  /* 站点播放页自己的「下载」按钮：新注入层不再挂原生下载按钮，只接这个入口。 */
+  const siteDownload = node('button');
+  siteDownload.setAttribute('data-pw-act', 'dl');
+  siteDownload.setAttribute('aria-label', '下载');
+  siteDownload.textContent = '下载';
+  body.appendChild(siteDownload);
+  /* 顶栏设置入口：首页用它打开设置面板（站点自己只会弹「即将上线」） */
+  const settingsTrigger = node('button');
+  settingsTrigger.dataset = { action: 'settings' };
   const idIndex = new Map();
   body.appendChild = (child) => {
+    if (child.parentNode && child.parentNode.children) {
+      const previous = child.parentNode.children;
+      const index = previous.indexOf(child);
+      if (index >= 0) previous.splice(index, 1);
+    }
     child.parentNode = body;
     body.children.push(child);
     if (child.id) idIndex.set(child.id, child);
     return child;
   };
+  body.appendChild(epGrid);
+  const episodeHead = node('div');
+  episodeHead.className = 'ep-head';
+  const episodeCast = node('button');
+  episodeCast.dataset = { action: 'cast' };
+  episodeCast.textContent = '投屏';
+  episodeHead.appendChild(episodeCast);
+  body.appendChild(episodeHead);
   const document = { readyState: 'loading', visibilityState: 'visible', head, body,
-    addEventListener(name, listener) { (listeners[name] ||= []).push(listener); },
+    title: '测试剧 - 看剧AI',
+    addEventListener(name, listener, capture) {
+      (listeners[name] ||= []).push(name === 'click' ? { listener, capture: capture === true } : listener);
+    },
     removeEventListener(name, listener) {
       const list = listeners[name] || [];
       const index = list.indexOf(listener);
@@ -207,16 +317,17 @@ function fixture({ origin = 'https://zhuiju.dpdns.org', storageThrows = false, l
     },
     getElementById(id) {
       if (idIndex.has(id)) return idIndex.get(id);
-      if (id === 'video') return video;
-      if (id === 'playTools') return toolbar;
+      if (id === 'video') return homePage ? null : video;
+      if (id === 'playTools') return homePage ? null : toolbar;
       if (id === 'q') return searchInput;
       if (id === 'playHint') return hint;
       if (id === 'epMore') return epMore;
-      if (id === 'settingsPanel') return settingsPanel;
+      if (id === 'settingsPanel') return homePage ? null : settingsPanel;
       if (id === 'lineBar') return lineBar;
+      if (id === 'dmBtn') return dmButton;
       if (id === 'epGrid') return epGrid;
       if (id === 'days') return days;
-      if (id === 'player') return player;
+      if (id === 'player') return homePage ? null : player;
       if (id === 'ppCtrl') return player.children.find((child) => child.id === 'ppCtrl') || null;
       const walk = (element) => {
         for (const child of element.children || []) {
@@ -228,44 +339,117 @@ function fixture({ origin = 'https://zhuiju.dpdns.org', storageThrows = false, l
         }
         return null;
       };
-      return walk(toolbar) || walk(player);
+      return walk(toolbar) || walk(player) || walk(settingsPanel) || walk(body);
+    },
+    /* 站点的标准全屏 API 路径：document.fullscreenElement 为真时页面进入原生全屏 */
+    fullscreenElement: null,
+    dispatched: [],
+    dispatchEvent(event) {
+      document.dispatchLog = document.dispatchLog || [];
+      document.dispatchLog.push(event && event.type);
+      for (const listener of listeners[event && event.type] || []) listener(event);
+      return true;
     },
     createElement(tag) { return node(tag); },
     querySelector(selector) {
-      if (selector === '.ep.on') return selected;
+      const attribute = /^\[([\w-]+)(?:="([^"]*)")?\]$/.exec(selector);
       if (selector === '[data-action="login"]') return loginTrigger;
+      if (selector === '[data-pw-act="dl"]') return siteDownload;
+      if (attribute) return document.querySelectorAll(selector)[0] || null;
+      if (selector === '.ep.on') return noSelectedEpisode ? null : selected;
+      if (selector === '.detail-info h1') return homePage ? null : detailTitle;
+      if (selector === '.detail-poster img') return homePage ? null : posterImage;
       if (selector === '.pp-tabs') return tabRow;
+      if (selector === '[data-action="settings"]') return settingsTrigger;
       return null;
     },
     querySelectorAll(selector) {
+      if (selector === '#epGrid .ep') return epButtons;
+      if (selector === '.detail-tags span,.detail-info .tag') return [];
+      const attribute = /^\[([\w-]+)(?:="([^"]*)")?\]$/.exec(selector);
+      if (attribute) {
+        const roots = [settingsTrigger, loginTrigger, ...body.children, ...toolbar.children, ...player.children];
+        const descendants = (parent) => (parent.children || []).flatMap((child) => [child, ...descendants(child)]);
+        return [...roots, ...roots.flatMap(descendants)].filter((element) => {
+          if (typeof element.getAttribute !== 'function') return false;
+          const value = element.getAttribute(attribute[1]);
+          return value !== undefined && value !== null && (attribute[2] === undefined || value === attribute[2]);
+        });
+      }
       if (selector === '.ep') return epButtons;
+      if (selector === '#epGrid .ep') return epButtons;
+      if (selector === '.detail-tags span,.detail-info .tag') return [];
+      if (selector === '[data-action="login"]') return [loginTrigger];
+      if (selector === '[data-pw-act="dl"]') return [siteDownload];
+      if (selector === 'button,a,[role="button"]') return [loginTrigger, settingsTrigger, ...toolbar.children, ...player.children];
+      if (selector === '.detail-info h1') return homePage ? [] : [detailTitle];
+      if (selector === '.detail-poster img') return homePage ? [] : [posterImage];
+      if (selector === '.pp-tabs') return [tabRow];
+      if (selector === '.ep-head [data-action="cast"]') return [episodeCast];
       if (selector === '.pp-tab') return tabButtons;
       if (selector === '.sb-name') return [sbName];
       if (selector === '.sb-sub') return [sbSub];
       if (selector === '.acct-name') return [acctName];
       if (selector === '#playTools') return [toolbar];
       if (selector === '#settingsPanel') return [settingsPanel];
+      if (selector === '.tabbar') return [tabbar];
+      if (selector === '.page-head') return [pageHead];
+      if (selector === '.topbar') return [];
       if (selector === '#lineBar') return [lineBar];
       if (selector === '#pipBtn') return [pipButton];
       if (selector === '#nextEpBtn') return [nextButton];
       if (selector === '#player .p-label') return [];
       if (selector === '.pp-toolbar' || selector === '.dm-input' || selector === '#dmInputWrap') return [];
       if (selector === '.pp-hint' || selector === '#playHint') return [hint];
+      if (selector === '[data-action="settings"]') return [settingsTrigger];
+      if (selector === '.pp-tab') return tabButtons;
+      if (selector === '.sb-name') return [sbName];
+      if (selector === '.sb-sub') return [sbSub];
+      if (selector === '.acct-name') return [acctName];
+      if (selector === '#playTools') return [toolbar];
+      if (selector === '#settingsPanel') return [settingsPanel];
+      if (selector === '.tabbar') return [tabbar];
+      if (selector === '.page-head') return [pageHead];
+      if (selector === '.topbar') return [];
+      if (selector === '#lineBar') return [lineBar];
+      if (selector === '.tabbar') return [tabbar];
+      if (selector === '#pipBtn') return [pipButton];
+      if (selector === '#nextEpBtn') return [nextButton];
+      if (selector === '#player .p-label') return [];
+      if (selector === '.pp-toolbar' || selector === '.dm-input' || selector === '#dmInputWrap') return [];
+      if (selector === '.pp-hint' || selector === '#playHint') return [hint];
+      if (selector === '[data-action="settings"]') return [settingsTrigger];
+      if (selector === 'button,a,[role="button"]') return [loginTrigger, settingsTrigger, ...toolbar.children, ...player.children];
       return [];
     },
     documentElement: {
+      style: { setProperty() {} },
+      getBoundingClientRect() { return { width: window.innerWidth || 390, height: window.innerHeight || 844 }; },
       setAttribute(name) { attributes[name] = true; },
       removeAttribute(name) { delete attributes[name]; },
       hasAttribute(name) { return !!attributes[name]; },
     } };
+  let isLandscape = landscape;
+  /* 站点的全屏按钮走标准 Fullscreen API：给 Element.prototype 一份可观察的原实现，
+     验证注入层把它改道到原生视频全屏，而不是真去进会黑屏的容器全屏。 */
+  let elementFullscreenCalls = 0;
+  /* noElementFullscreen 模拟 iOS 15.0–15.3 的 WKWebView：连 Element 全屏 API 都没有。 */
+  const elementProto = noElementFullscreen ? {} : {
+    requestFullscreen() { elementFullscreenCalls += 1; return Promise.resolve(); },
+    webkitRequestFullscreen() { elementFullscreenCalls += 1; return Promise.resolve(); },
+  };
   const window = { location: { origin, protocol: 'https:', hostname: new URL(origin).hostname,
     href: origin + '/player/?id=fixture', pathname: '/player/', search, replace(value) { redirects.push(value); } },
     innerWidth: landscape ? 844 : 390,
     innerHeight: landscape ? 390 : 844,
-    matchMedia(query) { return { matches: landscape && /landscape/.test(query) }; },
-    addEventListener(name, listener) { (listeners[name] ||= []).push(listener); },
+    matchMedia(query) { return { matches: isLandscape && /landscape/.test(query) }; },
+    addEventListener(name, listener, capture) {
+      (listeners[name] ||= []).push(name === 'click' ? { listener, capture: capture === true } : listener);
+    },
     webkit: bridge ? { messageHandlers: { iosPlayer: { postMessage(body) { messages.push(body); } } } } : {},
     HTMLMediaElement: { prototype: mediaProto },
+    Event: class { constructor(type) { this.type = type; } },
+    Element: { prototype: elementProto },
     async fetch(input, options) {
       calls.push({ input, options });
       return await (replies.shift() || new Response('{}', { headers: { 'content-type': 'application/json' } }));
@@ -281,7 +465,11 @@ function fixture({ origin = 'https://zhuiju.dpdns.org', storageThrows = false, l
     share(payload) { shared.push(payload); return Promise.resolve(); },
     clipboard: { writeText(value) { shared.push({ copied: value }); return Promise.resolve(); } },
   };
-  const storage = { 'kj-speed': '2' };
+  const storage = { 'kj-speed': '2', ...seed };
+  /* 夹具默认走「外放=菜单」这条老路径，见文件头的说明 */
+  if (!externalPlayerDefault && !Object.prototype.hasOwnProperty.call(storage, 'kj-ios-ext-player')) {
+    storage['kj-ios-ext-player'] = '0';
+  }
   if (signedIn) {
     storage['kj-auth-token'] = 'test-token';
     storage['kj-auth-user'] = JSON.stringify({ id: 7, username: 'kenzhao11' });
@@ -296,7 +484,21 @@ function fixture({ origin = 'https://zhuiju.dpdns.org', storageThrows = false, l
   vm.runInContext(source, context);
   return { window, document, replies, calls, redirects, selected, video, messages, attributes, head, toolbar, searchInput, shared, player,
     hint, epButtons, epGrid, epMore, mediaProto, days, dayButtons, observers, loginTrigger, storage,
-    settingsPanel, lineBar, tabRow, tabButtons, clicked, sbName, sbSub, acctName,
+    elementProto, get elementFullscreenCalls() { return elementFullscreenCalls; },
+    settingsPanel, lineBar, tabRow, tabButtons, clicked, sbName, sbSub, acctName, tabbar, settingsTrigger,
+    pageHead, dmButton, phTitle, siteDownload,
+    /* 下载进度控件由注入层自己建（0.1.9 之后不再依赖站点预设的节点），
+       所以按 id 现取，不让夹具自己造一份同名节点。 */
+    get downloadLabel() { return document.getElementById('iosDownloadLabel'); },
+    get downloadFill() { return document.getElementById('iosDownloadFill'); },
+    get downloadOpen() { return document.getElementById('iosOpenDownloaded'); },
+    /* 转屏：真机上 matchMedia 和 innerWidth 会同时跟着变 */
+    setLandscape(next) {
+      isLandscape = !!next;
+      window.innerWidth = isLandscape ? 844 : 390;
+      window.innerHeight = isLandscape ? 390 : 844;
+    },
+    sheet() { return document.getElementById('iosSettingsSheet'); },
     /* 悬浮提示：注入层只写 #iosToast，不再改写文档流里的 #playHint */
     toastText() {
       const box = document.getElementById('iosToast');
@@ -311,8 +513,13 @@ function fixture({ origin = 'https://zhuiju.dpdns.org', storageThrows = false, l
     },
     ready() { for (const listener of listeners['DOMContentLoaded'] || []) listener({}); },
     click(target) {
-      const event = { target, preventDefault() {}, stopImmediatePropagation() {} };
-      for (const listener of listeners['click'] || []) listener(event);
+      let stopped = false;
+      const event = { target, preventDefault() {}, stopImmediatePropagation() { stopped = true; } };
+      const clickListeners = listeners['click'] || [];
+      for (const entry of [...clickListeners].sort((left, right) => Number(right.capture) - Number(left.capture))) {
+        (typeof entry === 'function' ? entry : entry.listener)(event);
+        if (stopped) break;
+      }
     },
     emit(name, event) { for (const listener of listeners[name] || []) listener(event); } };
 }
@@ -380,120 +587,233 @@ test('media URL is not rewritten', async () => {
   assert.equal(state.calls[0].input, 'https://media.example/19.mp4');
 });
 
-test('layout fallback carries fullscreen, light tabbar and category-card rules', () => {
+test('layout fallback keeps the light tabbar and category cards without touching site tools', () => {
   const state = fixture(); state.ready();
   const style = state.head.children.find((child) => child.id === 'iosShellStyle');
   assert.ok(style, 'injected style is missing');
-  assert.match(style.textContent, /html\[data-ios-immersive\] #player\{position:fixed/);
+  assert.doesNotMatch(style.textContent, /\.topbar \.tb-right/,
+    '站点顶栏右侧按钮（搜索 / 历史 / 菜单）不能再被藏掉');
+  assert.doesNotMatch(style.textContent, /\.page-head \[data-action="settings"\]/,
+    '其他页面原有的菜单设置入口不能被误隐藏');
   assert.match(style.textContent, /html\[data-theme='light'\] \.tabbar \.tab\{color:rgba\(15,20,24/);
   assert.match(style.textContent, /grid-auto-columns:168px/);
-  assert.match(style.textContent, /html\[data-ios-immersive\] #playTools\{display:none!important\}/,
-    '全屏时那排上方工具条必须整条收起来');
-  assert.match(style.textContent, /html\[data-ios-immersive\] #settingsPanel,html\[data-ios-immersive\] #lineBar\{display:none!important\}/);
-  assert.match(style.textContent, /html\[data-ios-immersive\] #ppCtrl\{z-index:10003/,
-    '全屏控制栏要压在播放器之上并在安全区内');
+  assert.doesNotMatch(style.textContent, /data-ios-immersive/,
+    '沉浸态全屏 CSS 必须整段删掉，画面尺寸交给网站自己的播放器');
+  assert.doesNotMatch(style.textContent, /#playTools[^}]*display:none/,
+    '站点自己的工具条不能被 CSS 藏掉');
   assert.match(style.textContent, /safe-area-inset-bottom/);
+  const cast = state.document.querySelectorAll('.ep-head [data-action="cast"]')[0];
+  assert.ok(cast, '夹具里要有站点自己的投屏入口');
+  assert.ok(!cast.hidden, '站点的投屏入口不能被注入层藏掉');
+  assert.notEqual(cast.getAttribute('aria-hidden'), 'true', '也不能被标成 aria-hidden');
 });
 
-test('fullscreen sits at the right end of the control bar and drives native rotation', () => {
-  const state = fixture(); state.ready();
-  const bar = state.document.getElementById('ppCtrl');
-  assert.ok(bar, '自带控制栏没有挂上');
-  assert.deepEqual(bar.children.map((child) => child.id),
-    ['ppPlay', 'ppTime', 'ppSeek', 'ppCast', 'ppRate', 'ppFull', 'ppCastMenu', 'ppRateMenu'],
-    '全屏必须是进度条后面的最后一个按钮，倍速紧挨着它');
-  assert.equal(state.video.controls, false, '自带控制栏挂上后必须收起原生控件');
-  assert.ok(state.video.removed.includes('controls'));
-  assert.deepEqual(state.toolbar.children.map((child) => child.id), ['pipBtn', 'nextEpBtn'],
-    '工具条里那个够不到的全屏键必须消失');
-
-  const button = state.document.getElementById('ppFull');
-  assert.equal(button.textContent, '全屏');
-  assert.equal(state.video.controls, false);
-
-  state.click(button);
-  assert.equal(state.attributes['data-ios-immersive'], true);
-  assert.equal(button.textContent, '退出全屏');
-  assert.equal(state.messages.at(-1).action, 'fullscreen');
-
-  state.click(button);
-  assert.equal(state.attributes['data-ios-immersive'], undefined);
-  assert.equal(button.textContent, '全屏');
-  assert.equal(state.messages.at(-1).action, 'inline');
+test('the injected layer reports site fullscreen state without touching the page', () => {
+  const state = fixture({ episodes: [0] }); state.ready();
+  const attributesBefore = Object.keys(state.attributes).length;
+  state.document.fullscreenElement = state.player;
+  state.emit('fullscreenchange', { target: state.document });
+  const enter = state.messages.filter((message) => message.action === 'playerFullscreen');
+  assert.equal(enter.length, 1, '进入全屏只通知原生一次');
+  assert.equal(enter[0].on, true, '进入全屏要让原生切横屏');
+  assert.equal(Object.keys(state.attributes).length, attributesBefore,
+    '注入层不能在全屏时写 data-ios-immersive 之类的属性');
+  assert.equal(state.document.documentElement.hasAttribute('data-ios-immersive'), false);
+  /* WebKit 进全屏时 fullscreenchange / webkitfullscreenchange 会各来一次，不能重复通知 */
+  state.emit('webkitfullscreenchange', { target: state.document });
+  assert.equal(state.messages.filter((message) => message.action === 'playerFullscreen').length, 1);
+  state.document.fullscreenElement = null;
+  state.emit('fullscreenchange', { target: state.document });
+  const events = state.messages.filter((message) => message.action === 'playerFullscreen');
+  assert.equal(events.length, 2);
+  assert.equal(events[1].on, false, '退出全屏要让原生回竖屏原位');
+  const style = state.head.children.find((child) => child.id === 'iosShellStyle');
+  assert.doesNotMatch(style.textContent, /:fullscreen/, '注入层不写任何全屏样式');
+  assert.doesNotMatch(style.textContent, /data-ios-immersive/, '也不写沉浸态几何样式');
 });
 
-test('native fullscreen requests are rerouted to the in-page bar', () => {
-  const state = fixture(); state.ready();
-  state.video.webkitEnterFullscreen();
-  assert.equal(state.attributes['data-ios-immersive'], true, '原生全屏入口必须改走页内全屏');
+test('a native video fullscreen also reports enter and exit exactly once', () => {
+  const state = fixture({ episodes: [0] }); state.ready();
+  state.emit('webkitbeginfullscreen', { target: state.video });
+  state.emit('webkitendfullscreen', { target: state.video });
+  const events = state.messages.filter((message) => message.action === 'playerFullscreen');
+  assert.deepEqual(events.map((message) => message.on), [true, false],
+    'video.webkitEnterFullscreen 这条路也要让原生横屏后再回竖屏');
 });
 
-test('rate menu offers 2.5x and 3x and applies the chosen one', () => {
-  const state = fixture(); state.ready();
-  const menu = state.document.getElementById('ppRateMenu');
-  assert.deepEqual(menu.children.map((option) => option.dataset.rate), ['1', '1.5', '2', '2.5', '3']);
+test('a site fullscreen request on the player uses the native video player, not the black element fullscreen', async () => {
+  const state = fixture({ episodes: [0] }); state.ready();
+  Object.setPrototypeOf(state.player, state.elementProto);
+  const entered = state.player.requestFullscreen();
+  state.emit('webkitbeginfullscreen', { target: state.video });
+  await entered;
+  assert.equal(state.video.nativeFullscreen, 1, '容器全屏要改走系统原生视频全屏');
+  assert.equal(state.elementFullscreenCalls, 0, '不能再进入会丢画面、退不出的容器元素全屏');
 
-  state.click(menu.children[3]);
-  assert.equal(state.video.playbackRate, 2.5);
-  assert.equal(state.document.getElementById('ppRate').textContent, '2.5×');
-  assert.equal(state.toastText(), '已切到 2.5×');
+  Object.setPrototypeOf(state.video, state.elementProto);
+  await state.video.requestFullscreen();
+  assert.equal(state.video.nativeFullscreen, 1, '已经在这个视频的全屏里，不再重复调用系统播放器');
 
-  state.click(state.document.getElementById('ppRate'));
-  assert.match(state.document.getElementById('ppRateMenu').className, /on/);
-  state.click(menu.children[4]);
-  assert.equal(state.video.playbackRate, 3);
-  assert.doesNotMatch(state.document.getElementById('ppRateMenu').className, /on/, '选完要收起菜单');
+  const other = node('div');
+  Object.setPrototypeOf(other, state.elementProto);
+  other.requestFullscreen();
+  assert.equal(state.elementFullscreenCalls, 1, '不包含视频的元素仍走原来的全屏实现');
+  assert.equal(state.video.nativeFullscreen, 1, '无关元素不能误触发视频全屏');
 });
 
-test('a clamped playback rate is reported instead of pretending 3x works', () => {
-  const state = fixture({ maxRate: 2 }); state.ready();
-  state.click(state.document.getElementById('ppRateMenu').children[4]);
-  assert.equal(state.video.playbackRate, 2);
-  assert.equal(state.document.getElementById('ppRate').textContent, '2×');
-  assert.match(state.toastText(), /本机最高只支持 2×/);
+test('a second fullscreen request while one is pending is rejected instead of stacking up', async () => {
+  const state = fixture({ episodes: [0] }); state.ready();
+  Object.setPrototypeOf(state.player, state.elementProto);
+  const first = state.player.requestFullscreen();
+  const second = await state.player.requestFullscreen().then(() => 'resolved', () => 'rejected');
+  assert.equal(second, 'rejected', '同一时间只允许一个原生全屏请求');
+  state.emit('webkitbeginfullscreen', { target: state.video });
+  assert.equal(await first.then(() => 'resolved', () => 'rejected'), 'resolved');
+  assert.equal(state.video.nativeFullscreen, 1, '系统播放器只被调一次，一次 begin 只兑现一个请求');
 });
 
-test('control bar follows playback position and seeking', () => {
-  const state = fixture(); state.ready();
-  state.video.currentTime = 30;
-  state.emit('timeupdate', { target: state.video });
-  assert.equal(state.document.getElementById('ppTime').textContent, '0:30 / 2:00');
-  assert.equal(state.document.getElementById('ppPlay').textContent, '播放');
-
-  const seek = state.document.getElementById('ppSeek');
-  seek.value = '500';
-  state.emit('input', { target: seek });
-  assert.equal(state.video.currentTime, 60);
-
-  state.video.paused = false;
-  state.emit('play', { target: state.video });
-  assert.equal(state.document.getElementById('ppPlay').textContent, '暂停');
+test('another video ending never ends the fullscreen video', () => {
+  const state = fixture({ episodes: [0] }); state.ready();
+  state.emit('webkitbeginfullscreen', { target: state.video });
+  state.emit('webkitendfullscreen', { target: { tagName: 'VIDEO' } });
+  const events = state.messages.filter((message) => message.action === 'playerFullscreen');
+  assert.deepEqual(events.map((message) => message.on), [true], '别的视频退出不能报回竖屏');
+  assert.equal(state.document.dispatchLog, undefined, '也不能给站点补退出事件');
+  state.emit('webkitendfullscreen', { target: state.video });
+  assert.deepEqual(state.messages.filter((message) => message.action === 'playerFullscreen').map((message) => message.on),
+    [true, false], '当前这段视频退出才回竖屏');
 });
 
-test('external playback hands the direct url to the native share sheet', () => {
-  const state = fixture(); state.ready();
-  state.click(state.document.getElementById('ppCast'));
-  state.click(state.document.getElementById('ppShareLink'));
-  const message = state.messages.at(-1);
-  assert.equal(message.action, 'share');
-  assert.equal(message.url, 'https://media.example/19.mp4');
-  assert.match(state.toastText(), /系统分享/);
+test('the public webkitDisplayingFullscreen property can confirm a started fullscreen', async () => {
+  const state = fixture({ episodes: [0] }); state.ready();
+  Object.defineProperty(state.video, 'webkitDisplayingFullscreen', { configurable: true, value: true, writable: true });
+  Object.setPrototypeOf(state.player, state.elementProto);
+  const entered = state.player.requestFullscreen();
+  assert.equal(await entered.then(() => 'resolved', () => 'rejected'), 'resolved',
+    '系统已经全屏但事件没来时，按公开属性确认成功');
+  /* 没有 begin 事件也不能只兑现 Promise：当前视频和方向要一起落地 */
+  const events = state.messages.filter((message) => message.action === 'playerFullscreen');
+  assert.deepEqual(events.map((message) => message.on), [true], '属性确认也要让原生切横屏');
+  await state.document.exitFullscreen();
+  assert.equal(state.video.nativeExit, 1, 'document.exitFullscreen 要能找到这段视频');
+  state.video.webkitDisplayingFullscreen = false;
+  state.emit('webkitendfullscreen', { target: state.video });
+  assert.deepEqual(state.messages.filter((message) => message.action === 'playerFullscreen').map((message) => message.on),
+    [true, false], '没有 begin 事件时，end 事件也要能回竖屏');
 });
 
-test('external playback refuses blob streams and says why', () => {
-  const state = fixture(); state.ready();
-  state.video.currentSrc = 'blob:https://zhuiju.dpdns.org/9f1c';
-  state.click(state.document.getElementById('ppCast'));
-  state.click(state.document.getElementById('ppShareLink'));
-  assert.equal(state.messages.length, 0, '加密流不能当成直链交出去');
-  assert.match(state.toastText(), /加密或临时流/);
+test('coming back to the page clears a fullscreen the system already ended', () => {
+  const state = fixture({ episodes: [0] }); state.ready();
+  Object.defineProperty(state.video, 'webkitDisplayingFullscreen', { configurable: true, value: true, writable: true });
+  state.emit('webkitbeginfullscreen', { target: state.video });
+  state.video.webkitDisplayingFullscreen = false;
+  state.emit('visibilitychange', { target: state.document });
+  const events = state.messages.filter((message) => message.action === 'playerFullscreen');
+  assert.deepEqual(events.map((message) => message.on), [true, false], '恢复核对要补一次退出');
+
+  const legacy = fixture({ episodes: [0] }); legacy.ready();
+  legacy.emit('webkitbeginfullscreen', { target: legacy.video });
+  legacy.emit('visibilitychange', { target: legacy.document });
+  assert.deepEqual(legacy.messages.filter((message) => message.action === 'playerFullscreen').map((message) => message.on),
+    [true], '没有公开属性时只认事件，不做方向反推');
 });
 
-test('external playback without the app bridge falls back to the system share sheet', () => {
-  const state = fixture({ bridge: false }); state.ready();
-  state.click(state.document.getElementById('ppCast'));
-  state.click(state.document.getElementById('ppShareLink'));
-  assert.equal(state.shared.at(-1).url, 'https://media.example/19.mp4');
+test('leaving the native player tells the site to close its fullscreen chrome', () => {
+  const state = fixture({ episodes: [0] }); state.ready();
+  state.emit('webkitbeginfullscreen', { target: state.video });
+  state.emit('webkitendfullscreen', { target: state.video });
+  assert.deepEqual(state.document.dispatchLog, ['fullscreenchange', 'webkitfullscreenchange'],
+    '原生全屏退出后要补一次退出事件，站点才能收起沉浸态');
+});
+
+test('a native video fullscreen only resolves after the system reports it started', async () => {
+  const state = fixture({ episodes: [0] }); state.ready();
+  Object.setPrototypeOf(state.player, state.elementProto);
+  let outcome = 'pending';
+  const entered = state.player.requestFullscreen().then(() => { outcome = 'resolved'; }, () => { outcome = 'rejected'; });
+  assert.equal(outcome, 'pending', '系统还没回事件前不能先报成功');
+  state.emit('webkitbeginfullscreen', { target: state.video });
+  await entered;
+  assert.equal(outcome, 'resolved');
+});
+
+test('a native video fullscreen failure rejects and never falls back to the black element fullscreen', async () => {
+  const state = fixture({ episodes: [0] }); state.ready();
+  Object.setPrototypeOf(state.player, state.elementProto);
+  state.video.webkitEnterFullscreen = () => { throw new Error('gesture rejected'); };
+  const failed = await state.player.requestFullscreen().then(() => 'resolved', () => 'rejected');
+  assert.equal(failed, 'rejected', '调用失败要按 requestFullscreen 的契约拒绝');
+  assert.equal(state.elementFullscreenCalls, 0, '失败也不能退回会黑屏的容器元素全屏');
+
+  const silent = fixture({ episodes: [0] }); silent.ready();
+  Object.setPrototypeOf(silent.player, silent.elementProto);
+  silent.video.webkitEnterFullscreen = () => {};
+  const timedOut = await silent.player.requestFullscreen().then(() => 'resolved', () => 'rejected');
+  assert.equal(timedOut, 'rejected', '系统一直不回事件时按失败处理，不能假装成功');
+});
+
+test('leaving the native player keeps portrait even if the page still reports a fullscreen element', () => {
+  const state = fixture({ episodes: [0] }); state.ready();
+  state.emit('webkitbeginfullscreen', { target: state.video });
+  /* 退出后页面可能残留旧值：补发的事件不能把它当成「又进全屏」再横过去 */
+  state.document.fullscreenElement = state.player;
+  state.emit('webkitendfullscreen', { target: state.video });
+  const events = state.messages.filter((message) => message.action === 'playerFullscreen');
+  assert.deepEqual(events.map((message) => message.on), [true, false], '退出只能报一次 false');
+  assert.deepEqual(state.document.dispatchLog, ['fullscreenchange', 'webkitfullscreenchange'],
+    '站点仍要收到退出事件');
+});
+
+test('iOS 15.0-15.3 without the element fullscreen API still reaches the native video player', async () => {
+  const state = fixture({ episodes: [0], noElementFullscreen: true });
+  state.ready();
+  assert.equal(state.document.fullscreenEnabled, true,
+    '站点先看 document.fullscreenEnabled 才显示全屏按钮，老系统上也要为真');
+  assert.equal(typeof state.elementProto.requestFullscreen, 'function',
+    '老系统没有全屏方法时，注入层要补出来，否则站点连按钮都不显示');
+
+  Object.setPrototypeOf(state.player, state.elementProto);
+  const entered = state.player.requestFullscreen();
+  state.emit('webkitbeginfullscreen', { target: state.video });
+  assert.equal(await entered.then(() => 'resolved', () => 'rejected'), 'resolved');
+  assert.equal(state.video.nativeFullscreen, 1, '补出来的方法照样改走系统原生视频全屏');
+
+  const other = node('div');
+  Object.setPrototypeOf(other, state.elementProto);
+  const rejected = await other.requestFullscreen().then(() => 'resolved', () => 'rejected');
+  assert.equal(rejected, 'rejected', '没有视频的元素不能假装进了全屏');
+
+  state.emit('webkitbeginfullscreen', { target: state.video });
+  await state.document.exitFullscreen();
+  assert.equal(state.video.nativeExit, 1, '站点调 document.exitFullscreen 时要能退出系统原生全屏');
+});
+test('the home top bar carries no app settings gear and settings stay in the menu', () => {
+  const state = fixture({ homePage: true }); state.ready();
+  const style = state.head.children.find((child) => child.id === 'iosShellStyle');
+  assert.match(style.textContent, /\.topbar \[data-action="settings"\]\{display:none!important\}/,
+    '站点顶栏自带的齿轮在 App 里要隐藏，恢复 0.1.17 的干净顶栏');
+  assert.equal(state.document.getElementById('iosTopBar'), null, '注入层不能再往顶栏塞自己的条');
+  assert.equal(state.document.querySelectorAll('[data-ios-act="settings"]').length, 0,
+    '注入层不许自己造一个设置齿轮');
+  state.click(state.settingsTrigger);
+  const sheet = state.sheet();
+  assert.ok(sheet, '站点菜单里的设置入口仍然要能打开设置面板');
+  assert.equal(sheet.hidden, false);
+});
+
+test('tapping the same episode twice reuses the same download id', async () => {
+  const state = fixture({ episodes: [0], newDownloadUI: true }); state.ready();
+  state.click(state.siteDownload);
+  state.replies.push(json({ ...valid, idx: 0, episodeNumber: 1 }));
+  state.click(state.document.getElementById('iosDlCell6-0'));
+  await settle();
+  const first = state.messages.at(-1).items[0].id;
+  state.replies.push(json({ ...valid, idx: 0, episodeNumber: 1 }));
+  state.click(state.document.getElementById('iosDlCell6-0'));
+  await settle();
+  const second = state.messages.at(-1).items[0].id;
+  assert.match(first, /^dl-/, '入队请求要带 id');
+  assert.equal(first, second, '同一集重复点下载必须用同一个 id，续传 / 暂停才接得上');
 });
 
 test('both brand logos use the supplied artwork and hide the old svg', () => {
@@ -506,36 +826,6 @@ test('both brand logos use the supplied artwork and hide the old svg', () => {
   assert.match(css, /\.brand \.brand-mark>svg\{display:none\}/);
   assert.match(css, /\.tabbar \.tab\.center \.tab-circle\{[^}]*background-image:var\(--brand-logo\)/);
   assert.match(css, /\.tabbar \.tab\.center \.tab-circle>svg\{display:none\}/);
-  assert.match(css, /#iosFullBtn\{display:none\}/, '旧的全屏入口要彻底隐藏');
-});
-
-test('landscape playback becomes immersive without forcing rotation', () => {
-  const state = fixture({ landscape: true }); state.ready();
-  state.emit('play', { target: state.video });
-  assert.equal(state.attributes['data-ios-immersive'], true);
-  assert.equal(state.messages.length, 0, 'automatic landscape mode must not re-lock the device');
-  state.emit('ended', { target: state.video });
-  assert.equal(state.attributes['data-ios-immersive'], undefined);
-});
-
-test('portrait playback stays inline until the fullscreen button is used', () => {
-  const state = fixture(); state.ready();
-  state.emit('play', { target: state.video });
-  assert.equal(state.attributes['data-ios-immersive'], undefined);
-  assert.equal(state.attributes['data-ios-playing'], true);
-});
-
-test('explicit exit wins over automatic landscape immersion', () => {
-  const state = fixture({ landscape: true }); state.ready();
-  state.emit('play', { target: state.video });
-  assert.equal(state.attributes['data-ios-immersive'], true);
-  const button = state.document.getElementById('ppFull');
-  state.click(button);
-  assert.equal(state.attributes['data-ios-immersive'], true);
-  state.click(button);
-  assert.equal(state.attributes['data-ios-immersive'], undefined);
-  assert.equal(button.textContent, '全屏');
-  assert.equal(state.messages.at(-1).action, 'inline');
 });
 
 test('search request carries the keyword typed into the search box', async () => {
@@ -564,6 +854,8 @@ test('injected styles keep episode cards from squeezing or overflowing', () => {
   const css = state.head.children[0].textContent;
   assert.match(css, /\.ep\{min-height:38px!important;height:auto!important/);
   assert.match(css, /\.ep-grid\{grid-auto-rows:minmax\(38px,auto\)!important\}/);
+  assert.match(css, /\.pp-tabs\{touch-action:pan-y;overscroll-behavior-x:contain\}/,
+    '标签行处理横向切页，纵向滚动仍由页面原生接管');
 });
 
 test('touch devices get the sticky episode hover reset', () => {
@@ -654,37 +946,6 @@ test('a background refresh puts the user date position back instead of jumping t
   assert.equal(state.days.scrollLeft, 40, '刷新后应该回到用户看的那一天，而不是漂回今天');
 });
 
-test('fullscreen hides every floating control and restores them on exit', async () => {
-  const state = fixture(); state.ready();
-  state.video.currentSrc = 'https://media.example/19.mp4';
-  state.emit('play', { target: state.video });
-  state.click(state.document.getElementById('ppFull'));
-  await new Promise((resolve) => setTimeout(resolve, 5));
-  for (const [name, element] of [['工具条', state.toolbar], ['设置面板', state.settingsPanel],
-    ['线路面板', state.lineBar], ['提示行', state.hint]]) {
-    assert.equal(element.hidden, true, '全屏里 ' + name + ' 应该收起');
-    assert.equal(element.style.display, 'none');
-  }
-  /* 全屏里的全屏键必须改叫「退出全屏」：读屏/自动化不能再看到一个「全屏播放」入口 */
-  const full = state.document.getElementById('ppFull');
-  assert.equal(full.textContent, '退出全屏');
-  assert.equal(full['aria-label'], '退出全屏');
-  state.click(full);
-  await new Promise((resolve) => setTimeout(resolve, 5));
-  /* 工具条和提示行要原样回来 */
-  for (const [name, element] of [['工具条', state.toolbar], ['提示行', state.hint]]) {
-    assert.equal(element.hidden, false, '退出全屏后 ' + name + ' 应该恢复');
-    assert.equal(element.style.display, '', '恢复时不能留下 display:none 的尾巴');
-  }
-  /* 设置/线路面板是进全屏时主动关掉的（0.1.4 起就这么做），
-     退出后保持关闭，不该被「恢复」逻辑重新弹出来 */
-  for (const [name, element] of [['设置面板', state.settingsPanel], ['线路面板', state.lineBar]]) {
-    assert.equal(element.hidden, true, name + ' 进全屏被关掉，退出后不应自己弹出来');
-  }
-  assert.equal(full.textContent, '全屏');
-  assert.equal(full['aria-label'], '全屏播放');
-});
-
 test('danmaku is animated on the compositor instead of re-laying-out every frame', async () => {
   const state = fixture(); state.ready();
   const css = state.head.children.map((child) => child.textContent || '').join('\n');
@@ -698,9 +959,19 @@ test('scrolling surfaces drop expensive blur and smooth positioning', async () =
   const css = state.head.children.map((child) => child.textContent || '').join('\n');
   assert.match(css, /\.topbar,\.page-head\{-webkit-backdrop-filter:none!important/, '顶栏不再逐帧重算模糊');
   assert.match(css, /\.tabbar\{-webkit-backdrop-filter:none!important/, '底栏同样处理');
+  assert.match(css, /\.p-badge,\.p-heat\{-webkit-backdrop-filter:none!important/,
+    '首页海报上的多组模糊角标不能在惯性滚动中反复合成');
   assert.match(css, /\.days,\.strip,\.cat-list,\.line-group\{scroll-behavior:auto!important\}/,
     '横滑条不接受平滑滚动，否则重建后一设 scrollLeft 就整条滑过去');
   assert.match(css, /#playHint,\.pp-hint\{min-height:2\.6em/, '提示行预留高度，文案变化不推动下方内容');
+  assert.match(css, /html\{background-color:#07131b!important;background-image:/,
+    'App 内固定渐变背景绘制在根视图，不再保留全屏伪元素 GPU 图层');
+  assert.match(css, /html\[data-theme='light'\]\{background-color:#eef1f4!important;background-image:/,
+    '静态根背景继续适配浅色主题');
+  assert.match(css, /body:before,body:after\{content:none!important;display:none!important\}/,
+    '去掉滚动时会被 WebKit GPU 回收的两张全屏 fixed 背景层');
+  assert.match(css, /\.pcard-link\{isolation:auto!important;transition:none!important;transform:none!important\}/,
+    'iOS 卡片不可 hover，不应因每张卡 isolation/transform 生成 GPU 合成层');
 });
 
 test('swiping the tab row switches to the next tab', async () => {
@@ -716,6 +987,14 @@ test('swiping the tab row switches to the next tab', async () => {
   state.touch('touchstart', state.tabButtons[1], 300, 500);
   state.touch('touchend', state.tabButtons[1], 262, 380);
   assert.deepEqual(state.clicked, ['cast'], '纵向滚动不能被当成切页手势');
+});
+
+test('cancelling a tab-row touch clears the pending swipe', () => {
+  const state = fixture(); state.ready();
+  state.touch('touchstart', state.tabButtons[0], 300, 500);
+  state.emit('touchcancel', { target: state.tabButtons[0] });
+  state.touch('touchend', state.tabButtons[0], 150, 500);
+  assert.deepEqual(state.clicked, [], '系统取消手势后，后续无关触摸不能触发标签切页');
 });
 
 test('home date strip re-centres after the site re-renders the days', async () => {
@@ -735,155 +1014,195 @@ test('search keyword falls back to the query string when the box is empty', asyn
   assert.equal(new URL(state.calls[0].input).searchParams.get('q'), '今天是太阳雨');
 });
 
-test('entering fullscreen closes the top toolbar panels', () => {
-  const state = fixture(); state.ready();
-  assert.equal(state.settingsPanel.hidden, false);
-  state.click(state.document.getElementById('ppFull'));
-  assert.equal(state.settingsPanel.hidden, true, '全屏里不该留着显示设置面板');
-  assert.equal(state.lineBar.hidden, true, '全屏里不该留着线路面板');
-  state.click(state.document.getElementById('ppFull'));
-  assert.equal(state.settingsPanel.hidden, true, '退出全屏不该自己把面板弹回来');
+test('returning from my downloads reveals the episode download page', () => {
+  const state = fixture({ episodes: [18] }); state.ready();
+  state.click(state.siteDownload);
+  state.click(state.document.getElementById('iosDlListBtn'));
+  state.click(state.document.getElementById('iosMinePage').children[0].children[0]);
+  assert.equal(state.document.getElementById('iosDlPage').hidden, false);
 });
 
-test('cast menu lists share, copy and download, and hides the player row until a file exists', () => {
-  const state = fixture(); state.ready();
-  const menu = state.document.getElementById('ppCastMenu');
-  assert.deepEqual(menu.children.map((row) => row.id),
-    ['ppShareLink', 'ppCopyLink', 'ppDownload', 'ppOpenLocal']);
-  assert.equal(state.document.getElementById('ppOpenLocal').hidden, true, '还没下载就没有「用其他播放器打开」');
-  assert.equal(state.document.getElementById('ppCast').textContent, '外放');
-
-  state.click(state.document.getElementById('ppCast'));
-  assert.match(state.document.getElementById('ppCastMenu').className, /on/);
-  state.click(state.document.getElementById('ppCast'));
-  assert.doesNotMatch(state.document.getElementById('ppCastMenu').className, /on/, '再点一次要收起');
+test('download page opens without an app login and queues the tapped episode', async () => {
+  const state = fixture({ episodes: [0], newDownloadUI: true }); state.ready();
+  state.click(state.siteDownload);
+  const cell = state.document.getElementById('iosDlCell6-0');
+  assert.ok(cell, '下载页要列出当前集');
+  state.replies.push(json({ ...valid, idx: 0, episodeNumber: 1 }));
+  state.click(cell);
+  await settle();
+  assert.equal(state.messages.at(-1).action, 'downloadBatch',
+    '新站没有 App 登录态，点下载就该直接入队');
+  assert.equal(state.messages.at(-1).items.length, 1);
+  assert.equal(state.loginTrigger.opens, 0, '不该再拿旧登录态拦人');
 });
 
-test('copy link puts the direct url on the clipboard', async () => {
-  const state = fixture(); state.ready();
-  state.click(state.document.getElementById('ppCast'));
-  state.click(state.document.getElementById('ppCopyLink'));
-  await new Promise((resolve) => setTimeout(resolve, 0));
-  assert.deepEqual(state.shared.at(-1), { copied: 'https://media.example/19.mp4' });
-  assert.match(state.toastText(), /播放地址已复制/);
-  assert.equal(state.messages.length, 0, '复制不该弹原生面板');
+test('the site own download menu row opens the native download page', () => {
+  const state = fixture({ episodes: [0, 1], newDownloadUI: true }); state.ready();
+  const row = node('button');
+  row.id = 'ppDownload';
+  row.textContent = '下载本集';
+  state.document.body.appendChild(row);
+  const page = state.document.getElementById('iosDlPage');
+  page.hidden = true;
+  state.click(row);
+  assert.equal(page.hidden, false, '点站点菜单里的下载本集要打开原生下载页');
+  assert.ok(state.document.getElementById('iosDlCell6-1'), '下载页要列出每一集');
 });
 
-test('download without an account asks for login and never starts a transfer', () => {
-  const state = fixture(); state.ready();
-  state.click(state.document.getElementById('ppCast'));
-  state.click(state.document.getElementById('ppDownload'));
-  assert.equal(state.messages.length, 0, '未登录不允许发出任何下载请求');
-  assert.equal(state.calls.length, 0, '未登录也不许自己发 fetch');
-  assert.equal(state.loginTrigger.opens, 1, '要顺手打开站点自己的登录弹窗');
-  assert.equal(state.toastText(), '登录后才能下载本集');
-  assert.equal(state.document.getElementById('ppCast').textContent, '外放');
+test('no native player overlay is injected any more', () => {
+  const state = fixture({ episodes: [0] }); state.ready();
+  const ids = [];
+  const walk = (element) => {
+    for (const child of element.children || []) {
+      if (child.id) ids.push(child.id);
+      walk(child);
+    }
+  };
+  walk(state.document.body);
+  walk(state.player);
+  walk(state.toolbar);
+  for (const gone of ['ppCtrl', 'ppCast', 'ppRate', 'ppFull', 'iosTopBar', 'iosFullBtn', 'iosTitleDownload', 'iosDlEntry']) {
+    assert.equal(ids.includes(gone), false, '原生叠加控件不能再注入：' + gone);
+  }
+  assert.equal(state.messages.length, 0, '注入层不再给原生发任何播放器界面消息');
 });
 
-test('download with an account hands the direct url to the native transfer', () => {
-  const state = fixture({ signedIn: true }); state.ready();
-  state.click(state.document.getElementById('ppCast'));
-  state.click(state.document.getElementById('ppDownload'));
+test('website download button opens the real episode list and queues the selected episode', async () => {
+  const state = fixture({ signedIn: true, episodes: [0, 1], newDownloadUI: true }); state.ready();
+  const entry = node('button');
+  entry.setAttribute('data-pw-act', 'dl');
+  state.document.body.appendChild(entry);
+  const select = state.document.querySelectorAll.bind(state.document);
+  state.document.querySelectorAll = (selector) => {
+    if (selector === '#pwEpList .ep') return state.epButtons;
+    if (selector === '#epGrid .ep') return [];
+    return select(selector);
+  };
+  state.click(entry);
+  assert.equal(state.document.getElementById('iosDlPage').hidden, false);
+  state.replies.push(json({ ...valid, idx: 1, episodeNumber: 2 }));
+  state.click(state.document.getElementById('iosDlCell6-1'));
+  await settle();
   const message = state.messages.at(-1);
-  assert.equal(message.action, 'download');
-  assert.equal(message.url, 'https://media.example/19.mp4');
-  assert.equal(message.name, '追剧AI_第19集.mp4');
-  assert.equal(message.signedIn, true);
-  assert.ok(message.id, '每个下载任务要有自己的 id');
-  assert.equal(state.document.getElementById('ppCast').textContent, '下载 0%');
+  assert.equal(message.action, 'downloadBatch');
+  assert.equal(message.items.length, 1);
+  assert.equal(message.items[0].url, valid.url);
+  assert.equal(message.items[0].epKey, '1');
+  assert.equal(message.items[0].name, '测试剧 第2集.mp4');
   assert.equal(state.loginTrigger.opens, 0, '已登录就不要再弹登录');
 });
 
-test('download progress and completion are reported on the control bar', () => {
-  const state = fixture({ signedIn: true }); state.ready();
-  state.click(state.document.getElementById('ppDownload'));
-  const { id } = state.messages.at(-1);
-  state.window.__zhuijuDownload({ id, event: 'progress', received: 43, total: 100 });
-  assert.equal(state.document.getElementById('ppCast').textContent, '下载 43%');
-
-  state.window.__zhuijuDownload({ id, event: 'done', path: '/tmp/追剧AI_第19集.mp4', name: '追剧AI_第19集.mp4', size: 104857600 });
-  assert.equal(state.document.getElementById('ppCast').textContent, '外放');
-  assert.equal(state.document.getElementById('ppOpenLocal').hidden, false, '下载完才能交给播放器 App');
-  assert.match(state.toastText(), /已下载/);
-  assert.match(state.toastText(), /100\.0 MB/);
+test('download progress appears in the download page and a completed episode joins my downloads', () => {
+  const state = fixture({ signedIn: true, episodes: [0], newDownloadUI: true }); state.ready();
+  state.click(state.siteDownload);
+  state.window.__zhuijuDownloads('snapshot', [
+    { id: 'task-a', showId: 'fixture', epKey: '0', epLabel: '第1集', title: '测试剧', status: 'running', received: 43, total: 100 },
+  ]);
+  assert.equal(state.document.getElementById('iosDlCell6-0').__iosState.textContent, '下载中 43%');
+  assert.equal(state.document.getElementById('iosDlCell6-0').__iosProgress.hidden, false);
+  assert.equal(state.document.getElementById('iosDlCell6-0').__iosProgress.value, 43);
+  assert.equal(state.document.getElementById('iosDlCell6-0').__iosProgress.max, 100);
+  state.window.__zhuijuDownload({ id: 'task-a', event: 'progress', showId: 'fixture', epKey: '0', epLabel: '第1集', title: '测试剧', received: 60, total: 100 });
+  assert.equal(state.document.getElementById('iosDlCell6-0').__iosProgress.value, 60);
+  assert.equal(state.document.getElementById('iosDlCell6-0').__iosState.textContent, '下载中 60%');
+  state.click(state.document.getElementById('iosDlListBtn'));
+  assert.equal(state.document.getElementById('iosMinePage').hidden, false);
+  const runningRow = state.document.getElementById('iosMineTask-task-a');
+  assert.ok(runningRow, '下载中的一集必须有自己的那一行');
+  assert.match(runningRow.textContent, /测试剧/);
+  assert.match(runningRow.textContent, /第1集/);
+  assert.match(runningRow.textContent, /60%/);
+  assert.equal(runningRow.querySelectorAll('.ios-dl-task-progress')[0].value, 60);
+  state.window.__zhuijuDownload({ id: 'task-a', event: 'done', showId: 'fixture', epKey: '0', ep: '第1集', epLabel: '第1集', title: '测试剧', path: '/var/mobile/Containers/Data/Application/TEST-CONTAINER/Documents/Downloads/追剧AI_第1集.mp4', name: '测试剧 第1集.mp4', size: 104857600 });
+  assert.match(state.document.getElementById('iosMineBody').textContent, /已下载 1 集/);
+  const deleteButton = state.document.getElementById('iosMineBody').querySelector('.ip-epdel');
+  assert.ok(deleteButton);
+  deleteButton.setAttribute('data-dl-show', 'fixture');
+  deleteButton.setAttribute('data-dl-key', '0');
+  state.click(deleteButton);
+  assert.equal(state.messages.at(-1).action, 'deleteDownload', '列表删除会同时取消原生任务、删记录和删文件');
 });
 
-test('download failure and cancellation both land back on a usable button', () => {
-  const state = fixture({ signedIn: true }); state.ready();
-  state.click(state.document.getElementById('ppDownload'));
-  const { id } = state.messages.at(-1);
-
-  state.click(state.document.getElementById('ppDownload'));
-  assert.equal(state.messages.at(-1).action, 'cancelDownload');
-  assert.equal(state.messages.at(-1).id, id);
-
-  state.window.__zhuijuDownload({ id, event: 'failed', reason: '网络中断' });
-  assert.equal(state.document.getElementById('ppCast').textContent, '外放');
-  assert.match(state.toastText(), /下载失败：网络中断/);
+/* 多集一起下：每集一行，写清剧名 + 集号 + 百分比；进度事件按 id 只更新自己那一行。 */
+test('every downloading episode shows its show, episode and live percent in my downloads', () => {
+  const state = fixture({ episodes: [0, 1], newDownloadUI: true }); state.ready();
+  state.click(state.siteDownload);
+  state.window.__zhuijuDownloads('snapshot', [
+    { id: 'dl-fixture-0', showId: 'fixture', epKey: '0', epLabel: '第1集', title: '测试剧', status: 'running', received: 45, total: 100 },
+    { id: 'dl-fixture-1', showId: 'fixture', epKey: '1', epLabel: '第2集', title: '测试剧', status: 'queued', received: 0, total: 0 },
+  ]);
+  state.click(state.document.getElementById('iosDlListBtn'));
+  const running = state.document.getElementById('iosMineTask-dl-fixture-0');
+  const queued = state.document.getElementById('iosMineTask-dl-fixture-1');
+  assert.ok(running && queued, '两集各占一行，不能只显示一条笼统的总进度');
+  assert.match(running.textContent, /测试剧/);
+  assert.match(running.textContent, /第1集/);
+  assert.match(running.textContent, /45%/);
+  assert.equal(running.querySelectorAll('.ios-dl-task-progress')[0].value, 45);
+  assert.match(queued.textContent, /测试剧/);
+  assert.match(queued.textContent, /第2集/);
+  assert.match(queued.textContent, /排队中/);
+  state.window.__zhuijuDownload({ id: 'dl-fixture-0', event: 'progress', showId: 'fixture', epKey: '0', epLabel: '第1集', title: '测试剧', received: 80, total: 100 });
+  const moved = state.document.getElementById('iosMineTask-dl-fixture-0');
+  assert.match(moved.textContent, /80%/, '进度要实时进到这一集自己的行');
+  assert.equal(moved.querySelectorAll('.ios-dl-task-progress')[0].value, 80);
+  assert.ok(state.document.getElementById('iosMineTask-dl-fixture-1'), '别的集进度更新不能把排队那一行弄丢');
 });
 
-test('download refuses HLS playlists and encrypted streams', () => {
-  const hls = fixture({ signedIn: true }); hls.ready();
+test('a failed single-episode queue task reports its failure state', async () => {
+    const state = fixture({ signedIn: true, episodes: [18], newDownloadUI: true }); state.ready();
+  state.click(state.siteDownload);
+  state.replies.push(json({ ...valid, idx: 18, episodeNumber: 19 }));
+  state.click(state.document.getElementById('iosDlCell6-18'));
+  await settle();
+  state.window.__zhuijuDownloads('snapshot', [
+    { id: 'failed-task', showId: 'fixture', epKey: '18', epLabel: '第19集', title: '测试剧', status: 'failed' },
+  ]);
+  assert.match(state.document.getElementById('iosDlCell6-18').textContent, /失败/);
+});
+
+test('download refuses a resolved player page url instead of saving the page', async () => {
+  const state = fixture({ episodes: [0], newDownloadUI: true }); state.ready();
+  state.click(state.siteDownload);
+  state.replies.push(json({ ...valid, idx: 0, episodeNumber: 1, url: 'https://zhuiju.dpdns.org/player/?id=fixture' }));
+  state.click(state.document.getElementById('iosDlCell6-0'));
+  await settle();
+  assert.equal(state.messages.length, 0, '播放页地址不是片源，不能交给原生下载');
+  assert.match(state.toastText(), /没有解析到真实视频地址/);
+});
+
+test('download sends HLS playlists to native as hls and still refuses blob streams', async () => {
+  const hls = fixture({ signedIn: true, episodes: [0], newDownloadUI: true }); hls.ready();
   hls.video.currentSrc = 'https://media.example/19.m3u8';
-  hls.click(hls.document.getElementById('ppDownload'));
-  assert.equal(hls.messages.length, 0);
-  assert.match(hls.toastText(), /HLS/);
+  hls.replies.push(json({ ...valid, idx: 0, kind: 'hls', url: hls.video.currentSrc }));
+  hls.click(hls.siteDownload);
+  hls.click(hls.document.getElementById('iosDlCell6-0'));
+  await settle();
+  const batch = hls.messages.at(-1);
+  assert.equal(batch.action, 'downloadBatch', 'HLS 线路要交给原生逐片下载，不能再整条拒掉');
+  assert.equal(batch.items.length, 1);
+  assert.equal(batch.items[0].kind, 'hls', '要告诉原生这是 HLS 清单');
+  assert.equal(batch.items[0].url, 'https://media.example/19.m3u8');
+  assert.ok(batch.items[0].name.endsWith('.mp4'), '先按 mp4 命名，合成时原生按真实容器改扩展名');
+  assert.equal(batch.items[0].referer, hls.window.location.origin, '要带 Referer，CDN 防盗链靠它');
 
-  const blob = fixture({ signedIn: true }); blob.ready();
+  const blob = fixture({ signedIn: true, episodes: [0], newDownloadUI: true }); blob.ready();
   blob.video.currentSrc = 'blob:https://zhuiju.dpdns.org/9f1c';
-  blob.click(blob.document.getElementById('ppDownload'));
+  blob.replies.push(json({ ...valid, idx: 0, kind: 'mp4', url: blob.video.currentSrc }));
+  blob.click(blob.siteDownload);
+  blob.click(blob.document.getElementById('iosDlCell6-0'));
+  await settle();
   assert.equal(blob.messages.length, 0);
-  assert.match(blob.toastText(), /加密或临时流/);
+  assert.match(blob.toastText(), /没有解析到真实视频地址/);
 });
 
-test('a stale download id cannot rewrite the current state', () => {
-  const state = fixture({ signedIn: true }); state.ready();
-  state.click(state.document.getElementById('ppDownload'));
-  const { id } = state.messages.at(-1);
-  state.window.__zhuijuDownload({ id: id + 'old', event: 'done', path: '/tmp/old.mp4', size: 1 });
-  assert.equal(state.document.getElementById('ppCast').textContent, '下载 0%');
-  assert.equal(state.document.getElementById('ppOpenLocal').hidden, true);
-});
-
-test('a played episode keeps its direct url after the player element is rebuilt', async () => {
-  const state = fixture(); state.ready();
-  state.video.currentSrc = 'https://media.example/19.mp4';
-  state.video.src = 'https://media.example/19.mp4';
-  state.emit('loadedmetadata', { target: state.video });
-  state.emit('play', { target: state.video });
-  /* 站点重新渲染播放器：新的 <video> 还没解析出地址 */
-  state.video.currentSrc = '';
-  state.video.src = '';
-  state.video.removeAttribute('src');
-  const player = state.document.getElementById('ppCtrl');
-  assert.ok(player, '控制栏应该还在');
-  state.click(state.document.getElementById('ppCast'));
-  state.click(state.document.getElementById('ppCopyLink'));
-  assert.deepEqual(state.shared[0], { copied: 'https://media.example/19.mp4' },
-    '同一集内要用记住的直链，不能说「还没解析出直链」');
-});
-
-test('an unresolved episode is not mistaken for a media url', () => {
-  const state = fixture(); state.ready();
-  // 站点还没解析出直链时，空的 <source src=""> 会被浏览器解析成当前页面地址
-  state.video.currentSrc = '';
-  state.video.src = '';
-  state.video.querySelector = (selector) => (selector === 'source' ? { getAttribute: () => '' } : null);
-  state.click(state.document.getElementById('ppCopyLink'));
-  assert.deepEqual(state.shared, [], '不能把页面地址当成片源复制出去');
-  assert.match(state.toastText(), /还没拿到直链/);
-});
-
-test('the player page url is refused even when it fills the source tag', () => {
-  const state = fixture(); state.ready();
-  state.video.currentSrc = '';
-  state.video.src = '';
-  state.video.querySelector = (selector) =>
-    (selector === 'source' ? { getAttribute: () => 'https://zhuiju.dpdns.org/player/?id=fixture' } : null);
-  state.click(state.document.getElementById('ppCast'));
-  state.click(state.document.getElementById('ppShareLink'));
-  assert.equal(state.messages.length, 0, '页面地址不能当片源交给别的 App');
-  assert.match(state.toastText(), /还没拿到直链/);
+test('a stale queue snapshot cannot replace current single-download state', () => {
+  const state = fixture({ signedIn: true, episodes: [18], newDownloadUI: true }); state.ready();
+  state.click(state.siteDownload);
+  state.window.__zhuijuDownloads('snapshot', [
+    { id: 'old-task', showId: 'other', epKey: '18', status: 'done', path: '/var/mobile/Containers/Data/Application/TEST-CONTAINER/Documents/Downloads/old.mp4' },
+  ]);
+  assert.equal(state.document.getElementById('iosDlCell6-18').__iosState.textContent, '未下载');
 });
 
 test('a signed-in sidebar never also says it is a guest account', async () => {
@@ -901,4 +1220,471 @@ test('a signed-in sidebar never also says it is a guest account', async () => {
   assert.equal(mine.acctName.textContent, 'kenzhao11', '成长卡片不能还写着游客账号');
   assert.doesNotMatch(mine.acctName.textContent, /游客/);
   assert.match(mine.sbSub.textContent, /已登录/);
+});
+
+/* ---------- 0.1.9 回归：下载进度要看得到（首页设置面板） ---------- */
+
+/* 站点首页顶栏只有一个设置图标，点开只弹「设置面板即将上线」；
+   下载进度原先只塞进播放页的 #settingsPanel，一离开播放页就什么都看不到。 */
+test('the home page settings panel contains no download management', () => {
+  const state = fixture({ homePage: true }); state.ready();
+  const trigger = state.document.querySelector('[data-action="settings"]');
+  assert.ok(trigger, '首页必须有设置入口');
+  assert.equal(state.sheet(), null, '还没点之前不该有面板盖在页面');
+
+  state.click(trigger);
+  const sheet = state.sheet();
+  assert.ok(sheet, '首页也要有能打开的设置面板');
+  assert.equal(sheet.hidden, false, '点了设置就要打开');
+  assert.ok(sheet.className.includes('on'));
+  assert.equal(state.document.getElementById('iosDownloadLabel'), null);
+  assert.equal(state.document.getElementById('iosDownloadLibrary'), null);
+
+  state.click(state.document.getElementById('iosSettingsClose'));
+  assert.equal(sheet.hidden, true, '关闭按钮要能收起面板');
+});
+
+/* 下载在原生层跑，换页不会停；进度必须先落到 localStorage，再在新页面接上，
+   否则从播放页回首页时进度条永远是「尚未下载」。 */
+test('a running download restores its state and appears in my downloads', () => {
+  const state = fixture({
+    homePage: true,
+    seed: { 'kj-ios-download': JSON.stringify({ id: 'dl9', name: '追剧AI_第3集.mp4', busy: true, percent: 42, state: 'running' }) },
+  });
+  state.ready();
+  state.click(state.document.getElementById('iosDlListBtn'));
+  assert.match(state.document.getElementById('iosMineBody').textContent, /下载中/);
+
+  state.window.__zhuijuDownloads('snapshot', [
+    { id: 'dl9', showId: 'fixture', epKey: '2', epLabel: '第3集', title: '测试剧', status: 'running', received: 60, total: 100 },
+  ]);
+  assert.match(state.document.getElementById('iosMineBody').textContent, /60%/);
+
+  state.window.__zhuijuDownloads('snapshot', [
+    { id: 'dl9', showId: 'fixture', epKey: '2', epLabel: '第3集', title: '测试剧', status: 'running', received: 60, total: 100 },
+  ]);
+  const restored = state.document.getElementById('iosMineTask-dl9');
+  assert.ok(restored, '刷新后的那一集还要有自己的进度行');
+  assert.match(restored.textContent, /测试剧/);
+  assert.match(restored.textContent, /第3集/);
+  assert.match(restored.textContent, /60%/);
+  state.window.__zhuijuDownloads('snapshot', [
+    { id: 'dl9', showId: 'fixture', epKey: '2', epLabel: '第3集', title: '测试剧', status: 'done', received: 100, total: 100, path: '/var/mobile/Containers/Data/Application/TEST-CONTAINER/Documents/Downloads/追剧AI_第3集.mp4', size: 104857600 },
+  ]);
+  state.window.__zhuijuDownload({ id: 'dl9', event: 'done', showId: 'fixture', epKey: '2', epLabel: '第3集', title: '测试剧', path: '/var/mobile/Containers/Data/Application/TEST-CONTAINER/Documents/Downloads/追剧AI_第3集.mp4', name: '测试剧 第3集.mp4', size: 104857600 });
+  state.window.__zhuijuDownload({ id: 'dl9', event: 'done', showId: 'fixture', epKey: '2', epLabel: '第3集', title: '测试剧', path: '/var/mobile/Containers/Data/Application/TEST-CONTAINER/Documents/Downloads/追剧AI_第3集.mp4', name: '测试剧 第3集.mp4', size: 104857600 });
+  state.window.__zhuijuDownload({ id: 'dl9', event: 'done', showId: 'fixture', epKey: '2', epLabel: '第3集', title: '测试剧', path: '/var/mobile/Containers/Data/Application/TEST-CONTAINER/Documents/Downloads/追剧AI_第3集.mp4', name: '测试剧 第3集.mp4', size: 104857600 });
+  assert.match(state.document.getElementById('iosMineBody').textContent, /已下载 1 集/);
+});
+
+/* ---------- 0.1.9 回归：默认用第三方播放器 ---------- */
+
+/* 用户的原话是「默认用第三方播放器播放，不要都卡在外放那里」：
+   点「外放」就该直接把这一集交给系统播放器列表，而不是再进一层菜单。 */
+test('the replacement settings panel exposes account and playback controls', () => {
+  const state = fixture({ externalPlayerDefault: true }); state.ready();
+  state.click(state.settingsTrigger);
+  assert.equal(state.document.getElementById('iosSettingAccount').textContent, '即将上线');
+  assert.equal(state.document.getElementById('iosSettingSpeed').value, '2');
+  assert.equal(state.document.getElementById('iosDownloadLibrary'), null);
+  assert.equal(state.document.getElementById('iosExtToggle'), null);
+});
+
+/* 进度块只有一个，必须跟着用户眼前那一面走：设置面板开着就在面板里，
+   收起后回到播放器的「显示设置」，不能出现两份对不上的状态。 */
+test('download management remains separate from the settings panel', () => {
+  const state = fixture({ episodes: [0] }); state.ready();
+  state.click(state.siteDownload);
+  state.window.__zhuijuDownloads('snapshot', [
+    { id: 'task-a', showId: 'fixture', epKey: '0', status: 'running', received: 30, total: 100 },
+  ]);
+  assert.equal(state.document.getElementById('iosDlCell6-0').__iosState.textContent, '下载中 30%');
+  state.click(state.settingsTrigger);
+  const body = state.document.getElementById('iosSettingsBody');
+  assert.ok(body);
+  assert.equal(state.document.getElementById('iosDownloadStatus'), null);
+  assert.equal(state.document.getElementById('iosDownloadLibrary'), null);
+  assert.equal(state.document.getElementById('iosMinePage').hidden, true);
+});
+
+test('tapping the dimmed backdrop closes the settings panel', () => {
+  const state = fixture({ homePage: true }); state.ready();
+  state.click(state.settingsTrigger);
+  const sheet = state.sheet();
+  assert.equal(sheet.hidden, false);
+  state.click(sheet);
+  assert.equal(sheet.hidden, true, '点深色底要能关掉面板');
+});
+
+/* 进度事件一秒能来很多次，写 localStorage 必须限流；但「完成」这一次状态转变
+   无论如何都要落地，否则换页回来还是上一次的旧进度。 */
+test('replayed queue completion is reflected once in the downloads list', () => {
+  const state = fixture({ homePage: true }); state.ready();
+  const task = { id: 'task-a', showId: 'fixture', epKey: '18', epLabel: '第19集', title: '测试剧', status: 'done', path: '/var/mobile/Containers/Data/Application/TEST-CONTAINER/Documents/Downloads/19.mp4', size: 10 };
+  state.window.__zhuijuDownloads('snapshot', [task]);
+  const completion = { ...task, event: 'done' };
+  state.window.__zhuijuDownload(completion);
+  state.click(state.document.getElementById('iosDlListBtn'));
+  assert.match(state.document.getElementById('iosMineBody').textContent, /已下载 1 集/);
+  state.window.__zhuijuDownloads('snapshot', [task]);
+  state.window.__zhuijuDownload(completion);
+  assert.match(state.document.getElementById('iosMineBody').textContent, /已下载 1 集/);
+});
+
+/* 真机上压在画面顶上的不是播放器里那行小字，而是站点头栏 `pageHead()`：
+   返回箭头 + 片名 + 主题 + 菜单。0.1.10 漏了它，横屏全屏里「百日谎言」一直挂着。 */
+test('a single-episode cell queues its verified media in the native downloader', async () => {
+  const state = fixture({ signedIn: true, episodes: [18], newDownloadUI: true }); state.ready();
+  state.click(state.siteDownload);
+  const button = state.document.getElementById('iosDlCell6-18');
+  assert.ok(button, '下载页要列出当前集');
+  state.replies.push(json({ ...valid, idx: 18, episodeNumber: 19 }));
+  state.click(button);
+  await settle();
+  const message = state.messages.at(-1);
+  assert.equal(message.action, 'downloadBatch');
+  assert.equal(message.items.length, 1);
+  assert.equal(message.items[0].url, valid.url);
+  state.window.__zhuijuDownloads('snapshot', [{ ...message.items[0], status: 'running' }]);
+  assert.match(button.textContent, /下载中/);
+});
+
+test('a single-episode download queues without any login state', async () => {
+  const state = fixture({ episodes: [18], newDownloadUI: true }); state.ready();
+  state.click(state.siteDownload);
+  state.replies.push(json({ ...valid, idx: 18, episodeNumber: 19 }));
+  state.click(state.document.getElementById('iosDlCell6-18'));
+  await settle();
+  assert.equal(state.messages.at(-1).action, 'downloadBatch');
+  assert.equal(state.loginTrigger.opens, 0);
+});
+
+/* ---------- REG-006 「我的下载」按剧展示片库 ---------- */
+
+const librarySeed = {
+  shows: [
+    {
+      id: 'show-a', title: '百日谎言', cover: 'https://zhuiju.dpdns.org/posters/a.jpg', total: 12,
+      eps: [
+        { key: '18', label: '第19集', name: '追剧AI_第19集.mp4', path: '/var/mobile/Containers/Data/Application/TEST-CONTAINER/Documents/Downloads/a19.mp4', size: 1, at: 20 },
+        { key: '19', label: '第20集', name: '追剧AI_第20集.mp4', path: '/var/mobile/Containers/Data/Application/TEST-CONTAINER/Documents/Downloads/a20.mp4', size: 1, at: 21 },
+      ],
+    },
+    {
+      id: 'movie-b', title: '某部电影', cover: '', total: 0,
+      eps: [{ key: '0', label: '正片', name: '追剧AI_正片.mp4', path: '/var/mobile/Containers/Data/Application/TEST-CONTAINER/Documents/Downloads/b.mp4', size: 2, at: 10 }],
+    },
+  ],
+};
+
+test('the download library is listed in my downloads with covers, episodes and totals', () => {
+  const state = fixture({ homePage: true, newDownloadUI: true, seed: { 'kj-ios-downloads': JSON.stringify(librarySeed) } });
+  state.ready();
+  state.click(state.document.getElementById('iosDlListBtn'));
+
+  const library = state.document.getElementById('iosMinePage');
+  assert.ok(library, '「我的下载」页要有下载片库');
+  assert.equal(library.hidden, false, '有下载记录时片库必须显示');
+  const list = state.document.getElementById('iosMineBody');
+  const items = list.querySelectorAll('.ip-show');
+  assert.equal(items.length, 2, '两部片子各占一条');
+
+  const show = items[0];
+  const cover = show.querySelector('img');
+  assert.ok(cover, '片名旁边要有封面');
+  assert.equal(cover.src, 'https://zhuiju.dpdns.org/posters/a.jpg');
+  assert.equal(cover.alt, '百日谎言');
+  assert.equal(show.querySelector('.ips-title').textContent, '百日谎言');
+  assert.equal(show.querySelector('.ips-meta').textContent, '已下载 2 集 · 0.0 MB');
+  const chips = show.parentNode.querySelectorAll('.ip-eptitle');
+  assert.deepEqual(chips.map((chip) => chip.textContent), ['第19集', '第20集'], '每部剧要列出下了哪几集');
+
+  const movie = items[1];
+  assert.equal(movie.querySelector('img'), null, '没有封面就不摆一张假图');
+  assert.match(movie.querySelector('.ips-meta').textContent, /已下载 1 集/, '总集数未知时不许编一个分母');
+  assert.equal(movie.parentNode.querySelector('.ip-eptitle').textContent, '正片');
+});
+test('a finished episode offers the system player hand-off, a running one does not', () => {
+  const state = fixture({ homePage: true, newDownloadUI: true, seed: { 'kj-ios-downloads': JSON.stringify(librarySeed) } });
+  state.ready();
+  state.click(state.document.getElementById('iosDlListBtn'));
+  const entries = state.document.querySelectorAll('[data-ios-act="open-in-player"]');
+  assert.equal(entries.length, 3, '每集已下载的都要有自己的外部播放入口');
+  const ext = entries[0];
+  assert.equal(ext.textContent, '外部播放');
+  /* 现在入口带的是相对路径（Downloads/文件名）：App 换一次沙盒容器，绝对路径就失效，
+     相对路径由原生拼到当前下载目录，跨版本也能播、也能删。 */
+  assert.equal(ext.getAttribute('data-dl-path'), 'Downloads/a19.mp4', '入口要带这集在下载目录里的相对路径');
+  state.click(ext);
+  assert.equal(state.messages.at(-1).action, 'openInOtherPlayer');
+  assert.equal(state.messages.at(-1).path, 'Downloads/a19.mp4');
+
+  const running = fixture({ episodes: [0], newDownloadUI: true });
+  running.ready();
+  running.window.__zhuijuDownloads('snapshot', [
+    { id: 'task-b', showId: 'fixture', epKey: '0', epLabel: '第1集', title: '测试剧', status: 'running', received: 10, total: 100 },
+  ]);
+  running.click(running.document.getElementById('iosDlListBtn'));
+  assert.equal(running.document.querySelectorAll('[data-ios-act="open-in-player"]').length, 0,
+    '下载中 / 没下完的集不能出现外部播放入口');
+});
+
+test('the native open-in result is shown as a toast', () => {
+  const state = fixture({ episodes: [0] }); state.ready();
+  state.window.__zhuijuPlayerNotice('没有找到能打开这个视频的播放器');
+  assert.match(state.toastText(), /没有找到能打开这个视频的播放器/);
+});
+
+test('the download library stays out of the way when nothing was downloaded', () => {
+  const state = fixture({ homePage: true, newDownloadUI: true });
+  state.ready();
+  state.click(state.document.getElementById('iosDlListBtn'));
+  assert.equal(state.document.getElementById('iosMineBody').textContent, '还没有下载完成的剧集');
+});
+
+test('a finished download joins the library with its show, episode and total', () => {
+  const state = fixture({ signedIn: true, episodes: ['18'], newDownloadUI: true });
+  state.ready();
+  state.click(state.siteDownload);
+  state.window.__zhuijuDownload({ id: 'done-18', event: 'done', showId: 'fixture', epKey: '18', ep: '第19集', epLabel: '第19集', title: '测试剧', path: '/var/mobile/Containers/Data/Application/TEST-CONTAINER/Documents/Downloads/x.mp4', name: '测试剧 第19集.mp4', size: 10485760 });
+
+  const saved = JSON.parse(state.storage['kj-ios-downloads']);
+  assert.equal(saved.shows.length, 1, '下完一集就要记进片库');
+  assert.equal(saved.shows[0].title, '测试剧', '用详情页标题当剧名，不用文件名');
+  assert.equal(saved.shows[0].cover, 'https://zhuiju.dpdns.org/posters/fixture.jpg');
+  assert.equal(saved.shows[0].total, 1, '选集按钮数就是已知总集数');
+  assert.equal(saved.shows[0].eps[0].label, '第19集');
+  assert.equal(saved.shows[0].eps[0].path, 'Downloads/x.mp4', '片库只存相对路径，绝对路径留到用时拼');
+
+  state.click(state.document.getElementById('iosDlListBtn'));
+  const item = state.document.getElementById('iosMineBody').querySelector('.ip-show');
+  assert.equal(item.querySelector('.ips-meta').textContent, '已下载 1 集 · 10.0 MB');
+
+  /* 换页/重启：状态落在 localStorage，新页面靠它把片库摆回来 */
+  const reloaded = fixture({ homePage: true, newDownloadUI: true, seed: { 'kj-ios-downloads': state.storage['kj-ios-downloads'] } });
+  reloaded.ready();
+  reloaded.click(reloaded.document.getElementById('iosDlListBtn'));
+  const again = reloaded.document.getElementById('iosMineBody').querySelector('.ip-show');
+  assert.ok(again, '重启后片库还要在');
+  assert.equal(again.querySelector('.ips-meta').textContent, '已下载 1 集 · 10.0 MB');
+});
+
+test('the running download shows its show, episode and percent in the library', () => {
+  const state = fixture({
+    homePage: true,
+    seed: {
+      'kj-ios-download': JSON.stringify({
+        id: 'dl9', name: '追剧AI_第21集.mp4', show: '百日谎言', ep: '第21集',
+        busy: true, percent: 42, state: 'running',
+        /* 真机上这段是开始下载时就落盘的：换页后完成事件靠它归到正确的剧名下 */
+        meta: { id: 'show-a', title: '百日谎言', cover: 'https://zhuiju.dpdns.org/posters/a.jpg', total: 12, epKey: '20', epLabel: '第21集' },
+      }),
+      'kj-ios-downloads': JSON.stringify(librarySeed),
+    },
+  });
+  state.ready();
+  state.click(state.document.getElementById('iosDlListBtn'));
+  const running = state.document.getElementById('iosMineTask-dl9');
+  assert.ok(running, '正在下载的那一集要有一行');
+  assert.equal(state.document.getElementById('iosMinePage').hidden, false);
+  assert.match(running.textContent, /百日谎言/, '要说是哪部剧');
+  assert.match(running.textContent, /第21集/, '还要说是哪一集');
+  assert.match(running.textContent, /下载中/, '总长度未知时只显示接收状态');
+
+  state.window.__zhuijuDownload({ id: 'dl9', event: 'progress', received: 60, total: 100 });
+  const moved = state.document.getElementById('iosMineTask-dl9');
+  assert.match(moved.textContent, /60%/, '进度要实时进到这一集自己的行');
+  assert.match(moved.textContent, /百日谎言/, '进度事件不丢剧名');
+  assert.match(moved.textContent, /第21集/, '进度事件不丢集号');
+  state.window.__zhuijuDownloads('snapshot', [
+    { id: 'dl9', showId: 'show-a', epKey: '20', epLabel: '第21集', title: '百日谎言', status: 'running', received: 60, total: 100 },
+  ]);
+
+  state.window.__zhuijuDownload({ id: 'dl9', event: 'done', epKey: '20', ep: '第21集', epLabel: '第21集', showId: 'show-a', title: '百日谎言', path: '/var/mobile/Containers/Data/Application/TEST-CONTAINER/Documents/Downloads/a21.mp4', name: '追剧AI_第21集.mp4', size: 3 });
+  state.window.__zhuijuDownloads('snapshot', []);
+  const saved = JSON.parse(state.storage['kj-ios-downloads']);
+  const show = saved.shows.find((entry) => entry.title === '百日谎言');
+  assert.equal(show.total, 12, '下载字节数不能冒充剧集总数');
+  assert.deepEqual(show.eps.map((entry) => entry.label), ['第19集', '第20集', '第21集'], '按集号排队，不丢旧记录');
+});
+
+/* ---------- REG-007 后台下载：网页要把「哪部剧的哪一集」交给原生 ---------- */
+
+async function queueCurrentEpisode(state) {
+  state.click(state.siteDownload);
+  state.replies.push(json(valid));
+  state.click(state.document.getElementById('iosDlCell6-18'));
+  await settle();
+  const message = state.messages.at(-1);
+  assert.equal(message.action, 'downloadBatch');
+  assert.equal(message.items.length, 1);
+  return { show: message.show, item: message.items[0] };
+}
+
+test('the download request carries the show info the native side needs after a relaunch', async () => {
+  const state = fixture({ signedIn: true, episodes: ['18'] });
+  state.ready();
+  const { show, item } = await queueCurrentEpisode(state);
+  assert.equal(show.title, '测试剧');
+  assert.equal(show.cover, 'https://zhuiju.dpdns.org/posters/fixture.jpg');
+  assert.equal(show.total, 1, '总集数来自选集按钮');
+  assert.equal(item.showId, show.id);
+  assert.equal(item.epLabel, '第19集');
+  assert.equal(item.epKey, '18');
+});
+
+/* ---------- REG-008 下载入口不会变成播放器入口 ---------- */
+
+test('the title download button never turns into the player entry', async () => {
+  const state = fixture({ signedIn: true, episodes: ['18'] });
+  state.ready();
+  const button = state.siteDownload;
+  assert.equal(button.getAttribute('aria-label'), '下载');
+  assert.equal(state.document.getElementById('ppToolDownload'), null);
+  const { item } = await queueCurrentEpisode(state);
+  state.window.__zhuijuDownload({ ...item, event: 'done', path: '/var/mobile/Containers/Data/Application/TEST-CONTAINER/Documents/Downloads/x.mp4', size: 10 });
+  state.click(state.document.getElementById('iosDlListBtn'));
+  state.click(state.document.getElementById('iosMinePage').querySelector('[data-ios-act="mine-back"]'));
+  state.click(button);
+  assert.equal(state.document.getElementById('iosDlPage').hidden, false);
+  assert.match(state.document.getElementById('iosDlCell6-18').textContent, /已下载|排队中/);
+  assert.ok(!state.messages.some((message) => message.action === 'openLocal'));
+});
+
+/* ---------- REG-009 文件名/列表/通知用真实剧名 ---------- */
+
+test('the download file is named after the show, not the app', async () => {
+  const state = fixture({ signedIn: true, episodes: ['18'] });
+  state.ready();
+  const { item } = await queueCurrentEpisode(state);
+  assert.equal(item.name, '测试剧 第19集.mp4');
+  assert.ok(!/追剧AI/.test(item.name), '文件名里不能再用 App 名冒充剧名');
+});
+
+/* ---------- 下载记录删不掉（REG-030） ---------- */
+
+const OLD_CONTAINER_PATH = '/var/mobile/Containers/Data/Application/OLD-CONTAINER-UUID/Documents/Downloads/测试剧 第1集.mp4';
+
+function seededDoneRow(state) {
+  state.click(state.siteDownload);
+  state.click(state.document.getElementById('iosDlListBtn'));
+}
+
+/* 老版本把旧沙盒容器的绝对路径写进片库；App 换容器后这个路径在真机上已经不存在，
+   旧实现会在「路径越界」这一步直接失败，那一行永远删不掉。
+   现在只存相对路径（Downloads/文件名），删除时按当前下载目录拼回去。 */
+test('a downloaded row saved with an old app-container path can still be deleted', () => {
+  const state = fixture({ seed: {
+    'kj-ios-downloads': JSON.stringify({ shows: [{
+      id: 'fixture', title: '测试剧', total: 12,
+      eps: [{ key: '0', label: '第1集', name: '测试剧 第1集.mp4', path: OLD_CONTAINER_PATH, size: 1024, at: 1 }],
+    }] }),
+  } });
+  state.ready();
+  seededDoneRow(state);
+  const del = state.document.getElementById('iosMineBody').querySelector('.ip-epdel');
+  assert.ok(del, '老路径的记录也要有删除入口');
+  const play = state.document.getElementById('iosMineBody').querySelector('.ip-epbody');
+  assert.equal(play.getAttribute('data-dl-path'), 'Downloads/测试剧 第1集.mp4', '读出来就迁成相对路径，离线播放也用当前下载目录');
+  state.click(del);
+  const message = state.messages.at(-1);
+  assert.equal(message.action, 'deleteDownload');
+  assert.equal(message.path, 'Downloads/测试剧 第1集.mp4', '只把相对路径交给原生，跨版本换容器也删得掉');
+  assert.equal(message.showId, 'fixture');
+  assert.equal(message.epKey, '0');
+  const saved = JSON.parse(state.storage['kj-ios-downloads']);
+  assert.equal(saved.shows.length, 0, '最后一集删掉后不留下空壳剧名');
+});
+
+/* 只凭文件名归一会把越界路径（/tmp/…、../../…、下载目录以外的目录）也映射成下载目录里的同名文件：
+   删除时可能把别人的文件当成这一集删掉。不是裸文件名 / Downloads/文件名 /
+   旧沙盒 …/Documents/Downloads/文件名 的，一律不解析，只允许清掉记录本身。 */
+test('a stored path outside the downloads folder is never mapped onto a same-named file', () => {
+  const outsidePaths = [
+    '/tmp/测试剧 第1集.mp4',
+    '../../测试剧 第1集.mp4',
+    '/var/mobile/Containers/Data/Application/OLD/Documents/Other/测试剧 第1集.mp4',
+    'Downloads/子目录/测试剧 第1集.mp4',
+  ];
+  for (const stored of outsidePaths) {
+    const state = fixture({ seed: {
+      'kj-ios-downloads': JSON.stringify({ shows: [{
+        id: 'fixture', title: '测试剧', total: 12,
+        eps: [{ key: '0', label: '第1集', name: '测试剧 第1集.mp4', path: stored, size: 1024, at: 1 }],
+      }] }),
+    } });
+    state.ready();
+    seededDoneRow(state);
+    const play = state.document.getElementById('iosMineBody').querySelector('.ip-epbody');
+    assert.equal(play.getAttribute('data-dl-path'), null, stored + ' 不能被当成下载目录里的同名文件');
+    assert.equal(play.disabled, true, stored + ' 不该给出离线播放入口');
+    const del = state.document.getElementById('iosMineBody').querySelector('.ip-epdel');
+    assert.ok(del, stored + ' 的记录本身仍然能删');
+    state.click(del);
+    const message = state.messages.at(-1);
+    assert.equal(message.action, 'deleteDownload');
+    assert.equal(message.path, '', stored + ' 只让原生清记录，不把越界路径交给它');
+  }
+});
+
+test('a new download is stored as a relative path, never the absolute sandbox path', () => {
+  const state = fixture({ signedIn: true, episodes: [0], newDownloadUI: true }); state.ready();
+  state.click(state.siteDownload);
+  state.window.__zhuijuDownloads('snapshot', [
+    { id: 'dl-a', showId: 'fixture', epKey: '0', epLabel: '第1集', title: '测试剧', status: 'running', received: 10, total: 100 },
+  ]);
+  state.window.__zhuijuDownload({ id: 'dl-a', event: 'done', showId: 'fixture', epKey: '0', ep: '第1集', epLabel: '第1集', title: '测试剧',
+    path: '/var/mobile/Containers/Data/Application/NEW-CONTAINER/Documents/Downloads/测试剧 第1集.mp4', name: '测试剧 第1集.mp4', size: 2048 });
+  const saved = JSON.parse(state.storage['kj-ios-downloads']);
+  assert.equal(saved.shows[0].eps[0].path, 'Downloads/测试剧 第1集.mp4');
+  state.click(state.document.getElementById('iosDlListBtn'));
+  const body = state.document.getElementById('iosMineBody');
+  const play = body.querySelector('.ip-epbody');
+  assert.equal(play.getAttribute('data-dl-path'), 'Downloads/测试剧 第1集.mp4', '离线播放也用相对路径，由原生拼当前目录');
+});
+
+/* 下载中 / 排队 / 失败三种行以前根本没有删除入口：只有「已下载」的片库行能左滑删，
+   失败的集连行都不显示，任务也一直占着队列。 */
+test('downloading, queued and failed rows can all be deleted and never come back', () => {
+  const snapshot = [
+    { id: 'dl-a', showId: 'fixture', epKey: '0', epLabel: '第1集', title: '测试剧', status: 'running', received: 40, total: 100 },
+    { id: 'dl-b', showId: 'fixture', epKey: '1', epLabel: '第2集', title: '测试剧', status: 'queued' },
+    { id: 'dl-c', showId: 'fixture', epKey: '2', epLabel: '第3集', title: '测试剧', status: 'failed', reason: '网络中断' },
+  ];
+  const state = fixture({ episodes: [0, 1, 2], newDownloadUI: true }); state.ready();
+  state.click(state.siteDownload);
+  state.window.__zhuijuDownloads('snapshot', snapshot);
+  state.click(state.document.getElementById('iosDlListBtn'));
+  const rows = ['dl-a', 'dl-b', 'dl-c'].map((id) => state.document.getElementById('iosMineTask-' + id));
+  assert.ok(rows.every(Boolean), '下载中 / 排队 / 失败三种行都要显示');
+  assert.match(rows[2].textContent, /失败/, '失败的行要写清原因');
+  const del = rows[2].querySelector('.ip-epdel');
+  assert.ok(del, '失败的那一行也要能删');
+  state.click(del);
+  const message = state.messages.at(-1);
+  assert.equal(message.action, 'deleteDownload');
+  assert.equal(message.id, 'dl-c');
+  assert.equal(message.showId, 'fixture');
+  assert.equal(message.epKey, '2');
+  /* 原生还没确认时重发旧快照：这一行不能因为晚到的快照又冒出来。 */
+  state.window.__zhuijuDownloads('snapshot', snapshot);
+  assert.equal(state.document.getElementById('iosMineTask-dl-c'), null, '删掉的失败行不能被旧快照复活');
+  assert.ok(state.document.getElementById('iosMineTask-dl-a'), '别的行不能被顺手删掉');
+});
+
+test('deleting a running row asks native for that task only and lets the queue move on', () => {
+  const state = fixture({ episodes: [0, 1], newDownloadUI: true }); state.ready();
+  state.click(state.siteDownload);
+  state.window.__zhuijuDownloads('snapshot', [
+    { id: 'dl-a', showId: 'fixture', epKey: '0', epLabel: '第1集', title: '测试剧', status: 'running', received: 40, total: 100 },
+    { id: 'dl-b', showId: 'fixture', epKey: '1', epLabel: '第2集', title: '测试剧', status: 'queued' },
+  ]);
+  state.click(state.document.getElementById('iosDlListBtn'));
+  const before = state.messages.length;
+  state.click(state.document.getElementById('iosMineTask-dl-a').querySelector('.ip-epdel'));
+  const message = state.messages.at(-1);
+  assert.equal(state.messages.length, before + 1, '一次删除只发一条原生消息');
+  assert.equal(message.action, 'deleteDownload');
+  assert.equal(message.id, 'dl-a', '按任务 id 取消底层任务，不能按剧把整部都删了');
+  assert.equal(message.path, '');
 });
