@@ -3,13 +3,13 @@ import test from 'node:test'
 import { readFileSync } from 'node:fs'
 import { DatabaseSync } from 'node:sqlite'
 import worker from '../worker/api/src/index.js'
-import { remainingProbeBudget } from '../worker/api/src/source-selection.js'
 
 const schema = readFileSync(new URL('../worker/api/schema.sql', import.meta.url), 'utf8')
 const segments = [720, 1080].map((height) => readFileSync(new URL(`./fixtures/avc-${height}.ts`, import.meta.url)))
 
 function fixture(t, { media = 'hls', sameContent = false, lines = ['bad', 'good'], heights = {}, delays = {} } = {}) {
   const fetchLog = []
+  const fetchStarts = new Map()
   const sqlite = new DatabaseSync(':memory:')
   sqlite.exec(schema)
   const env = { KJ_SECRET: 'test-only', DB: { prepare(sql) { return { bind(...args) {
@@ -23,6 +23,7 @@ function fixture(t, { media = 'hls', sameContent = false, lines = ['bad', 'good'
   t.mock.method(globalThis, 'fetch', async (input) => {
     const url = new URL(input)
     fetchLog.push(url.pathname)
+    if (!fetchStarts.has(url.pathname)) fetchStarts.set(url.pathname, Date.now())
     const headers = { 'access-control-allow-origin': '*' }
     const show = url.pathname.match(/resolve\/(.+)-([12])$/)
     if (show) {
@@ -35,10 +36,12 @@ function fixture(t, { media = 'hls', sameContent = false, lines = ['bad', 'good'
       }
       return Response.json({ current_episode: { episode_number: Number(ep) }, line_options: lines.map((provider) => ({ provider_id: provider, url: lineUrl(provider) })) })
     }
-    if (url.hostname !== 'media.example' || url.pathname.includes('broken')) return new Response(null, { status: 404 })
-    // 按线路指定响应延迟，模拟慢线路（例如手选线路 6.25 秒才返回）。
+    if (url.hostname !== 'media.example') return new Response(null, { status: 404 })
+    // 按线路指定响应延迟，模拟慢线路（例如手选线路 6.25 秒才返回）；
+    // 延迟要放在 404 之前，才能模拟「首条很慢才失败」。
     const slowProvider = Object.keys(delays).find((provider) => url.pathname.includes(`/${provider}.`) || url.pathname.includes(`/${provider}-`))
     if (slowProvider) await new Promise((resolve) => setTimeout(resolve, delays[slowProvider]))
+    if (url.pathname.includes('broken')) return new Response(null, { status: 404 })
     const second = /2\.(m3u8|ts)$/.test(url.pathname)
     // 线路名带清晰度后缀（如 sd-720.m3u8）时用它决定分片内容，655 与 1080 各自一段。
     const name = url.pathname.split('/').pop()
@@ -65,7 +68,7 @@ function fixture(t, { media = 'hls', sameContent = false, lines = ['bad', 'good'
     sqlite.prepare('INSERT INTO auth_sessions(token_hash,user_id,created_at,expires_at,last_seen_at) VALUES(?,?,?,?,?)').run(hash, id, Date.now(), Date.now() + 3_600_000, Date.now())
     return { authorization: `Bearer ${token}` }
   }
-  return { seed, request, sqlite, fetchLog, login }
+  return { seed, request, sqlite, fetchLog, fetchStarts, login }
 }
 
 test('distinct HLS first segments do not disable a provider for the whole show', async (t) => {
@@ -181,17 +184,66 @@ test('probe failures do not contribute to browser playback history', async (t) =
   assert.equal(lines.options.find(({ provider }) => provider === 'bad').successRate, null)
 })
 
-test('默认线路探测成功后不再为换源列表等其余候选（长嵌套请求会被平台按 CPU 上限掐断）', async (t) => {
+const insertSource = (sqlite, showId, epIdx, provider, { label = provider, quality = 0, checkedAt = new Date().toISOString().slice(0, 19).replace('T', ' ') } = {}) => {
+  sqlite.prepare(`INSERT INTO sources(show_id,ep_idx,provider,label,url,kind,segments,duration,quality,status,checked_at)
+    VALUES(?,?,?,?,?,'hls',1,4,?,'ok',?)`).run(showId, epIdx, provider, label, `https://media.example/${showId}/${epIdx}-${provider}.m3u8`, quality, checkedAt)
+}
+
+test('命中已验证直链时不再解析上游、也不再探测候选（长嵌套请求会被平台按 CPU 上限掐断）', async (t) => {
   const { seed, request, sqlite, fetchLog } = fixture(t, { lines: ['good', 'bad', 'spare'] })
-  seed('lead-fast')
-  sqlite.prepare("INSERT INTO origin_defaults(show_id,provider,label) VALUES('lead-fast','good','')").run()
-  const play = await (await request('/api/play?show=lead-fast&ep=0')).json()
+  seed('verified-fast')
+  insertSource(sqlite, 'verified-fast', 0, 'good', { quality: 1080 })
+  const started = Date.now()
+  const play = await (await request('/api/play?show=verified-fast&ep=0&quality=1080')).json()
+  const elapsed = Date.now() - started
   assert.equal(play.provider, 'good')
-  assert.ok(!fetchLog.includes('/lead-fast/broken.m3u8'), `已成功就不该再探后面的死线：${fetchLog.join(',')}`)
-  assert.ok(!fetchLog.includes('/lead-fast/spare.m3u8'), `已成功就不该再探后面的候选：${fetchLog.join(',')}`)
-  const spare = play.options.find(({ provider }) => provider === 'spare')
-  assert.ok(spare, '没探过的线路仍要出现在换源列表里')
-  assert.equal(spare.status, 'unknown', '没探过不等于死线')
+  assert.equal(play.verifiedSourceCache, true, JSON.stringify(play))
+  assert.equal(play.url, 'https://media.example/verified-fast/0-good.m3u8')
+  assert.equal(play.quality, 1080)
+  assert.ok(!fetchLog.some((path) => path.includes('/v1/playback/resolve/')), `不该解析上游：${fetchLog.join(',')}`)
+  assert.ok(!fetchLog.some((path) => path.startsWith('/verified-fast/')), `不该探测候选：${fetchLog.join(',')}`)
+  assert.ok(elapsed < 2000, `快取应当很快：${elapsed}ms`)
+})
+
+test('已验证直链快取也按清晰度选线，不会因为上次成功的 720 线路而降级', async (t) => {
+  const { seed, request, sqlite, fetchLog } = fixture(t)
+  seed('verified-quality')
+  insertSource(sqlite, 'verified-quality', 0, 'sd', { quality: 720 })
+  insertSource(sqlite, 'verified-quality', 0, 'hd', { quality: 1080 })
+  const play = await (await request('/api/play?show=verified-quality&ep=0&preferred=sd&quality=1080')).json()
+  assert.equal(play.provider, 'hd', JSON.stringify(play.options))
+  assert.equal(play.quality, 1080)
+  assert.ok(!fetchLog.some((path) => path.startsWith('/verified-quality/')), `不该探测候选：${fetchLog.join(',')}`)
+})
+
+test('过期直链不复用，回到完整解析', async (t) => {
+  const { seed, request, sqlite, fetchLog } = fixture(t)
+  seed('verified-stale')
+  insertSource(sqlite, 'verified-stale', 0, 'good', { quality: 1080, checkedAt: '2020-01-01 00:00:00' })
+  const play = await (await request('/api/play?show=verified-stale&ep=0')).json()
+  assert.ok(fetchLog.some((path) => path.includes('/v1/playback/resolve/')), `过期直链必须重新解析：${fetchLog.join(',')}`)
+  assert.equal(play.verifiedSourceCache, undefined)
+})
+
+test('被判为串集或需会员的线路不会从已验证直链快取里返回', async (t) => {
+  const { seed, request, sqlite, fetchLog } = fixture(t)
+  seed('verified-dup')
+  insertSource(sqlite, 'verified-dup', 0, 'sd', { quality: 720 })
+  insertSource(sqlite, 'verified-dup', 0, 'hd', { quality: 1080 })
+  sqlite.prepare("INSERT INTO provider_health(show_id,provider,verdict,detail) VALUES('verified-dup','hd','dup','fingerprint-v2:第1集与第2集同内容')").run()
+  const play = await (await request('/api/play?show=verified-dup&ep=0&quality=1080')).json()
+  assert.equal(play.provider, 'sd', JSON.stringify(play.options))
+  assert.ok(!fetchLog.some((path) => path.startsWith('/verified-dup/')), `不该探测候选：${fetchLog.join(',')}`)
+})
+
+test('手选线路不吃已验证直链快取，仍走完整解析', async (t) => {
+  const { seed, request, sqlite, fetchLog } = fixture(t)
+  seed('verified-manual')
+  insertSource(sqlite, 'verified-manual', 0, 'good', { quality: 1080 })
+  const play = await (await request('/api/play?show=verified-manual&ep=0&line=good&strict=1')).json()
+  assert.equal(play.provider, 'good')
+  assert.ok(fetchLog.some((path) => path.includes('/v1/playback/resolve/')), `手选线路必须重新解析：${fetchLog.join(',')}`)
+  assert.equal(play.verifiedSourceCache, undefined)
 })
 
 test('没有原站默认记录时先探到 720 不能把 quality=1080 降级', async (t) => {
@@ -199,6 +251,15 @@ test('没有原站默认记录时先探到 720 不能把 quality=1080 降级', a
   seed('quality-order')
   const play = await (await request('/api/play?show=quality-order&ep=0&quality=1080')).json()
   assert.equal(play.provider, 'hd', '列表第一条只是上游顺序，不能当成默认项抢先返回')
+  assert.equal(play.quality, 1080)
+})
+
+test('播放器带上次成功线路时，原站默认的 720 也不能把 quality=1080 降级', async (t) => {
+  const { seed, request, sqlite } = fixture(t, { lines: ['sd', 'hd'], heights: { sd: 720, hd: 1080 } })
+  seed('preferred-quality')
+  sqlite.prepare("INSERT INTO origin_defaults(show_id,provider,label) VALUES('preferred-quality','sd','')").run()
+  const play = await (await request('/api/play?show=preferred-quality&ep=0&preferred=sd&quality=1080')).json()
+  assert.equal(play.provider, 'hd', JSON.stringify(play.options))
   assert.equal(play.quality, 1080)
 })
 
@@ -211,17 +272,19 @@ test('手选线路 6.25 秒才响应仍然可播（首条提前返回不能缩�
   assert.equal(play.provider, 'slowline')
 })
 
-test('权威首条失败后备用线路照旧接上，两段探测共享原版 20 秒预算', async (t) => {
-  const { seed, request, sqlite } = fixture(t, { lines: ['bad', 'good'] })
-  seed('lead-fail')
-  // 对照表说原站默认是 bad，首条因此走提前返回的分支；它不可播时必须照旧接备用线。
-  sqlite.prepare("INSERT INTO origin_defaults(show_id,provider,label) VALUES('lead-fail','bad','')").run()
+test('慢首条失败时备用线路仍与它并行探测（不能等首条失败后才开始）', async (t) => {
+  const lines = ['broken-lead', ...Array.from({ length: 8 }, (_, i) => `broken${i}`), 'good']
+  const delays = { 'broken-lead': 3000, ...Object.fromEntries(Array.from({ length: 8 }, (_, i) => [`broken${i}`, 300])) }
+  const { seed, request, sqlite, fetchStarts } = fixture(t, { lines, delays })
+  seed('slow-lead-fail')
+  // 原站默认就是这条慢首条：旧版会先单独等它，等失败后才开始探其余候选。
+  sqlite.prepare("INSERT INTO origin_defaults(show_id,provider,label) VALUES('slow-lead-fail','broken-lead','')").run()
   const started = Date.now()
-  const play = await (await request('/api/play?show=lead-fail&ep=0')).json()
-  const elapsed = Date.now() - started
-  assert.equal(play.provider, 'good')
-  assert.ok(elapsed < 20000, `不能重新领一份预算：${elapsed}ms`)
-  // 其余候选只能拿到 20 秒扣掉首条已用时间，且不能为负。
-  assert.equal(remainingProbeBudget(Date.now() - 7000), 13000)
-  assert.equal(remainingProbeBudget(Date.now() - 30000), 1000)
+  const play = await (await request('/api/play?show=slow-lead-fail&ep=0')).json()
+  assert.equal(play.provider, 'good', JSON.stringify(play.tried))
+  // 关键不是总耗时，而是可播的备用线在慢首条还没失败时就已经开始探测了：
+  // 并行时它在 1 秒内就被请求；先等首条 3 秒、再顺序探 8 条，最早也要 3.3 秒后。
+  const goodAt = fetchStarts.get('/slow-lead-fail/1.m3u8')
+  assert.ok(goodAt, `备用线根本没被探测：${[...fetchStarts.keys()].join(',')}`)
+  assert.ok(goodAt - started < 2500, `备用线必须与慢首条并行探测：${goodAt - started}ms`)
 })

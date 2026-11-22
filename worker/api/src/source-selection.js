@@ -42,12 +42,6 @@ export function probeStatus(item) {
   return 'dead'
 }
 
-// 分两段探测时（先探权威首条，失败后再探其余候选），其余候选只能领到
-// 原版本的那份 20 秒总预算扣掉首条已经花掉的时间，不能重新领一份。
-export function remainingProbeBudget(leadStartedAt, now = Date.now(), totalMs = 20000) {
-  return Math.max(1000, totalMs - Math.max(0, now - Number(leadStartedAt || now)))
-}
-
 // Keep the network work bounded; an untested line is never advertised as playable.
 export async function probeCandidates(lines, probe, { concurrency = 4, timeoutMs = 7000, budgetMs = 20000 } = {}) {
   const results = new Array(lines.length)

@@ -3,7 +3,7 @@ import { syncOnce } from './sync.js'
 import { syncHomeFeed, syncHotRanks } from './feed-sync.js'
 import { createCountedFetch, inspectHlsResource } from './playback-probe.js'
 import { mediaDimensions, readBounded } from './media-dimensions.js'
-import { isSoftProbeFailure, probeCandidates, probeStatus, remainingProbeBudget, selectPlayable } from './source-selection.js'
+import { isSoftProbeFailure, probeCandidates, probeStatus, selectPlayable } from './source-selection.js'
 import { createProbeBudget } from './probe-budget.js'
 import { orderLines } from './line-order.js'
 import { issuePlaybackAttempt, verifyPlaybackAttempt } from './playback-attempt.js'
@@ -356,6 +356,119 @@ async function saveSource(env, showId, epIdx, s) {
   ).catch(() => {})
 }
 
+// 片头片尾（原站 /v1/catalog/:id 的 playback_skip_settings_preset），按剧缓存到 D1。
+async function loadSkipSettings(env, showId) {
+  try {
+    let srow = null
+    try { srow = await dbFirst(env, 'SELECT intro_end, outro_from FROM shows WHERE id=?', showId) } catch {}
+    let intro = srow?.intro_end
+    let outro = srow?.outro_from
+    if (intro == null) {
+      const d = await fetchJson(env, `/v1/catalog/${showId}`)
+      const p = d?.playback_skip_settings_preset
+      if (p && Number.isFinite(Number(p.intro_end_seconds))) {
+        intro = Number(p.intro_end_seconds)
+        outro = Number.isFinite(Number(p.outro_from_end_seconds)) ? Number(p.outro_from_end_seconds) : null
+        await dbRun(env, 'UPDATE shows SET intro_end=?, outro_from=? WHERE id=?', intro, outro, showId).catch(() => {})
+      }
+    }
+    return intro != null ? { introEnd: intro, outroFrom: outro } : null
+  } catch {
+    /* 拿不到就不显示跳过按钮 */
+    return null
+  }
+}
+
+// 已验证直链快取。
+//
+// 正式站的 /api/play 是 zhuiju-web 经 service binding 嵌套调用 kanju-api：任何要跑
+// 十几秒的重请求都会被平台按 CPU 上限掐断（2026-11-22 事故：cpuTime 只有 9–51ms、
+// wall 2–5s 就被终止并包装成 upstream_unreachable，而同一参数公网直连 13 秒返回 200）。
+// 解析上游 + 并发探测全部候选正是这类重请求。
+//
+// 因此：这一集在 D1 里已有近期验证过的直链时，直接按原版完全相同的选线规则
+// （selectPlayable：手选线路优先 > 原站默认对照表 > 清晰度/可信历史）返回，
+// 不解析上游、不探测候选。
+//
+// 只用于「没有手选线路」的普通播放。前端换源或严格选线（请求带 line/strict）照旧走
+// 完整解析与探测；快取的直链一旦过期，播放器报错后会按线路重试，那时进入完整路径
+// 重新解析，结果与旧版一致。
+const VERIFIED_SOURCE_MAX_AGE_MS = 7 * 86_400_000
+
+async function playFromVerifiedSources(env, showId, idx, targetQuality, preferred = '') {
+  if (!showId) return null
+  const rows = await dbAll(env, `SELECT provider,label,url,kind,segments,duration,quality,checked_at FROM sources
+    WHERE show_id=? AND ep_idx=? AND status='ok' AND url IS NOT NULL AND url<>''
+    ORDER BY checked_at DESC`, showId, Number(idx)).catch(() => [])
+  if (!rows.length) return null
+  const fresh = rows.filter((row) => {
+    const checkedAt = Date.parse(String(row.checked_at || '').replace(' ', 'T') + 'Z')
+    if (!Number.isFinite(checkedAt)) return false
+    const age = Date.now() - checkedAt
+    return age > -3_600_000 && age <= VERIFIED_SOURCE_MAX_AGE_MS
+  })
+  if (!fresh.length) return null
+  const health = await healthMap(env, showId)
+  // 被判为串集（dup）或需要会员的线路不得从快取里返回；
+  // 空标签的旧记录同样不能冒充任何语言版本（与 cachedSourceUrl 的规则一致），
+  // 否则可能把普通话直链当成粤语默认线返回。
+  const usable = fresh.filter((row) => String(row.label || '').trim() !== ''
+    && !['dup', 'member'].includes(String(health.get(row.provider)?.verdict || '')))
+  if (!usable.length) return null
+  const originDefault = await loadOriginDefault(env, showId)
+  const candidates = markOriginDefault(usable.map((row) => ({
+    provider: row.provider,
+    label: row.label || row.provider,
+    url: row.url,
+    kind: row.kind || (/\.m3u8(\?|$)/i.test(row.url) ? 'hls' : 'mp4'),
+    segments: row.segments ?? null,
+    duration: row.duration ?? null,
+    quality: Number(row.quality) || 0,
+    ok: true,
+  })), originDefault.provider, originDefault.label)
+  const chosen = selectPlayable(candidates, { preferred, targetQuality: Number(targetQuality) || 0 })
+  if (!chosen) return null
+  // 选中的线路排到换源列表最前，前端按顺序换源时先试它。
+  const ordered = [chosen, ...candidates.filter((item) => item !== chosen)]
+  const skip = await loadSkipSettings(env, showId)
+  const ep = await dbFirst(env, 'SELECT number FROM episodes WHERE show_id=? AND idx=?', showId, Number(idx)).catch(() => null)
+  return {
+    showId,
+    idx: Number(idx),
+    url: chosen.url,
+    kind: chosen.kind,
+    episodeNumber: Number(ep?.number ?? Number(idx) + 1),
+    line: chosen.label,
+    provider: chosen.provider,
+    segments: chosen.segments,
+    duration: chosen.duration,
+    width: 0,
+    quality: chosen.quality,
+    qualitySource: 'sources',
+    firstSegmentMs: null,
+    fingerprint: null,
+    verified: true,
+    probeDegraded: false,
+    originDefaultStatus: !originDefault.provider ? 'not_in_lines' : chosen.originDefault ? 'ok' : 'unknown',
+    sourceFromCache: true,
+    verifiedSourceCache: true,
+    skip,
+    options: ordered.map((item) => ({
+      provider: item.provider,
+      label: item.label,
+      key: lineKey(item.provider, item.label),
+      group: '',
+      mode: 'direct',
+      status: 'ok',
+      quality: item.quality,
+      successRate: null,
+      selected: item.provider === chosen.provider && String(item.label) === String(chosen.label),
+    })),
+    candidateProviders: ordered.map((item) => item.provider),
+    tried: [],
+  }
+}
+
 async function playUrl(env, showId, idx, requestedLine = '', targetQuality = 0, preferred = '', strictLine = false) {
   const budget = createProbeBudget()
   const requestedQuality = Number(targetQuality) || 0
@@ -365,6 +478,14 @@ async function playUrl(env, showId, idx, requestedLine = '', targetQuality = 0, 
     const health = await healthMap(env, showId)
     if (health.get(hit.value.provider)?.verdict !== 'dup') return { ...hit.value, cached: true }
     playCache.delete(key)
+  }
+
+  if (!requestedLine) {
+    const fast = await playFromVerifiedSources(env, showId, idx, requestedQuality, preferred).catch(() => null)
+    if (fast) {
+      playCache.set(key, { at: Date.now(), value: fast })
+      return fast
+    }
   }
 
   let ep = await dbFirst(env, 'SELECT * FROM episodes WHERE show_id=? AND idx=?', showId, Number(idx)).catch(() => null)
@@ -400,26 +521,7 @@ async function playUrl(env, showId, idx, requestedLine = '', targetQuality = 0, 
        FROM provider_playback_stats p LEFT JOIN sources s ON s.show_id=p.show_id AND s.provider=p.provider
        WHERE p.show_id=? GROUP BY p.provider`, showId).catch(() => [])).map((row) => [row.provider, row]))
 
-  // 片头片尾（原站 /v1/catalog/:id 的 playback_skip_settings_preset），按剧缓存到 D1
-  let skip = null
-  try {
-    let srow = null
-    try { srow = await dbFirst(env, 'SELECT intro_end, outro_from FROM shows WHERE id=?', showId) } catch {}
-    let intro = srow?.intro_end
-    let outro = srow?.outro_from
-    if (intro == null) {
-      const d = await fetchJson(env, `/v1/catalog/${showId}`)
-      const p = d?.playback_skip_settings_preset
-      if (p && Number.isFinite(Number(p.intro_end_seconds))) {
-        intro = Number(p.intro_end_seconds)
-        outro = Number.isFinite(Number(p.outro_from_end_seconds)) ? Number(p.outro_from_end_seconds) : null
-        await dbRun(env, 'UPDATE shows SET intro_end=?, outro_from=? WHERE id=?', intro, outro, showId).catch(() => {})
-      }
-    }
-    if (intro != null) skip = { introEnd: intro, outroFrom: outro }
-  } catch {
-    /* 拿不到就不显示跳过按钮 */
-  }
+  const skip = await loadSkipSettings(env, showId)
 
   const originDefault = await loadOriginDefault(env, showId)
   const lines = orderLines(markOriginDefault(lineOptions(rv), originDefault.provider, originDefault.label).map((line) => ({
@@ -504,33 +606,7 @@ async function playUrl(env, showId, idx, requestedLine = '', targetQuality = 0, 
   // 不再固定只探前 8 条：前 8 条全失败时第 9 条可能正好能播。
   // 真正的上限是子请求预算；预算用完的线路由 probeOne 标成「未探测」，绝不标 dead。
   const allCandidates = candidates.filter(Boolean)
-  // 先单独探第一条，成功后立刻返回，不必再等其余候选里最慢的那次探测：正式站是
-  // zhuiju-web 经 service binding 嵌套调用，十几秒的重请求会被平台按 CPU 上限终止
-  // （2026-11-22 事故），而未探测的线路记为「预算用尽/状态未知」，绝不标成死线。
-  //
-  // 只有「权威首条」才能这样提前返回：
-  //   1) 用户手动选的线路（请求带 line 参数），原版本也是选中它就直接用；
-  //   2) 原站默认对照表命中的线路，selectPlayable 本来也优先它。
-  // 对照表没命中时，列表第一条只是上游顺序（可能是 720P），先探它就返回会把
-  // quality=1080 的请求降级；这种情况必须照旧全量探测后按清晰度/可信历史选线。
-  // 首条失败时其余候选照旧并发探测，且总预算与原版本一致（20 秒共享，
-  // 扣掉首条已经花掉的时间），不能因为分两段执行就重新领一份预算。
-  const lead = allCandidates[0]
-  const leadAuthoritative = !!lead && (Boolean(requestedLine) || Boolean(lead.originDefault))
-  let probed
-  if (leadAuthoritative) {
-    const leadStartedAt = Date.now()
-    // 超时沿用原来的 7 秒：手选线路 6.25 秒才响应时旧版能播，不能因为提前返回优化把它变成超时。
-    const leadProbe = await probeCandidates([lead], probeOne, { concurrency: 1, timeoutMs: 7000, budgetMs: 7500 })
-    if (leadProbe[0]?.ok) {
-      probed = [leadProbe[0], ...allCandidates.slice(1).map((line) => ({ line, ok: false, deferred: true, error: 'probe_budget_exceeded' }))]
-    } else {
-      const rest = await probeCandidates(allCandidates.slice(1), probeOne, { concurrency: 4, timeoutMs: 7000, budgetMs: remainingProbeBudget(leadStartedAt) })
-      probed = [leadProbe[0], ...rest]
-    }
-  } else {
-    probed = await probeCandidates(allCandidates, probeOne, { concurrency: 4, timeoutMs: 7000, budgetMs: 20000 })
-  }
+  let probed = await probeCandidates(allCandidates, probeOne, { concurrency: 4, timeoutMs: 7000, budgetMs: 20000 })
 
   // 原站默认线路只有「超时/预算不足」这类软失败时单独再试一次：
   // 并发探测会把它挤到超时，导致默认线路被换成别的线路，与原站不一致。
