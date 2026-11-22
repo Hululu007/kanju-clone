@@ -73,3 +73,31 @@ test('原站默认集按标签优先匹配，缺失时诚实报原因', () => {
   assert.equal(missing.matched, false)
   assert.equal(missing.reason, 'episode_not_in_library')
 })
+
+test('指定语言版本缺失时不退到同 provider 的第一条', () => {
+  const variants = [
+    { provider: 'bytevod-lv2', label: '1080P-官方Z · 粤语', group: 'official', index: 0, priority: 0 },
+    { provider: 'bytevod-lv2', label: '1080P-官方Z · 国语', group: 'official', index: 1, priority: 0 },
+  ]
+  const marked = markOriginDefault(variants, 'bytevod-lv2', '1080P-官方Z')
+  assert.equal(marked.some((line) => line.originDefault), false)
+})
+
+test('没给标签且同 provider 有多条时不猜哪条是默认', () => {
+  const variants = [
+    { provider: 'off-z', label: '1080P-官方Z · 粤语' },
+    { provider: 'off-z', label: '1080P-官方Z' },
+  ]
+  assert.equal(markOriginDefault(variants, 'off-z').some((line) => line.originDefault), false)
+})
+
+test('集名缺失时即使序号能对上也不冒充原站默认集', () => {
+  const episodes = [
+    { idx: 0, label: '预告片' },
+    { idx: 1, label: '第1集' },
+  ]
+  const result = pickOriginDefaultEpisode(episodes, { epIdx: 1, epLabel: '2026-11-21 第7期 上' })
+  assert.equal(result.matched, false)
+  assert.equal(result.reason, 'episode_not_in_library')
+  assert.equal(result.idx, null)
+})

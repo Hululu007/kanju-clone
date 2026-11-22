@@ -25,11 +25,21 @@ export async function loadOriginDefault(env, showId) {
 // 纯函数，便于单测。排序与选线只认 originDefault 这个对照表信号，
 // 上游 selected（列表第一条）一律不参与，避免把 720P 的列表第一条当成默认项。
 // 同一 provider 有多语言变体时（如 1080P-官方Z 与 1080P-官方Z · 粤语），先按标签精确匹配。
+// 指定了标签（语言版本）却找不到时就是没匹配上：不能退到同 provider 的第一条，
+// 否则粤语默认会被当成普通话，选线把它当默认、重试却判定未命中。
+// 没给标签时，只有该 provider 在本集恰好只有一条线路才算命中，多条无从判断。
 export function markOriginDefault(lines, provider, label = '') {
   let at = -1
   if (provider) {
-    at = label ? lines.findIndex((line) => line.provider === provider && line.label === label) : -1
-    if (at < 0) at = lines.findIndex((line) => line.provider === provider)
+    const wanted = String(label || '')
+    if (wanted) {
+      at = lines.findIndex((line) => line.provider === provider && String(line.label) === wanted)
+    } else {
+      const hits = lines.reduce((list, line, index) => (line.provider === provider ? [...list, index] : list), [])
+      // 多条同 provider 时，若它们标签全同（重复行）可认定是同一条；标签不同则无从判断，不猜。
+      const sameLabel = hits.length > 1 && hits.every((index) => String(lines[index].label) === String(lines[hits[0]].label))
+      at = hits.length === 1 || sameLabel ? hits[0] : -1
+    }
   }
   return lines.map((line, index) => ({ ...line, originDefault: index === at }))
 }
@@ -62,11 +72,19 @@ export function mergeOriginRetry(probed, index, attempt) {
 
 // 原站默认集：优先按标签匹配（综艺的「2026-11-21 第7期 上」这类），再退回序号。
 // 库里还没有那一集时诚实返回 matched:false 与原因，不拿别的集冒充。
+// 对照表记了集名时只认集名：库里没有这一集就诚实报未匹配。
+// 按序号退回会把「预告片」顶替成「正片」，等于把别的集冒充原站默认集。
 export function pickOriginDefaultEpisode(episodes, { epIdx = null, epLabel = '' } = {}) {
   const list = Array.isArray(episodes) ? episodes : []
   if (epLabel) {
     const hit = list.find((ep) => String(ep.label) === String(epLabel))
     if (hit) return { idx: hit.idx, label: hit.label, matched: true, reason: '' }
+    return {
+      idx: null,
+      label: String(epLabel),
+      matched: false,
+      reason: list.length ? 'episode_not_in_library' : 'no_episodes',
+    }
   }
   if (epIdx != null && Number.isFinite(Number(epIdx))) {
     const hit = list.find((ep) => Number(ep.idx) === Number(epIdx))
@@ -74,7 +92,7 @@ export function pickOriginDefaultEpisode(episodes, { epIdx = null, epLabel = '' 
   }
   return {
     idx: null,
-    label: String(epLabel || ''),
+    label: '',
     matched: false,
     reason: list.length ? 'episode_not_in_library' : 'no_episodes',
   }

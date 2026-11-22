@@ -7,9 +7,44 @@ export function qualityRank(label = '') {
   return 0
 }
 
+// 线路标识：provider|label。同一 provider 会有多个语言版本
+// （如 1080P-官方Z 与 1080P-官方Z · 粤语），只看 provider 会把它们当成同一条线路。
+export function lineKeyOfOption(option) {
+  if (option?.key) return option.key
+  return `${option?.provider || ''}|${option?.label ?? ''}`
+}
+
+// 合并两次线路探测结果：按 provider|label 区分，粤语版本不会被普通话覆盖。
+// 新的「状态未知」不覆盖已有的明确状态（如已判定的 dup/dead）。
+export function mergeLineOptionsList(existing, incoming) {
+  const options = new Map((existing || []).map((option) => [lineKeyOfOption(option), option]))
+  for (const option of incoming || []) {
+    const key = lineKeyOfOption(option)
+    const previous = options.get(key)
+    if (previous && option.status === 'unknown' && previous.status !== 'unknown') continue
+    options.set(key, { ...previous, ...option })
+  }
+  return [...options.values()]
+}
+
+// 起播集：有续播用续播，否则用原站默认集，再否则用列表第一集。
+// resumeIdx 为 null 表示没有续播记录——不能把它当成第 0 集。
+export function pickStartEpisode(episodes, { resumeIdx = null, originDefaultIdx = null } = {}) {
+  const list = Array.isArray(episodes) ? episodes : []
+  const findIdx = (value) => {
+    if (value == null || value === '') return undefined
+    return list.find((episode) => Number(episode.idx) === Number(value))?.idx
+  }
+  const resumed = findIdx(resumeIdx)
+  if (resumed != null) return resumed
+  const origin = findIdx(originDefaultIdx)
+  if (origin != null) return origin
+  return list[0]?.idx ?? 0
+}
+
 export function rankPlayableLines(options, { preferred = '', failed = new Set(), targetQuality = 1080 } = {}) {
   return [...options]
-    .filter((option) => option.provider && !failed.has(option.provider))
+    .filter((option) => option.provider && !failed.has(option.provider) && !failed.has(lineKeyOfOption(option)))
     .filter((option) => !['dead', 'dup', 'member'].includes(option.status))
     .sort((a, b) => {
       const aRank = Number(a.quality) || 0

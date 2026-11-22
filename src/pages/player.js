@@ -8,7 +8,7 @@ import { proxyReady, proxyShowFresh, resolvePlay, reportPlaybackResult, fetchLin
 import { authReady, fetchShowProgress, flushSavedProgress, saveProgress } from '../auth.js'
 import { openSettings } from '../settings-panel.js'
 import { createPictureClickHandlers, didTouchMove } from '../player-gestures.js'
-import { nextEpisodeAfter, rankPlayableLines, sampleStall, shouldHandlePlaybackShortcut, shouldShowNextCue } from '../player-policy.js'
+import { nextEpisodeAfter, rankPlayableLines, sampleStall, shouldHandlePlaybackShortcut, shouldShowNextCue, lineKeyOfOption, mergeLineOptionsList, pickStartEpisode } from '../player-policy.js'
 import {
   FILL_MODES,
   clampRate,
@@ -20,7 +20,8 @@ import {
 
 const id = new URLSearchParams(location.search).get('id')
 const resumeParams = new URLSearchParams(location.search)
-let resumeIdx = Number(resumeParams.get('ep'))
+// 没带 ep 参数时是 null，不能被 Number(null) 变成第 0 集，否则默认集会因「假续播」被跳过。
+let resumeIdx = resumeParams.has('ep') ? Number(resumeParams.get('ep')) : null
 let resumeTime = Math.max(0, Number(resumeParams.get('t')) || 0)
 let lastSavedSecond = -10
 const KIND_CAT = { series: 'tv', short_drama: 'tv', movie: 'movie', anime: 'anime', animation: 'anime', variety: 'variety', documentary: 'variety' }
@@ -88,11 +89,8 @@ document.title = `${show.title} - 阿噗影视`
 
 const related = shows.filter((s) => s.id !== show.id && s.cat === show.cat).slice(0, 10)
 const rest = related.length >= 6 ? related : shows.slice(6, 16)
-const first = eps[0]
-// 没有续播记录时，优先打开原站默认集（对照表），其次才是列表第一集。
 const originDefaultIdx = show.defaultEpisode?.matched ? Number(show.defaultEpisode.idx) : null
-const resumedIdx = eps.find((e) => Number(e.idx) === Number(resumeIdx))?.idx
-const startIdx = resumedIdx ?? (originDefaultIdx != null && eps.some((e) => Number(e.idx) === originDefaultIdx) ? originDefaultIdx : first?.idx ?? 0)
+const startIdx = pickStartEpisode(eps, { resumeIdx, originDefaultIdx })
 const epLabel = (idx) => eps.find((e) => Number(e.idx) === Number(idx))?.label || `第${Number(idx) + 1}集`
 const heatText = show.heat || (show.heatValue ? `热度 ${Math.round(show.heatValue / 1000)} 万` : '热播中')
 const metaText = [show.kindLabel, show.year, show.area].filter(Boolean).join(' · ')
@@ -906,23 +904,17 @@ let currentLineKey = ''
 let lastSuccessfulProvider = ''
 const STATUS_TIP = { dup: '该线路串集，已停用', dead: '线路不可用', empty: '线路为空', member: '需要会员或更高等级', unknown: '', ok: '' }
 
-function lineKeyOf(option) {
-  return option?.key || `${option?.provider || ''}|${option?.label ?? ''}`
-}
+// 线路标识与合并放到 player-policy 里，便于单测。
+const lineKeyOf = lineKeyOfOption
 
 function lineOptions(epIdx) {
   return linesByEp.get(Number(epIdx))?.options || []
 }
 
+// 按 provider|label 合并：同一 provider 的普通话、粤语是两条不同线路。
 function mergeLineOptions(epIdx, incoming) {
   const old = linesByEp.get(Number(epIdx)) || {}
-  const options = new Map((old.options || []).map((option) => [option.provider, option]))
-  for (const option of incoming || []) {
-    const previous = options.get(option.provider)
-    if (previous && option.status === 'unknown' && previous.status !== 'unknown') continue
-    options.set(option.provider, { ...previous, ...option })
-  }
-  linesByEp.set(Number(epIdx), { ...old, options: [...options.values()] })
+  linesByEp.set(Number(epIdx), { ...old, options: mergeLineOptionsList(old.options, incoming) })
 }
 
 function updateQuality() {
@@ -1262,7 +1254,7 @@ let stallState = null
 let stallTimer = null
 let nextTarget = null
 let nextCancelledFor = null
-const failedProviders = new Set()
+const failedLines = new Set()
 let playbackAttemptResultSent = false
 let activeAttemptId = ''
 const MAX_AUTO_ALTERNATIVES = 4
@@ -1323,8 +1315,10 @@ async function switchToNextLine(generation = playGeneration) {
   if (generation !== playGeneration || switchingAutomatically || !playbackWanted ||
       document.visibilityState === 'hidden' || video.seeking || dragging || document.pictureInPictureElement) return
   pending = false
-  failedProviders.add(currentProvider)
-  const candidates = lineOptions(currentEpIdx()).filter((option) => option.provider && option.provider !== currentProvider && !failedProviders.has(option.provider) && option.status !== 'dead' && option.status !== 'dup' && option.status !== 'member')
+  // 只排除「当前这一条线」（provider|label），同 provider 的其他语言版本仍可尝试。
+  const isCurrentLine = (option) => (currentLineKey ? lineKeyOf(option) === currentLineKey : option.provider === currentProvider)
+  failedLines.add(currentLineKey || `${currentProvider}|`)
+  const candidates = lineOptions(currentEpIdx()).filter((option) => option.provider && !isCurrentLine(option) && !failedLines.has(lineKeyOf(option)) && option.status !== 'dead' && option.status !== 'dup' && option.status !== 'member')
   if (!candidates.length) {
     sayPlayStatus('当前集的其他线路也不可用，请手动选择线路。')
     return
@@ -1345,7 +1339,7 @@ async function switchToNextLine(generation = playGeneration) {
       if (playRequest === controller) playRequest = null
       if (generation !== playGeneration || !playbackWanted) return
       if (!result?.url || result.error || result.provider !== candidate.provider || !requestedProviders.has(result.provider)) {
-        failedProviders.add(candidate.provider)
+        failedLines.add(lineKeyOf(candidate))
         continue
       }
       currentProvider = candidate.provider
@@ -1376,7 +1370,7 @@ async function switchToNextLine(generation = playGeneration) {
         const timeout = setTimeout(() => {
           finish(false)
           if (generation === playGeneration && playbackWanted && !playbackAttemptResultSent) {
-            failedProviders.add(candidate.provider)
+            failedLines.add(lineKeyOf(candidate))
             playbackAttemptResultSent = true
             void reportPlaybackResult(show.id, candidate.provider, false, activeAttemptId)
           }
@@ -1394,7 +1388,7 @@ async function switchToNextLine(generation = playGeneration) {
       })
       if (generation !== playGeneration) return
       if (!switched) {
-        failedProviders.add(candidate.provider)
+        failedLines.add(lineKeyOf(candidate))
         if (playbackWanted && !playbackAttemptResultSent) {
           playbackAttemptResultSent = true
           void reportPlaybackResult(show.id, candidate.provider, false, activeAttemptId)
@@ -1433,7 +1427,7 @@ async function play(idx, autoplay = true, requestedLine = '', { fromEpisode = nu
   const ep = eps.find((e) => Number(e.idx) === Number(idx)) || eps[0]
   if (!ep) return
   const sameEpisode = Number(ep.idx) === activeEpisode
-  const resumeAt = sameEpisode ? video.currentTime : Number(ep.idx) === Number(resumeIdx) ? resumeTime : 0
+  const resumeAt = sameEpisode ? video.currentTime : resumeIdx != null && Number(ep.idx) === Number(resumeIdx) ? resumeTime : 0
   if (video.currentTime > 0 && mediaStarted && activeEpisode != null) {
     void saveProgress({ showId: show.id, idx: activeEpisode, position: video.currentTime, duration: video.duration || null }, { force: true })
   }
@@ -1455,7 +1449,7 @@ async function play(idx, autoplay = true, requestedLine = '', { fromEpisode = nu
   lastSavedSecond = -10
   if (!sameEpisode) nextCancelledFor = null
   resetStallCheck()
-  failedProviders.clear()
+  failedLines.clear()
   clearNextCue()
   if (!requestedLine) preferred = preferred || lastSuccessfulProvider
   skipDone = { intro: false, outro: false }
@@ -1514,7 +1508,7 @@ async function play(idx, autoplay = true, requestedLine = '', { fromEpisode = nu
   const sourceAttempt = playbackAttemptId + 1
   attach(url, fresh.kind, () => {
     if (generation === playGeneration) {
-      failedProviders.add(currentProvider)
+      failedLines.add(currentLineKey || `${currentProvider}|`)
       void switchToNextLine(generation)
     }
   }, () => {
@@ -1564,7 +1558,7 @@ async function play(idx, autoplay = true, requestedLine = '', { fromEpisode = nu
   if (generation === playGeneration && !autoplay) {
     pending = false
   }
-  if (Number(ep.idx) === Number(resumeIdx)) resumeTime = 0
+  if (resumeIdx != null && Number(ep.idx) === Number(resumeIdx)) resumeTime = 0
 }
 
 // 播放启动失败不能静默：iOS 上 play() 会被拒绝或卡住，页面却已写着「当前线路可播放」，用户看到的就是黑屏。
@@ -1577,7 +1571,7 @@ function startPlayback() {
   p.catch((error) => {
     if (generation !== playGeneration || attempt !== playbackAttemptId || error?.name === 'AbortError') return
     if (error?.name !== 'NotAllowedError') {
-      failedProviders.add(currentProvider)
+      failedLines.add(currentLineKey || `${currentProvider}|`)
       if (!playbackAttemptResultSent) {
         playbackAttemptResultSent = true
         void reportPlaybackResult(show.id, currentProvider, false, activeAttemptId)
