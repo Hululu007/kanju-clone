@@ -7,7 +7,7 @@ import worker from '../worker/api/src/index.js'
 const schema = readFileSync(new URL('../worker/api/schema.sql', import.meta.url), 'utf8')
 const segments = [720, 1080].map((height) => readFileSync(new URL(`./fixtures/avc-${height}.ts`, import.meta.url)))
 
-function fixture(t, { media = 'hls', sameContent = false } = {}) {
+function fixture(t, { media = 'hls', sameContent = false, lines = ['bad', 'good'] } = {}) {
   const fetchLog = []
   const sqlite = new DatabaseSync(':memory:')
   sqlite.exec(schema)
@@ -26,10 +26,12 @@ function fixture(t, { media = 'hls', sameContent = false } = {}) {
     const show = url.pathname.match(/resolve\/(.+)-([12])$/)
     if (show) {
       const [, id, ep] = show
-      return Response.json({ current_episode: { episode_number: Number(ep) }, line_options: [
-        { provider_id: 'bad', url: `https://media.example/${id}/broken.m3u8` },
-        { provider_id: 'good', url: `https://media.example/${id}/${sameContent ? 1 : ep}.${media === 'mp4' ? 'mp4' : 'm3u8'}` },
-      ] })
+      const lineUrl = (provider) => {
+        if (provider === 'bad') return `https://media.example/${id}/broken.m3u8`
+        if (provider === 'good') return `https://media.example/${id}/${sameContent ? 1 : ep}.${media === 'mp4' ? 'mp4' : 'm3u8'}`
+        return `https://media.example/${id}/${provider}.${media === 'mp4' ? 'mp4' : 'm3u8'}`
+      }
+      return Response.json({ current_episode: { episode_number: Number(ep) }, line_options: lines.map((provider) => ({ provider_id: provider, url: lineUrl(provider) })) })
     }
     if (url.hostname !== 'media.example' || url.pathname.includes('broken')) return new Response(null, { status: 404 })
     const second = /2\.(m3u8|ts)$/.test(url.pathname)
@@ -166,4 +168,16 @@ test('probe failures do not contribute to browser playback history', async (t) =
   assert.equal(bad.status, 'dead')
   const lines = await (await request('/api/lines?show=stats')).json()
   assert.equal(lines.options.find(({ provider }) => provider === 'bad').successRate, null)
+})
+
+test('默认线路探测成功后不再为换源列表等其余候选（长嵌套请求会被平台按 CPU 上限掐断）', async (t) => {
+  const { seed, request, fetchLog } = fixture(t, { lines: ['good', 'bad', 'spare'] })
+  seed('lead-fast')
+  const play = await (await request('/api/play?show=lead-fast&ep=0')).json()
+  assert.equal(play.provider, 'good')
+  assert.ok(!fetchLog.includes('/lead-fast/broken.m3u8'), `已成功就不该再探后面的死线：${fetchLog.join(',')}`)
+  assert.ok(!fetchLog.includes('/lead-fast/spare.m3u8'), `已成功就不该再探后面的候选：${fetchLog.join(',')}`)
+  const spare = play.options.find(({ provider }) => provider === 'spare')
+  assert.ok(spare, '没探过的线路仍要出现在换源列表里')
+  assert.equal(spare.status, 'unknown', '没探过不等于死线')
 })

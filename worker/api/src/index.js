@@ -504,7 +504,19 @@ async function playUrl(env, showId, idx, requestedLine = '', targetQuality = 0, 
   // 不再固定只探前 8 条：前 8 条全失败时第 9 条可能正好能播。
   // 真正的上限是子请求预算；预算用完的线路由 probeOne 标成「未探测」，绝不标 dead。
   const allCandidates = candidates.filter(Boolean)
-  let probed = await probeCandidates(allCandidates, probeOne, { concurrency: 4, timeoutMs: 7000, budgetMs: 20000 })
+  // 先单独探第一条（原站默认线路，或用户手动选的线路）。它一旦可播就立刻返回，
+  // 不必再等其余候选里最慢的那次探测：正式站是 zhuiju-web 经 service binding 嵌套调用，
+  // 十几秒的重请求会被平台按 CPU 上限终止（2026-11-22 事故），而未探测的线路记为
+  // 「预算用尽/状态未知」，绝不标成死线。第一条不成功时，其余候选照旧并发全量探测。
+  const lead = allCandidates[0]
+  const leadProbe = lead ? (await probeCandidates([lead], probeOne, { concurrency: 1, timeoutMs: 6000, budgetMs: 6500 }))[0] : null
+  let probed
+  if (leadProbe?.ok) {
+    probed = [leadProbe, ...allCandidates.slice(1).map((line) => ({ line, ok: false, deferred: true, error: 'probe_budget_exceeded' }))]
+  } else {
+    const rest = await probeCandidates(allCandidates.slice(1), probeOne, { concurrency: 4, timeoutMs: 7000, budgetMs: 20000 })
+    probed = leadProbe ? [leadProbe, ...rest] : rest
+  }
 
   // 原站默认线路只有「超时/预算不足」这类软失败时单独再试一次：
   // 并发探测会把它挤到超时，导致默认线路被换成别的线路，与原站不一致。
