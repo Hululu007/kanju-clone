@@ -1794,7 +1794,7 @@
   "playEpisode": "",
   "playSpan": 0,
   "seekJump": "no",
-  "playerError": "no",
+  "playerError": "yes",
   "attempts": 1,
   "status": "库缺集",
   "reason": "库内没有原站默认集「第20261117集」，不补写、不用别的集冒充"

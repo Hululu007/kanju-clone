@@ -26,6 +26,21 @@ test('seek 跳转不算连续推进（整段最长连续不足）', () => {
   assert.equal(v.anyJump, true)
 })
 
+test('回退 seek 也算跳变，不算连续推进', () => {
+  const samples = [1, 2, 3, 4, 5, 4, 5, 6, 7, 8, 9].map((t) => sample(t))
+  const v = isContinuousPlayback(samples)
+  assert.equal(v.anyJump, true)
+  assert.equal(v.ok, false)
+})
+
+test('媒体错误码 video.err 不算通过', () => {
+  const samples = [0, 1.5, 3.1, 4.6, 6.2, 7.7].map((t) => sample(t))
+  samples[3].video.err = 4
+  const v = isContinuousPlayback(samples)
+  assert.equal(v.hasError, true)
+  assert.equal(v.ok, false)
+})
+
 test('只有起播、时间不推进不算通过', () => {
   const samples = [1.5, 1.5, 1.6, 1.6, 1.7, 1.7].map((t) => sample(t))
   assert.equal(isContinuousPlayback(samples).ok, false)

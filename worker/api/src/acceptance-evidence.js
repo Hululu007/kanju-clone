@@ -22,8 +22,8 @@ export function extractOriginEpisode(preview) {
 // 判据（全部满足才算通过）：
 //  - 存在一段 >=5 个有效解码帧，currentTime 单调递增、相邻增量 (0, maxStep]；
 //  - 该段跨度 >= minSpan 秒（不是起播瞬间/单帧）；
-//  - 全程没有 seek 跳变（相邻增量 > maxStep）；
-//  - 全程播放器状态无失败/错误文案；
+//  - 全程没有 seek 跳变（正向相邻增量 > maxStep，或负向回退超过采样抖动 -0.05s）；
+//  - 全程播放器状态无失败/错误文案，且无媒体错误码（video.err）；
 //  - 线路与集保持稳定，且命中目标（给出 target 时）。
 const FAIL_TEXT = /失败|错误|没有.*可用线路|NotSupportedError|无法播放|请.*重试|请.*选择其他线路/
 export function isContinuousPlayback(samples, opts = {}) {
@@ -42,8 +42,11 @@ export function isContinuousPlayback(samples, opts = {}) {
   }
   if (cur.length > best.length) best = cur
   const span = best.length >= 2 ? +(best[best.length - 1].video.t - best[0].video.t).toFixed(2) : 0
-  const anyJump = valid.length >= 2 && valid.slice(1).some((s, i) => s.video.t - valid[i].video.t > maxStep)
-  const hasError = list.some((s) => FAIL_TEXT.test(String(s?.status || '')))
+  const anyJump = valid.length >= 2 && valid.slice(1).some((s, i) => {
+    const d = s.video.t - valid[i].video.t
+    return d > maxStep || d < -0.05
+  })
+  const hasError = list.some((s) => FAIL_TEXT.test(String(s?.status || '')) || Number(s?.video?.err) > 0)
   const lines = [...new Set(valid.map((s) => s.lineOn || s.line).filter(Boolean))]
   const episodes = [...new Set(valid.map((s) => s.episodeOn || s.episode).filter(Boolean))]
   const ok = !anyJump
